@@ -634,7 +634,18 @@ fn onPlayTick() void {
         ed.say("конец");
     }
     showFrame();
-    refresh();
+    // Во время игры меняются только кадр и указатель. Перерисовывать ради
+    // них всё окно значит тридцать раз в секунду закрашивать и место под
+    // кнопками — они мигали именно поэтому.
+    refreshStage();
+}
+
+/// Перерисовать только кадр и таймлайн, не трогая панель кнопок.
+fn refreshStage() void {
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) == 0) return refresh();
+    rect.top = toolbar_h;
+    _ = c.InvalidateRect(ed.hwnd, &rect, 0);
 }
 
 fn refresh() void {
@@ -1788,6 +1799,19 @@ fn savePreviewHeight() void {
 
 /// Открыть окно редактора. `path` — файл, который положить сразу.
 pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
+    return runInner(allocator, path, null);
+}
+
+/// Собрать окно редактора, замерить раскладку и закрыть, не показывая.
+///
+/// Тот же путь, что и у настоящего запуска: те же кнопки, тот же порядок.
+pub fn checkLayout(allocator: std.mem.Allocator) !ui.Layout {
+    var out = ui.Layout{};
+    try runInner(allocator, null, &out);
+    return out;
+}
+
+fn runInner(allocator: std.mem.Allocator, path: ?[]const u8, report: ?*ui.Layout) !void {
     if (builtin.os.tag != .windows) return error.Unsupported;
     _ = c.SetProcessDPIAware();
     // Консоль редактору не нужна: она висела пустым чёрным окном рядом.
@@ -1828,7 +1852,10 @@ pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
         0,
         ui.wide("ZigRecEdit"),
         @ptrCast(&title_w),
-        c.WS_OVERLAPPEDWINDOW,
+        // WS_CLIPCHILDREN: окно не рисует там, где стоят его кнопки.
+        // Без этого фон панели ложится поверх них, и они перерисовываются
+        // следом — то самое мигание.
+        c.WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN,
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         1000,
@@ -1838,6 +1865,14 @@ pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
         hinst,
         null,
     ) orelse return error.WindowFailed;
+
+    if (report) |r| {
+        // Окно собрано: кнопки созданы в WM_CREATE. Мерим и уходим,
+        // не показывая его и не заводя цикл сообщений.
+        r.* = ui.measureLayout(hwnd);
+        _ = c.DestroyWindow(hwnd);
+        return;
+    }
 
     _ = c.ShowWindow(hwnd, c.SW_SHOW);
     _ = c.UpdateWindow(hwnd);

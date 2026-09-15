@@ -907,30 +907,48 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
 /// настоящее окно, не показывая его, и проходит по всем его кнопкам:
 /// вылезло ли что-нибудь за рабочую часть.
 fn uiSmoke(allocator: std.mem.Allocator, w: anytype) !u8 {
-    const layout = zigrec.ui.checkLayout(allocator) catch |err| {
-        try w.print("[ui] ПРОВАЛ: окно не собралось: {s}\n", .{@errorName(err)});
-        return 1;
+    var bad: u8 = 0;
+    if (try checkWindow(w, "запись", zigrec.ui.checkLayout(allocator))) bad = 1;
+    if (try checkWindow(w, "редактор", zigrec.editor.checkLayout(allocator))) bad = 1;
+    if (bad != 0) return 1;
+    try w.writeAll("[ui] ОБА ОКНА В ПОРЯДКЕ\n");
+    return 0;
+}
+
+/// Разобрать замер одного окна. Возвращает, было ли плохо.
+fn checkWindow(w: anytype, name: []const u8, got: anyerror!zigrec.ui.Layout) !bool {
+    const layout = got catch |err| {
+        try w.print("[ui] ПРОВАЛ: окно «{s}» не собралось: {s}\n", .{ name, @errorName(err) });
+        return true;
     };
 
-    try w.print("[ui] рабочая часть {d}x{d}, органов управления {d}\n", .{
+    try w.print("[ui] {s}: рабочая часть {d}x{d}, органов управления {d}\n", .{
+        name,
         layout.client_w,
         layout.client_h,
         layout.controls,
     });
     if (layout.controls == 0) {
-        try w.writeAll("[ui] ПРОВАЛ: в окне не оказалось ни одной кнопки\n");
-        return 1;
+        try w.print("[ui] ПРОВАЛ: в окне «{s}» не оказалось ни одной кнопки\n", .{name});
+        return true;
     }
-    if (!layout.ok()) {
-        try w.print("[ui] ПРОВАЛ: не поместилось {d}; вниз на {d}, вправо на {d} точек\n", .{
+    if (layout.outside > 0) {
+        try w.print("[ui] ПРОВАЛ: в окне «{s}» не поместилось {d}; вниз на {d}, вправо на {d} точек\n", .{
+            name,
             layout.outside,
             layout.over_bottom,
             layout.over_right,
         });
-        return 1;
+        return true;
     }
-    try w.writeAll("[ui] ВСЁ ПОМЕСТИЛОСЬ\n");
-    return 0;
+    if (!layout.clips_children) {
+        // Без этого признака фон окна ложится поверх кнопок, и они
+        // перерисовываются следом: на обновлении по таймеру это мигание.
+        try w.print("[ui] ПРОВАЛ: окно «{s}» рисует под своими кнопками — они будут мигать\n", .{name});
+        return true;
+    }
+    try w.print("[ui] {s}: всё поместилось, под кнопками не рисуем\n", .{name});
+    return false;
 }
 
 /// Самопроверка сочетания клавиш.

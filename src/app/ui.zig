@@ -561,7 +561,11 @@ fn updateStatus() void {
 /// правой кнопки — менять его надо, когда двигаются они.
 const client_w: c_long = 524;
 const client_h: c_long = 482;
-const main_style: c.DWORD = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_MINIMIZEBOX;
+/// WS_CLIPCHILDREN: окно не рисует там, где стоят его кнопки. Без этого
+/// фон ложится поверх них, и они перерисовываются следом — а на окне,
+/// которое обновляется по таймеру, это видно как мигание.
+const main_style: c.DWORD = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU |
+    c.WS_MINIMIZEBOX | c.WS_CLIPCHILDREN;
 
 /// GWL_STYLE: признаки окна.
 const gwl_style: c_int = -16;
@@ -581,9 +585,15 @@ pub const Layout = struct {
     over_bottom: i32 = 0,
     /// То же вправо.
     over_right: i32 = 0,
+    /// Стоит ли у окна признак «не рисовать под своими кнопками».
+    ///
+    /// Без него фон окна ложится поверх кнопок, и они перерисовываются
+    /// следом. На окне, которое обновляется по таймеру, это видно как
+    /// мигание — и заметить это можно только глазами и только в движении.
+    clips_children: bool = false,
 
     pub fn ok(self: Layout) bool {
-        return self.outside == 0;
+        return self.outside == 0 and self.clips_children;
     }
 };
 
@@ -594,6 +604,8 @@ pub fn measureLayout(hwnd: c.HWND) Layout {
     if (c.GetClientRect(hwnd, &client) == 0) return out;
     out.client_w = client.right;
     out.client_h = client.bottom;
+
+    out.clips_children = c.GetWindowLongPtrW(hwnd, gwl_style) & c.WS_CLIPCHILDREN != 0;
 
     var child = c.GetWindow(hwnd, c.GW_CHILD);
     while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) {
