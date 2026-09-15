@@ -18,6 +18,7 @@ const waveform = @import("../file/waveform.zig");
 const project_file = @import("../file/project_file.zig");
 const pack = @import("../file/project_pack.zig");
 const player_mod = @import("../file/player.zig");
+const frames = @import("../file/frames.zig");
 const settings_mod = @import("../app/settings.zig");
 const paths = @import("../app/paths.zig");
 const recent_mod = @import("../app/recent.zig");
@@ -102,6 +103,8 @@ const wm_dropfiles = 0x0233;
 
 /// Волна посчиталась: пора перерисовать дорожку.
 const wm_wave_ready = c.WM_APP + 3;
+/// Кадр готов: пришёл из потока декодера.
+const wm_frame_ready = c.WM_APP + 4;
 
 /// Держат ли Alt — «сделать врозь, не трогая связку».
 ///
@@ -117,7 +120,7 @@ fn apart() bool {
 const cs_dblclks: c.UINT = 0x0008;
 
 /// Что человек тянет мышью прямо сейчас.
-const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter };
+const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll };
 
 const Editor = struct {
     allocator: std.mem.Allocator,
@@ -151,9 +154,8 @@ const Editor = struct {
     /// что у исходников проекта.
     waves: [timeline.max_sources]waveform.Envelope = @splat(.{}),
 
-    /// Открытый проигрыватель и чей исходник он показывает.
-    player: ?player_mod.Player = null,
-    player_source: u16 = 0,
+    /// Служба кадров. Декодер живёт в стороне, окно только просит.
+    frames: frames.Service = undefined,
     /// Идёт ли воспроизведение.
     playing: bool = false,
     /// Когда был предыдущий такт — чтобы время шло по часам, а не по тактам.
@@ -243,7 +245,19 @@ fn drawText(dc: c.HDC, x: i32, y: i32, s: []const u8, color: c.COLORREF) void {
 
 // ---------------------------------------------------------------- рисование
 
+/// Не дать окну кадра съесть таймлайн.
+///
+/// Высота кадра запомнена с прошлого раза, а окно с тех пор могли сделать
+/// ниже. Тогда на дорожки не остаётся ничего, и человек видит пустоту
+/// вместо своей работы — а понять, что случилось, нечем.
+fn keepRoomForTracks(height: i32) void {
+    const room = height - toolbar_h - status_h;
+    const fits = view_mod.previewHeightAt(toolbar_h + preview_h, toolbar_h, room);
+    if (fits != preview_h) preview_h = fits;
+}
+
 fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
+    keepRoomForTracks(height);
     solid(dc, .{ .left = 0, .top = 0, .right = width, .bottom = height }, 0x00FFFFFF);
     // Полоса под кнопками: фон окна мы рисуем сами, иначе под ними останется
     // мусор от предыдущего кадра.
@@ -263,7 +277,7 @@ fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
 
     // Ниже — таймлайн со своим началом координат. Так арифметика вида
     // остаётся той, что проверена тестами, и считает от нуля.
-    const lane_height = height - toolbar_h - preview_h - view_mod.splitter_h - status_h;
+    const lane_height = height - toolbar_h - preview_h - view_mod.splitter_h - status_h - view_mod.bar_h;
     if (lane_height <= 0) return;
     _ = c.SetViewportOrgEx(dc, 0, toolbar_h + preview_h + view_mod.splitter_h, null);
     defer _ = c.SetViewportOrgEx(dc, 0, 0, null);
@@ -272,7 +286,56 @@ fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
     drawTracks(dc, width, lane_height);
     drawEmptyHint(dc, width, lane_height);
     drawPlayhead(dc, lane_height);
+    drawScrollBar(dc, width, lane_height);
     _ = hwnd;
+}
+
+/// Ползунок прокрутки под таймлайном.
+///
+/// На часовой записи это единственный способ понять, где ты: в окно
+/// помещается десять минут, и по ним не видно ни начала, ни конца.
+fn drawScrollBar(dc: c.HDC, width: i32, lane_height: i32) void {
+    const top = lane_height;
+    const span = width - view_mod.header_w;
+    if (span <= 0) return;
+
+    solid(dc, .{
+        .left = 0,
+        .top = top,
+        .right = width,
+        .bottom = top + view_mod.bar_h,
+    }, 0x00EFEFEF);
+    line(dc, view_mod.header_w, top, width, top, col_lane_line, 1);
+
+    const t = scrollThumb(width);
+    solid(dc, .{
+        .left = view_mod.header_w + t.left,
+        .top = top + 3,
+        .right = view_mod.header_w + t.right(),
+        .bottom = top + view_mod.bar_h - 3,
+    }, 0x00B0B0B0);
+}
+
+/// Сколько времени помещается в окно.
+fn visibleNs(width: i32) u64 {
+    const span = @max(width - view_mod.header_w, 1);
+    return @as(u64, @intCast(span)) * ed.view.ns_per_px;
+}
+
+/// Вся длина, по которой есть смысл ездить.
+fn totalNs() u64 {
+    return @max(ed.project.durationNs(), 1);
+}
+
+fn scrollThumb(width: i32) view_mod.Thumb {
+    const span = width - view_mod.header_w;
+    return view_mod.thumbFor(span, ed.view.at_ns, visibleNs(width), totalNs());
+}
+
+/// Попала ли мышь на полосу с ползунком.
+fn onScrollBar(y: i32, height: i32) bool {
+    const top = height - status_h - view_mod.bar_h;
+    return y >= top and y < top + view_mod.bar_h;
 }
 
 /// Окно предпросмотра: кадр, который сейчас под указателем.
@@ -290,48 +353,62 @@ fn drawPreview(dc: c.HDC, width: i32) void {
     const stamp = view_mod.timeLabel(&time_buf, ed.playhead_ns, std.time.ns_per_ms * 100);
     drawText(dc, 10, bottom - 22, stamp, 0x00C0C0C0);
 
-    const p = &(ed.player orelse {
-        drawCentered(dc, width, top, bottom, "здесь будет кадр: поставьте указатель на клип", 0x00808080);
-        return;
-    });
-    if (!p.ready) {
-        drawCentered(dc, width, top, bottom, "кадр не читается", 0x008080C0);
-        return;
-    }
+    // Кадр берём у службы под её замком: иначе можно нарисовать
+    // наполовину переписанный.
+    const Paint = struct {
+        dc: c.HDC,
+        width: i32,
+        top: i32,
 
-    const box_h = preview_h - 28;
-    const fit = player_mod.fitInto(p.width, p.height, width, box_h);
-    if (fit.w <= 0 or fit.h <= 0) return;
+        fn draw(self: @This(), pixels: []const u8, w: u32, h: u32, at_ns: u64) void {
+            _ = at_ns;
+            const box_h = preview_h - 28;
+            const fit = player_mod.fitInto(w, h, self.width, box_h);
+            if (fit.w <= 0 or fit.h <= 0) return;
 
-    // Направление строк берём у самого кадра: положительная высота —
-    // строки снизу вверх, отрицательная — сверху вниз.
-    var info = std.mem.zeroes(c.BITMAPINFO);
-    info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = @intCast(p.width);
-    info.bmiHeader.biHeight = if (p.bottom_up)
-        @as(i32, @intCast(p.height))
-    else
-        -@as(i32, @intCast(p.height));
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = c.BI_RGB;
+            // Строки у нас всегда сверху вниз: их так укладывает плеер.
+            // Отрицательная высота и означает это направление.
+            var info = std.mem.zeroes(c.BITMAPINFO);
+            info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+            info.bmiHeader.biWidth = @intCast(w);
+            info.bmiHeader.biHeight = -@as(i32, @intCast(h));
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = c.BI_RGB;
 
-    _ = c.SetStretchBltMode(dc, c.HALFTONE);
-    _ = c.StretchDIBits(
-        dc,
-        fit.x,
-        top + fit.y,
-        fit.w,
-        fit.h,
-        0,
-        0,
-        @intCast(p.width),
-        @intCast(p.height),
-        p.pixels.ptr,
-        &info,
-        c.DIB_RGB_COLORS,
-        c.SRCCOPY,
+            _ = c.SetStretchBltMode(self.dc, c.HALFTONE);
+            _ = c.StretchDIBits(
+                self.dc,
+                fit.x,
+                self.top + fit.y,
+                fit.w,
+                fit.h,
+                0,
+                0,
+                @intCast(w),
+                @intCast(h),
+                pixels.ptr,
+                &info,
+                c.DIB_RGB_COLORS,
+                c.SRCCOPY,
+            );
+        }
+    };
+
+    const painted = ed.frames.withFrame(
+        Paint,
+        .{ .dc = dc, .width = width, .top = top },
+        Paint.draw,
     );
+    if (!painted) {
+        const hint = if (ed.frames.trouble != null)
+            "кадр не читается"
+        else if (clipUnderPlayhead() != null)
+            "кадр готовится…"
+        else
+            "здесь будет кадр: поставьте указатель на клип";
+        drawCentered(dc, width, top, bottom, hint, 0x00808080);
+    }
 }
 
 /// Полоса-граница между кадром и таймлайном.
@@ -564,32 +641,28 @@ fn drawPlayhead(dc: c.HDC, height: i32) void {
 /// Клип помнит, из какого места файла он взят, поэтому время в файле —
 /// это не время на дорожке: надо перевести одно в другое, иначе после
 /// обрезки картинка поедет.
+/// Попросить кадр под указателем.
+///
+/// Именно попросить: раскодирует его служба в своём потоке, а окно
+/// возвращается к своим делам сразу. Прежний кадр остаётся на экране,
+/// пока не готов новый.
 fn showFrame() void {
-    const found = clipUnderPlayhead() orelse {
-        if (ed.player) |*p| {
-            p.close();
-            ed.player = null;
-        }
-        return;
-    };
+    const found = clipUnderPlayhead() orelse return;
     const clip = found.clip;
 
-    if (ed.player == null or ed.player_source != clip.source) {
-        if (ed.player) |*p| p.close();
-        ed.player = null;
-
-        const sources = ed.project.sourceList();
-        if (clip.source >= sources.len) return;
-        ed.player = player_mod.Player.open(ed.allocator, sources[clip.source].fullPath()) catch {
-            ed.say("кадр из этого файла не читается: в нём нет картинки");
-            return;
-        };
-        ed.player_source = clip.source;
-    }
+    const sources = ed.project.sourceList();
+    if (clip.source >= sources.len) return;
 
     // Время на дорожке → время внутри файла.
     const inside = clip.in_ns + (ed.playhead_ns -| clip.at_ns);
-    if (ed.player) |*p| p.showAt(inside) catch {};
+    ed.frames.want(sources[clip.source].fullPath(), inside);
+}
+
+/// Кадр готов — сказать окну. Зовётся из чужого потока, поэтому только
+/// посылаем сообщение: трогать окно из другого потока нельзя.
+fn frameArrived(userdata: ?*anyopaque) void {
+    _ = userdata;
+    if (ed.hwnd != null) _ = c.PostMessageW(ed.hwnd, wm_frame_ready, 0, 0);
 }
 
 const FoundClip = struct { track: usize, clip: timeline.Clip };
@@ -1308,6 +1381,25 @@ fn laneAreaTop() i32 {
 }
 
 fn onDown(x: i32, y: i32) void {
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) != 0 and onScrollBar(y, rect.bottom)) {
+        const span = rect.right - view_mod.header_w;
+        const t = scrollThumb(rect.right);
+        const at = x - view_mod.header_w;
+        if (at >= t.left and at < t.right()) {
+            // Взялись за сам ползунок — тянем его.
+            ed.drag = .scroll;
+            ed.drag_grab_ns = @intCast(@max(at - t.left, 0));
+            _ = c.SetCapture(ed.hwnd);
+        } else {
+            // Щёлкнули мимо — листаем на страницу в ту сторону.
+            ed.view.at_ns = view_mod.pageBy(ed.view.at_ns, visibleNs(rect.right), totalNs(), at > t.left);
+            _ = span;
+            refreshStage();
+        }
+        return;
+    }
+
     if (view_mod.onSplitter(y, toolbar_h, preview_h)) {
         ed.drag = .splitter;
         _ = c.SetCapture(ed.hwnd);
@@ -1382,6 +1474,19 @@ fn onMove(x: i32, y: i32) void {
         moveSplitter(y);
         return;
     }
+    if (ed.drag == .scroll) {
+        var rect: c.RECT = undefined;
+        if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+        ed.view.at_ns = view_mod.scrollTo(
+            rect.right - view_mod.header_w,
+            x - view_mod.header_w,
+            @intCast(ed.drag_grab_ns),
+            visibleNs(rect.right),
+            totalNs(),
+        );
+        refreshStage();
+        return;
+    }
 
     const when = ed.view.xToTime(x);
     switch (ed.drag) {
@@ -1427,7 +1532,7 @@ fn onMove(x: i32, y: i32) void {
             ed.drag_started = true;
             refresh();
         },
-        .splitter, .none => {},
+        .splitter, .scroll, .none => {},
     }
 }
 
@@ -1514,11 +1619,39 @@ fn onDrop(drop: usize) void {
 fn onWheel(delta: i16, screen_x: i32) void {
     var point = c.POINT{ .x = screen_x, .y = 0 };
     _ = c.ScreenToClient(ed.hwnd, &point);
+
+    // С Shift колесо везёт вбок — так листают везде, где есть что листать
+    // вширь. Без Shift оно по-прежнему меняет масштаб: к этому уже привыкли.
+    if (c.GetKeyState(c.VK_SHIFT) < 0) {
+        var rect: c.RECT = undefined;
+        if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+        // Один поворот колеса — треть видимого: меньше незаметно,
+        // больше теряешь место, на которое смотрел.
+        const step = @divTrunc(rect.right - view_mod.header_w, 3);
+        ed.view.at_ns = view_mod.scrollBy(
+            ed.view.at_ns,
+            ed.view.ns_per_px,
+            if (delta > 0) -step else step,
+            visibleNs(rect.right),
+            totalNs(),
+        );
+        refreshStage();
+        return;
+    }
+
     ed.view = ed.view.zoomAt(point.x, delta > 0);
     refresh();
 }
 
 // ----------------------------------------------------------- снимок кадра
+
+/// Копия кадра, взятая у службы.
+const Shot = struct {
+    pixels: []u8,
+    width: u32,
+    height: u32,
+    at_ns: u64,
+};
 
 /// Сохранить то, что сейчас в окне кадра, отдельной картинкой.
 ///
@@ -1526,16 +1659,28 @@ fn onWheel(delta: i16, screen_x: i32) void {
 /// и искать его человек пойдёт туда же. Имя — по времени кадра: два снимка
 /// подряд не затрут друг друга, а по имени видно, откуда кадр.
 fn saveFrame() void {
-    const p = &(ed.player orelse {
-        ed.say("снимать нечего: поставьте указатель на клип");
+    // Берём копию кадра под замком: пока мы его сжимаем, служба может
+    // положить следующий.
+    var shot: ?Shot = null;
+    const Grab = struct {
+        out: *?Shot,
+        allocator: std.mem.Allocator,
+
+        fn grab(self: @This(), pixels: []const u8, w: u32, h: u32, at_ns: u64) void {
+            const copy = self.allocator.alloc(u8, pixels.len) catch return;
+            @memcpy(copy, pixels);
+            self.out.* = .{ .pixels = copy, .width = w, .height = h, .at_ns = at_ns };
+        }
+    };
+    _ = ed.frames.withFrame(Grab, .{ .out = &shot, .allocator = ed.allocator }, Grab.grab);
+
+    const frame = shot orelse {
+        ed.say("снимать нечего: кадра пока нет");
         refresh();
         return;
-    });
-    if (!p.ready) {
-        ed.say("снимать нечего: кадр не прочитался");
-        refresh();
-        return;
-    }
+    };
+    defer ed.allocator.free(frame.pixels);
+    const p = &frame;
 
     const dir = ui.defaultDir(ed.allocator) catch {
         ed.say("не нашлась папка записей — снимок не сохранён");
@@ -1961,6 +2106,11 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             refresh();
             return 0;
         },
+        wm_frame_ready => {
+            // Перерисовываем только кадр: панель кнопок при этом не меняется.
+            refreshStage();
+            return 0;
+        },
         c.WM_LBUTTONDBLCLK => {
             onDoubleClick(loWord(lp), hiWord(lp));
             return 0;
@@ -2015,8 +2165,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
         },
         c.WM_DESTROY => {
             if (ed.name_box != null) finishRename(false);
-            if (ed.player) |*p| p.close();
-            ed.player = null;
+            ed.frames.stop();
             c.PostQuitMessage(0);
             return 0;
         },
@@ -2112,6 +2261,7 @@ fn runInner(allocator: std.mem.Allocator, path: ?[]const u8, report: ?*ui.Layout
     project.* = .{};
 
     ed = .{ .allocator = allocator, .project = project };
+    ed.frames = .{ .allocator = allocator };
     // Верх таймлайна опускаем под панель кнопок.
     ed.view = .{};
     // Высота окна кадра — та, на которой её оставили в прошлый раз.
@@ -2163,6 +2313,11 @@ fn runInner(allocator: std.mem.Allocator, path: ?[]const u8, report: ?*ui.Layout
         _ = c.DestroyWindow(hwnd);
         return;
     }
+
+    // Декодер поднимаем после окна: ему есть куда стучаться только теперь.
+    ed.frames.start(frameArrived, null) catch {
+        ed.say("декодер не завёлся: кадры показываться не будут");
+    };
 
     _ = c.ShowWindow(hwnd, c.SW_SHOW);
     _ = c.UpdateWindow(hwnd);

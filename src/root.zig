@@ -50,6 +50,7 @@ pub const zip = @import("file/zip.zig");
 pub const project_pack = @import("file/project_pack.zig");
 pub const waveform = @import("file/waveform.zig");
 pub const player = @import("file/player.zig");
+pub const frames = @import("file/frames.zig");
 pub const png = @import("file/png.zig");
 pub const gif = @import("file/gif.zig");
 pub const gif_write = @import("file/gif_write.zig");

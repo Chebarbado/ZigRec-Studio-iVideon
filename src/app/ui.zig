@@ -1581,15 +1581,24 @@ fn openOutputDir() void {
 }
 
 fn showAbout(hwnd: c.HWND) void {
-    var buf: [512]u8 = undefined;
+    var buf: [1024]u8 = undefined;
     const text = std.fmt.bufPrint(&buf,
         \\Zig-Rec Studio {s} ({s})
         \\
-        \\Запись экрана в mp4, который открывается везде.
-        \\Один файл, без установки и без зависимостей.
+        \\Запись экрана в mp4, который открывается везде, и в GIF —
+        \\короткой петлёй для письма. Со звуком с микрофона, с областью,
+        \\обведённой мышью, и с горячей клавишей: {s}.
         \\
+        \\Редактор дорожек: резка, перестановка, обрезка краёв, отмена.
+        \\Видео и звук одного файла ходят вместе, пока их не развяжут.
+        \\Проект сохраняется в .zigrec — при желании вместе с исходниками.
+        \\
+        \\Читает mp4, mov, avi, gif, wav, mp3, ogg, flac, midi.
+        \\Сервер MCP даёт Claude Code управлять записью.
+        \\
+        \\Один файл, без установки и без зависимостей.
         \\Исходники: github.com/j0k/ZigRec-Studio
-    , .{ version.VERSION, version.VERSION_DATE }) catch "Zig-Rec Studio";
+    , .{ version.VERSION, version.VERSION_DATE, app.prefs.areaKey() }) catch "Zig-Rec Studio";
 
     var wide_buf: [1024]u16 = undefined;
     const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch return;

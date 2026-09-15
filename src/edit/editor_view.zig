@@ -25,6 +25,80 @@ pub const name_line_h: i32 = 24;
 /// Насколько близко к краю клипа надо ткнуть, чтобы взяться за край.
 pub const edge_grab: i32 = 6;
 
+/// Высота полосы с ползунком под таймлайном.
+pub const bar_h: i32 = 14;
+/// Короче этого ползунок не делаем: за точку не ухватиться.
+pub const min_thumb: i32 = 24;
+
+/// Где стоит ползунок и какой он длины.
+pub const Thumb = struct {
+    left: i32 = 0,
+    width: i32 = 0,
+
+    pub fn right(self: Thumb) i32 {
+        return self.left + self.width;
+    }
+};
+
+/// Посчитать ползунок прокрутки.
+///
+/// Длина ползунка говорит, какая часть записи видна, положение — где ты.
+/// На часовой записи это единственный способ понять, где ты находишься:
+/// в окно помещается десять минут, и по ним не видно ни начала, ни конца.
+///
+/// `span` — ширина полосы под ползунок, `visible_ns` — сколько времени
+/// помещается в окно, `total_ns` — вся длина записи.
+pub fn thumbFor(span: i32, at_ns: u64, visible_ns: u64, total_ns: u64) Thumb {
+    if (span <= 0) return .{};
+    // Видно всё — ползунок во всю полосу. Это честно говорит «дальше ничего».
+    if (total_ns == 0 or visible_ns >= total_ns) return .{ .left = 0, .width = span };
+
+    const shown = @as(u64, @intCast(span)) * visible_ns / total_ns;
+    const width = std.math.clamp(@as(i32, @intCast(shown)), min_thumb, span);
+
+    const room = span - width;
+    const scroll_span = total_ns - visible_ns;
+    const start = @min(at_ns, scroll_span);
+    const left = if (scroll_span == 0)
+        0
+    else
+        @as(i32, @intCast(@as(u64, @intCast(room)) * start / scroll_span));
+    return .{ .left = std.math.clamp(left, 0, room), .width = width };
+}
+
+/// Куда переводит ползунок, поставленный в точку `x`.
+///
+/// `grab` — за какое место ползунка взялись, чтобы он не прыгал под курсор
+/// своим левым краем.
+pub fn scrollTo(span: i32, x: i32, grab: i32, visible_ns: u64, total_ns: u64) u64 {
+    if (span <= 0 or total_ns == 0 or visible_ns >= total_ns) return 0;
+    const thumb = thumbFor(span, 0, visible_ns, total_ns);
+    const room = span - thumb.width;
+    if (room <= 0) return 0;
+
+    const want = std.math.clamp(x - grab, 0, room);
+    const scroll_span = total_ns - visible_ns;
+    return @as(u64, @intCast(want)) * scroll_span / @as(u64, @intCast(room));
+}
+
+/// Куда уехать, прокрутив на страницу.
+///
+/// Страница — это то, что видно: так листают везде, и глазу есть за что
+/// зацепиться, потому что край прежней страницы становится краем новой.
+pub fn pageBy(at_ns: u64, visible_ns: u64, total_ns: u64, forward: bool) u64 {
+    const limit = total_ns -| visible_ns;
+    if (forward) return @min(at_ns + visible_ns, limit);
+    return at_ns -| visible_ns;
+}
+
+/// Прокрутить вбок на столько-то точек.
+pub fn scrollBy(at_ns: u64, ns_per_px: u64, px: i32, visible_ns: u64, total_ns: u64) u64 {
+    const limit = total_ns -| visible_ns;
+    const shift = @as(u64, @intCast(@abs(px))) * ns_per_px;
+    const out = if (px > 0) at_ns + shift else at_ns -| shift;
+    return @min(out, limit);
+}
+
 /// Толщина полосы между окном кадра и таймлайном. За неё тянут мышью.
 ///
 /// Шесть точек: тоньше — не попасть, толще — полоса начинает выглядеть
@@ -32,9 +106,13 @@ pub const edge_grab: i32 = 6;
 pub const splitter_h: i32 = 6;
 /// Ниже этого окно кадра не сворачивается.
 pub const min_preview_h: i32 = 120;
-/// Ниже этого не сворачивается таймлайн: в сотню точек влезает линейка
-/// и одна полоса дорожки — меньше уже нечего показывать.
-pub const min_timeline_h: i32 = 120;
+/// Ниже этого не сворачивается таймлайн.
+///
+/// Считано, а не взято с потолка: линейка (26) плюс две полосы дорожки
+/// с зазорами (2 x 62) плюс полоса ползунка (14) — это 164. Округляем
+/// до 170. Две дорожки, а не одна: у обычного файла их две — картинка
+/// и звук, — и увидеть только картинку значит не увидеть половины работы.
+pub const min_timeline_h: i32 = 170;
 
 /// Новая высота окна кадра, когда границу тянут мышью в точку `y`.
 ///
@@ -480,4 +558,98 @@ test "за левой колонкой имени нет" {
     const v = View{};
     const got = hitTest(p, v, header_w + 5, v.laneTop(0) + 2);
     try std.testing.expect(got.target != .header_name and got.target != .header);
+}
+
+// ------------------------------------------------------- ползунок
+
+test "видно всё целиком — ползунок во всю полосу" {
+    // И это честно говорит: дальше ничего нет.
+    const t = thumbFor(400, 0, 60 * sec, 60 * sec);
+    try std.testing.expectEqual(@as(i32, 0), t.left);
+    try std.testing.expectEqual(@as(i32, 400), t.width);
+
+    // Видно даже больше, чем есть, — то же самое.
+    const more = thumbFor(400, 0, 120 * sec, 60 * sec);
+    try std.testing.expectEqual(@as(i32, 400), more.width);
+}
+
+test "длина ползунка говорит, какая часть видна" {
+    // Час записи, видно десять минут — ползунок в шестую часть полосы.
+    const t = thumbFor(600, 0, 600 * sec, 3600 * sec);
+    try std.testing.expectEqual(@as(i32, 100), t.width);
+    try std.testing.expectEqual(@as(i32, 0), t.left);
+}
+
+test "ползунок не исчезает в точку на очень длинной записи" {
+    // Иначе за него не ухватиться.
+    const t = thumbFor(600, 0, 1 * sec, 10 * 3600 * sec);
+    try std.testing.expect(t.width >= min_thumb);
+    try std.testing.expect(t.width <= 600);
+}
+
+test "положение ползунка показывает, где ты" {
+    const total = 3600 * sec;
+    const visible = 600 * sec;
+    const span: i32 = 600;
+
+    const start = thumbFor(span, 0, visible, total);
+    try std.testing.expectEqual(@as(i32, 0), start.left);
+
+    // В самом конце ползунок упирается в правый край, но не вылезает.
+    const end = thumbFor(span, total - visible, visible, total);
+    try std.testing.expectEqual(span, end.right());
+
+    // Посередине — посередине.
+    const middle = thumbFor(span, (total - visible) / 2, visible, total);
+    try std.testing.expect(middle.left > start.left and middle.left < end.left);
+}
+
+test "перетаскивание ползунка и обратный счёт сходятся" {
+    const total = 3600 * sec;
+    const visible = 600 * sec;
+    const span: i32 = 600;
+
+    // Куда ни поставь ползунок — пересчёт обратно даёт то же место.
+    for ([_]u64{ 0, 100 * sec, 1500 * sec, total - visible }) |at| {
+        const t = thumbFor(span, at, visible, total);
+        const back = scrollTo(span, t.left, 0, visible, total);
+        const thumb = thumbFor(span, back, visible, total);
+        // Точность ограничена шириной полосы: сходимся до точки.
+        try std.testing.expect(@abs(thumb.left - t.left) <= 1);
+    }
+}
+
+test "прокрутка не уезжает за конец записи" {
+    // Дальше пусто, и смотреть там не на что.
+    const total = 600 * sec;
+    const visible = 100 * sec;
+    try std.testing.expectEqual(total - visible, pageBy(total - visible, visible, total, true));
+    try std.testing.expectEqual(total - visible, pageBy(total, visible, total, true));
+    try std.testing.expectEqual(@as(u64, 0), pageBy(0, visible, total, false));
+    try std.testing.expectEqual(total - visible, scrollBy(0, sec, 10_000, visible, total));
+}
+
+test "страница — это то, что видно" {
+    const total = 600 * sec;
+    const visible = 100 * sec;
+    try std.testing.expectEqual(@as(u64, 100 * sec), pageBy(0, visible, total, true));
+    try std.testing.expectEqual(@as(u64, 0), pageBy(100 * sec, visible, total, false));
+}
+
+test "прокрутка вбок считается в точках" {
+    const total = 600 * sec;
+    const visible = 100 * sec;
+    // Сто точек по десять миллисекунд на точку — это секунда.
+    try std.testing.expectEqual(
+        @as(u64, 1 * sec),
+        scrollBy(0, 10 * std.time.ns_per_ms, 100, visible, total),
+    );
+    // Влево от нуля уехать нельзя.
+    try std.testing.expectEqual(@as(u64, 0), scrollBy(0, 10 * std.time.ns_per_ms, -100, visible, total));
+}
+
+test "пустая полоса не роняет счёт" {
+    try std.testing.expectEqual(@as(i32, 0), thumbFor(0, 0, sec, 10 * sec).width);
+    try std.testing.expectEqual(@as(u64, 0), scrollTo(0, 5, 0, sec, 10 * sec));
+    try std.testing.expectEqual(@as(u64, 0), scrollTo(100, 5, 0, sec, 0));
 }

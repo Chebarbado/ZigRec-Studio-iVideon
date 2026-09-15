@@ -33,6 +33,8 @@ const usage =
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
     \\  zigrec listen-smoke [ПОРТ]
     \\        самопроверка адресов: слушать и достучаться, IPv4 и IPv6
+    \\  zigrec nav-smoke ФАЙЛ [ПРОСЬБ]
+    \\        самопроверка навигации: окно не ждёт декодер
     \\  zigrec open-smoke ФАЙЛ
     \\        самопроверка открытия: быстрый путь и медленный дают одно
     \\  zigrec ui-smoke
@@ -178,6 +180,13 @@ pub fn main(init: std.process.Init) !void {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
     } else if (eq(cmd, "listen-smoke")) {
         code = try listenSmoke(init.io, w, @intCast(argInt(args, 2, 15690)));
+    } else if (eq(cmd, "nav-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к файлу\n");
+            code = 2;
+        } else {
+            code = try navSmoke(init.io, arena, w, args[2], argInt(args, 3, 40));
+        }
     } else if (eq(cmd, "open-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");
@@ -1055,6 +1064,98 @@ fn listenSmoke(io: std.Io, w: anytype, port: u16) !u8 {
 
     if (bad != 0) return 1;
     try w.writeAll("[listen] АДРЕСА РАБОТАЮТ\n");
+    return 0;
+}
+
+/// Ничего не делаем: стенду сообщения не нужны, он смотрит сам.
+fn frameIgnored(userdata: ?*anyopaque) void {
+    _ = userdata;
+}
+
+/// Самопроверка навигации.
+///
+/// Меряем то, ради чего всё затевалось: сколько времени занимает ПРОСЬБА
+/// показать кадр. Это то, на что тратит время окно, и оно должно оставаться
+/// малым независимо от того, сколько длится само раскодирование.
+///
+/// Раньше окно ждало декодер: щелчок по линейке на длинном файле
+/// останавливал его на десятки миллисекунд, а перетаскивание указателя —
+/// на всё время перетаскивания.
+fn navSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, asks: u32) !u8 {
+    var service = zigrec.frames.Service{ .allocator = allocator };
+    service.start(frameIgnored, null) catch |err| {
+        try w.print("[nav] ПРОВАЛ: служба кадров не завелась: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer service.stop();
+
+    // Изображаем перетаскивание указателя: просьбы идут одна за другой,
+    // и декодер заведомо не успевает за ними.
+    var worst_ns: u64 = 0;
+    var total_ns: u64 = 0;
+    var i: u32 = 0;
+    while (i < asks) : (i += 1) {
+        const when = @as(u64, i) * 250 * std.time.ns_per_ms;
+        const before = zigrec.win32.nowNs();
+        service.want(path, when);
+        const spent = zigrec.win32.nowNs() -| before;
+        worst_ns = @max(worst_ns, spent);
+        total_ns += spent;
+    }
+
+    const worst_us = @as(f64, @floatFromInt(worst_ns)) / 1000.0;
+    const mean_us = @as(f64, @floatFromInt(total_ns / @max(asks, 1))) / 1000.0;
+    try w.print("[nav] просьб {d}: в среднем {d:.1} мкс, худшая {d:.1} мкс\n", .{
+        asks,
+        mean_us,
+        worst_us,
+    });
+
+    // Порог с большим запасом: на просьбу уходит переписать несколько сотен
+    // байт под замком. Если это занимает миллисекунды — значит, окно опять
+    // чего-то ждёт.
+    const limit_us: f64 = 2000;
+    if (worst_us > limit_us) {
+        try w.print("[nav] ПРОВАЛ: просьба заняла {d:.1} мкс — окно чего-то ждёт\n", .{worst_us});
+        return 1;
+    }
+
+    // Кадр должен в итоге прийти. Ждём его, но не вечно.
+    const started = zigrec.win32.nowNs();
+    var arrived = false;
+    const Peek = struct {
+        got: *bool,
+        at: *u64,
+        fn look(self: @This(), pixels: []const u8, width: u32, height: u32, at_ns: u64) void {
+            _ = pixels;
+            _ = width;
+            _ = height;
+            self.got.* = true;
+            self.at.* = at_ns;
+        }
+    };
+    var at_ns: u64 = 0;
+    while (zigrec.win32.nowNs() -| started < 10 * std.time.ns_per_s) {
+        if (service.withFrame(Peek, .{ .got = &arrived, .at = &at_ns }, Peek.look)) break;
+        io.sleep(.fromMilliseconds(10), .awake) catch break;
+    }
+    const waited_ms = @as(f64, @floatFromInt(zigrec.win32.nowNs() -| started)) / @as(f64, std.time.ns_per_ms);
+
+    if (!arrived) {
+        if (service.trouble) |err| {
+            try w.print("[nav] кадр не пришёл: {s} — в файле может не быть картинки\n", .{@errorName(err)});
+            return 0;
+        }
+        try w.writeAll("[nav] ПРОВАЛ: кадр так и не пришёл\n");
+        return 1;
+    }
+
+    try w.print("[nav] кадр пришёл через {d:.0} мс, время кадра {d:.2} с\n", .{
+        waited_ms,
+        @as(f64, @floatFromInt(at_ns)) / @as(f64, std.time.ns_per_s),
+    });
+    try w.print("[nav] просьб в очереди осталось {d}\n", .{service.behind()});
+    try w.writeAll("[nav] ОКНО НЕ ЖДЁТ ДЕКОДЕР\n");
     return 0;
 }
 
