@@ -30,6 +30,10 @@ const usage =
     \\        с --audio в файл идёт ещё и звуковая дорожка с известным рисунком
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
+    \\  zigrec ui-smoke
+    \\        самопроверка окна: всё ли поместилось в его рабочую часть
+    \\  zigrec hotkey-smoke [СОЧЕТАНИЕ]
+    \\        самопроверка сочетания: Windows его принимает
     \\  zigrec gif-smoke ФАЙЛ.gif [КАДР.png]
     \\        самопроверка чтения GIF: кадры, выдержки, первый кадр в png
     \\  zigrec recent-smoke ПАПКА
@@ -163,6 +167,10 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
+    } else if (eq(cmd, "ui-smoke")) {
+        code = try uiSmoke(arena, w);
+    } else if (eq(cmd, "hotkey-smoke")) {
+        code = try hotkeySmoke(w, if (args.len > 2) args[2] else zigrec.hotkey.default_text);
     } else if (eq(cmd, "gif-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к GIF\n");
@@ -889,6 +897,84 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
         return 1;
     }
     try w.writeAll("[sync] ЗВУК НА МЕСТЕ\n");
+    return 0;
+}
+
+/// Самопроверка раскладки окна.
+///
+/// «Кнопка не влезла» — ошибка, которую видно только глазами и только
+/// на той машине, где рамка окна оказалась толще ожидаемой. Стенд собирает
+/// настоящее окно, не показывая его, и проходит по всем его кнопкам:
+/// вылезло ли что-нибудь за рабочую часть.
+fn uiSmoke(allocator: std.mem.Allocator, w: anytype) !u8 {
+    const layout = zigrec.ui.checkLayout(allocator) catch |err| {
+        try w.print("[ui] ПРОВАЛ: окно не собралось: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    try w.print("[ui] рабочая часть {d}x{d}, органов управления {d}\n", .{
+        layout.client_w,
+        layout.client_h,
+        layout.controls,
+    });
+    if (layout.controls == 0) {
+        try w.writeAll("[ui] ПРОВАЛ: в окне не оказалось ни одной кнопки\n");
+        return 1;
+    }
+    if (!layout.ok()) {
+        try w.print("[ui] ПРОВАЛ: не поместилось {d}; вниз на {d}, вправо на {d} точек\n", .{
+            layout.outside,
+            layout.over_bottom,
+            layout.over_right,
+        });
+        return 1;
+    }
+    try w.writeAll("[ui] ВСЁ ПОМЕСТИЛОСЬ\n");
+    return 0;
+}
+
+/// Самопроверка сочетания клавиш.
+///
+/// Разбор строки проверен тестами, но числа в нём наши собственные:
+/// и модификаторы, и коды клавиш выписаны из заголовков Windows руками.
+/// Сойдутся ли они с настоящими, в памяти не проверишь — а не сойдутся,
+/// и клавиша просто не сработает или сработает не та. Здесь мы просим
+/// Windows зарегистрировать сочетание по-настоящему и тут же отпускаем.
+fn hotkeySmoke(w: anytype, text: []const u8) !u8 {
+    const hotkey = zigrec.hotkey;
+    const c = zigrec.win32.c;
+
+    const keys = hotkey.parse(text) catch |err| {
+        try w.print("[hotkey] ПРОВАЛ: «{s}» — {s}\n", .{ text, hotkey.explain(err) });
+        return 1;
+    };
+
+    var back: [hotkey.max_text]u8 = undefined;
+    try w.print("[hotkey] разобрано: {s} (модификаторы 0x{X:0>4}, клавиша 0x{X:0>2})\n", .{
+        keys.write(&back),
+        keys.modifiers(),
+        keys.key,
+    });
+
+    // Записанное словами должно читаться обратно тем же: иначе в настройках
+    // окажется не то, что человек ввёл.
+    if (!std.mem.eql(u8, keys.write(&back), text)) {
+        try w.print("[hotkey] ПРОВАЛ: обратно вышло «{s}» вместо «{s}»\n", .{ keys.write(&back), text });
+        return 1;
+    }
+
+    // Регистрируем на поток, без окна: окно тут ни при чём, проверяются числа.
+    const id: c_int = 0x5A16;
+    if (c.RegisterHotKey(null, id, keys.modifiers(), keys.key) == 0) {
+        try w.print("[hotkey] {s} занято другой программой — Windows его не отдала\n", .{text});
+        // Это не провал проекта: сочетание может быть законно занято.
+        // Но и «работает» сказать нельзя, поэтому говорим как есть.
+        try w.writeAll("[hotkey] ЗАНЯТО\n");
+        return 0;
+    }
+    _ = c.UnregisterHotKey(null, id);
+    try w.print("[hotkey] Windows приняла {s} и отпустила\n", .{text});
+    try w.writeAll("[hotkey] СОЧЕТАНИЕ РАБОТАЕТ\n");
     return 0;
 }
 

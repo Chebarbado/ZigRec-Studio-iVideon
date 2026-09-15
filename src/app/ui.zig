@@ -29,6 +29,7 @@ const mcp = @import("mcp.zig");
 const settings_mod = @import("settings.zig");
 const paths = @import("paths.zig");
 const recent_mod = @import("recent.zig");
+const hotkey_mod = @import("hotkey.zig");
 
 pub const Rect = capture_types.Rect;
 
@@ -51,6 +52,7 @@ const id_menu_exit = 301;
 const id_menu_settings = 310;
 const id_menu_about = 320;
 const id_set_portable = 340;
+const id_set_area_key = 341;
 /// Номера строк в списке недавних. Берём с запасом, чтобы не столкнуться
 /// с номерами кнопок.
 const id_recent_base = 700;
@@ -66,6 +68,17 @@ const id_set_cancel = 336;
 
 const hotkey_record = 1;
 const hotkey_pause = 2;
+/// Сочетание «обвёл область и пишешь».
+const hotkey_area = 3;
+
+// Числа модификаторов мы держим у себя, чтобы разбор сочетания оставался
+// чистым. Здесь они встречаются с настоящими — и обязаны совпасть.
+comptime {
+    std.debug.assert(hotkey_mod.mod_alt == c.MOD_ALT);
+    std.debug.assert(hotkey_mod.mod_ctrl == c.MOD_CONTROL);
+    std.debug.assert(hotkey_mod.mod_shift == c.MOD_SHIFT);
+    std.debug.assert(hotkey_mod.mod_win == c.MOD_WIN);
+}
 
 const wm_tray = c.WM_APP + 1;
 const timer_tick = 1;
@@ -118,6 +131,8 @@ const App = struct {
     home: []const u8 = "",
     /// Недавние записи и просмотры.
     recent: recent_mod.Recent = .{},
+    /// Запись начата сочетанием «обвёл и пишешь»: по окончании спросим имя.
+    started_by_area_key: bool = false,
     sound_on: bool = false,
     microphone: mic.Capture = .{},
     tray_added: bool = false,
@@ -412,6 +427,7 @@ fn startRecording() void {
 
 fn stopRecording() void {
     if (!app.rec.isBusy()) return;
+    app.started_by_area_key = false;
     _ = c.KillTimer(app.hwnd, timer_frame);
     frame_overlay.hide();
     app.rec.stop();
@@ -491,8 +507,9 @@ fn updateStatus() void {
             }) catch "готов";
         }
         var warn_buf: [160]u8 = undefined;
-        break :blk std.fmt.bufPrint(&buf, "готов · {s}\r\nисточник: {s}, {d} кадр/с{s}", .{
+        break :blk std.fmt.bufPrint(&buf, "готов · {s}, {s}\r\nисточник: {s}, {d} кадр/с{s}", .{
             hotkey_note,
+            areaKeyNote(),
             source_text,
             app.settings.fps,
             fpsWarning(app.settings.fps, app.refresh_hz, &warn_buf),
@@ -539,6 +556,72 @@ fn updateStatus() void {
     }
 }
 
+/// Размер рабочей части окна: ровно столько, сколько занимают органы
+/// управления, плюс поле по краям. Считается от самой нижней и самой
+/// правой кнопки — менять его надо, когда двигаются они.
+const client_w: c_long = 524;
+const client_h: c_long = 482;
+const main_style: c.DWORD = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_MINIMIZEBOX;
+
+/// GWL_STYLE: признаки окна.
+const gwl_style: c_int = -16;
+
+/// Что вышло с раскладкой окна: сколько органов управления не поместилось
+/// и насколько далеко уехал самый дальний.
+///
+/// Нужен стенду: «кнопка не влезла» — ошибка, которую видно только глазами
+/// и только на той машине, где рамка окна оказалась толще ожидаемой.
+/// Пусть её ловит машина.
+pub const Layout = struct {
+    client_w: i32 = 0,
+    client_h: i32 = 0,
+    controls: usize = 0,
+    outside: usize = 0,
+    /// Насколько самый дальний орган управления вышел за нижний край.
+    over_bottom: i32 = 0,
+    /// То же вправо.
+    over_right: i32 = 0,
+
+    pub fn ok(self: Layout) bool {
+        return self.outside == 0;
+    }
+};
+
+/// Пройти по всем видимым органам управления и сверить с рабочей частью окна.
+pub fn measureLayout(hwnd: c.HWND) Layout {
+    var out = Layout{};
+    var client: c.RECT = undefined;
+    if (c.GetClientRect(hwnd, &client) == 0) return out;
+    out.client_w = client.right;
+    out.client_h = client.bottom;
+
+    var child = c.GetWindow(hwnd, c.GW_CHILD);
+    while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) {
+        // Спрашиваем признак у самого органа управления, а не `IsWindowVisible`:
+        // тот отвечает «нет» у всех детей, пока скрыто само окно, — а мерить
+        // раскладку надо именно у скрытого.
+        const style = c.GetWindowLongPtrW(child, gwl_style);
+        if (style & c.WS_VISIBLE == 0) continue;
+        var r: c.RECT = undefined;
+        if (c.GetWindowRect(child, &r) == 0) continue;
+
+        var top_left = c.POINT{ .x = r.left, .y = r.top };
+        var bottom_right = c.POINT{ .x = r.right, .y = r.bottom };
+        _ = c.ScreenToClient(hwnd, &top_left);
+        _ = c.ScreenToClient(hwnd, &bottom_right);
+
+        out.controls += 1;
+        const over_b = bottom_right.y - client.bottom;
+        const over_r = bottom_right.x - client.right;
+        if (over_b > 0 or over_r > 0 or top_left.x < 0 or top_left.y < 0) {
+            out.outside += 1;
+            out.over_bottom = @max(out.over_bottom, over_b);
+            out.over_right = @max(out.over_right, over_r);
+        }
+    }
+    return out;
+}
+
 /// Как в итоге зарегистрировались горячие клавиши.
 var hotkey_note: []const u8 = "";
 
@@ -547,6 +630,7 @@ var hotkey_note: []const u8 = "";
 /// и говорим об этом в окне. Молча остаться без горячих клавиш нельзя:
 /// человек нажмёт и решит, что запись идёт.
 fn registerHotkeys(hwnd: c.HWND) void {
+    registerAreaHotkey(hwnd);
     const mod_ctrl_alt: c.UINT = c.MOD_CONTROL | c.MOD_ALT;
     const plain_rec = c.RegisterHotKey(hwnd, hotkey_record, 0, c.VK_F9) != 0;
     const plain_pause = c.RegisterHotKey(hwnd, hotkey_pause, 0, c.VK_F10) != 0;
@@ -564,6 +648,133 @@ fn registerHotkeys(hwnd: c.HWND) void {
         return;
     }
     hotkey_note = "горячие клавиши заняты, работают только кнопки";
+}
+
+/// Как зарегистрировалось сочетание «обвёл область и пишешь».
+var area_key_note: [96]u8 = @splat(0);
+var area_key_note_len: usize = 0;
+
+fn areaKeyNote() []const u8 {
+    return area_key_note[0..area_key_note_len];
+}
+
+fn sayAreaKey(text: []const u8) void {
+    const n = @min(text.len, area_key_note.len);
+    @memcpy(area_key_note[0..n], text[0..n]);
+    area_key_note_len = n;
+}
+
+/// Зарегистрировать сочетание «обвёл область и пишешь».
+///
+/// Сочетание берём из настроек. Не вышло — говорим об этом словами:
+/// молча остаться без клавиши нельзя, человек нажмёт и решит, что
+/// запись идёт.
+fn registerAreaHotkey(hwnd: c.HWND) void {
+    _ = c.UnregisterHotKey(hwnd, hotkey_area);
+
+    const text = app.prefs.areaKey();
+    const keys = hotkey_mod.parse(text) catch |err| {
+        var buf: [160]u8 = undefined;
+        sayAreaKey(std.fmt.bufPrint(&buf, "сочетание «{s}» не понято: {s}", .{
+            text,
+            hotkey_mod.explain(err),
+        }) catch "сочетание не понято");
+        return;
+    };
+
+    if (c.RegisterHotKey(hwnd, hotkey_area, keys.modifiers(), keys.key) == 0) {
+        var buf: [160]u8 = undefined;
+        sayAreaKey(std.fmt.bufPrint(&buf, "{s} занято другой программой", .{text}) catch "сочетание занято");
+        return;
+    }
+    var buf: [160]u8 = undefined;
+    sayAreaKey(std.fmt.bufPrint(&buf, "{s} — обвести область и писать", .{text}) catch "");
+}
+
+/// Одно нажатие — обвести область и начать запись. Второе — остановить
+/// и спросить, как назвать файл.
+///
+/// Имя спрашиваем ПОСЛЕ записи, а не до: пока обводишь рамку, думать
+/// об имени некогда, а после записи уже понятно, что получилось.
+fn areaKeyPressed() void {
+    if (app.rec.isBusy()) {
+        const ask = app.started_by_area_key;
+        stopRecording();
+        if (ask) askNameForLast();
+        return;
+    }
+    if (selectArea()) |r| {
+        app.area = r;
+        app.started_by_area_key = true;
+        startRecording();
+        // Окно могло быть свёрнуто: человек нажал сочетание, не глядя
+        // на него, и должен увидеть, что запись пошла.
+        updateStatus();
+    }
+}
+
+/// Спросить имя для только что записанного файла и переименовать.
+fn askNameForLast() void {
+    app.started_by_area_key = false;
+    if (app.last_path_len == 0) return;
+    const current = app.last_path[0..app.last_path_len];
+
+    var wide_path: [std.fs.max_path_bytes]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_path, current) catch return;
+    wide_path[n] = 0;
+
+    var chosen: [std.fs.max_path_bytes]u16 = undefined;
+    @memcpy(chosen[0 .. n + 1], wide_path[0 .. n + 1]);
+
+    var ofn = std.mem.zeroes(c.OPENFILENAMEW);
+    ofn.lStructSize = @sizeOf(c.OPENFILENAMEW);
+    ofn.hwndOwner = app.hwnd;
+    ofn.lpstrFilter = wide("Видео MP4\x00*.mp4\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrFile = &chosen;
+    ofn.nMaxFile = chosen.len;
+    ofn.lpstrTitle = wide("Как назвать запись");
+    ofn.lpstrDefExt = wide("mp4");
+    ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_PATHMUSTEXIST;
+
+    if (c.GetSaveFileNameW(&ofn) == 0) {
+        // Отказались — файл остаётся под своим именем. Записанное
+        // не пропадает оттого, что человек передумал его называть.
+        setText(app.status, "запись сохранена под прежним именем");
+        return;
+    }
+
+    // Выбрали то же имя — переименовывать нечего.
+    const same = std.mem.eql(u16, std.mem.sliceTo(&chosen, 0), wide_path[0..n]);
+    if (same) return;
+
+    if (c.MoveFileExW(@ptrCast(&wide_path), @ptrCast(&chosen), c.MOVEFILE_REPLACE_EXISTING) == 0) {
+        setText(app.status, "переименовать не вышло: файл остался под прежним именем");
+        return;
+    }
+
+    // Запоминаем новое имя: по нему открывается «Открыть» и оно попадает
+    // в недавние вместо старого.
+    var utf8: [std.fs.max_path_bytes]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&chosen, 0)) catch return;
+    const keep = @min(len, app.last_path.len);
+    @memcpy(app.last_path[0..keep], utf8[0..keep]);
+    app.last_path_len = keep;
+
+    // Старое имя попало в недавние при остановке — убираем его оттуда,
+    // иначе в списке останется строка, ведущая в никуда.
+    var i: usize = 0;
+    while (i < app.recent.recorded.count) : (i += 1) {
+        if (recent_mod.samePath(app.recent.recorded.at(i), current)) {
+            app.recent.recorded.removeAt(i);
+            break;
+        }
+    }
+    rememberRecording();
+
+    var note: [320]u8 = undefined;
+    setText(app.status, std.fmt.bufPrint(&note, "сохранено: {s}", .{
+        std.fs.path.basename(app.last_path[0..app.last_path_len]),
+    }) catch "сохранено");
 }
 
 /// Подсказка значка в трее: состояние видно, даже когда окно свёрнуто
@@ -824,6 +1035,7 @@ const SettingsWindow = struct {
     serve_box: c.HWND = null,
     portable_box: c.HWND = null,
     home_label: c.HWND = null,
+    area_key_box: c.HWND = null,
     /// Нажали «Сохранить», а не «Отмена».
     accepted: bool = false,
 };
@@ -907,6 +1119,16 @@ fn collectSettings() void {
     // и проверено тестами.
     _ = app.prefs.setPort(boxText(settings_win.port_box, &buf3));
 
+    var key_buf: [128]u8 = undefined;
+    const key_text = boxText(settings_win.area_key_box, &key_buf);
+    if (!app.prefs.setAreaKey(key_text)) {
+        // Негодное сочетание не берём и прежнее не портим: причину
+        // называем словами, иначе человек не поймёт, почему не вышло.
+        const why = if (hotkey_mod.parse(key_text)) |_| "" else |err| hotkey_mod.explain(err);
+        var note: [256]u8 = undefined;
+        setText(app.status, std.fmt.bufPrint(&note, "сочетание не принято: {s}", .{why}) catch "сочетание не принято");
+    }
+
     app.prefs.serve_at_start = c.SendMessageW(settings_win.serve_box, c.BM_GETCHECK, 0, 0) != 0;
 
     // Сначала способ хранения: от него зависит, куда лягут настройки.
@@ -934,6 +1156,9 @@ fn collectSettings() void {
     // Новая папка может ещё не существовать — создаём, иначе первая же
     // запись упадёт на ровном месте.
     ensureDir(app.prefs.dir());
+    // Сочетание могло смениться — перерегистрируем прямо сейчас,
+    // а не при следующем запуске.
+    registerAreaHotkey(app.hwnd);
     setText(app.status, "настройки сохранены");
 }
 
@@ -989,7 +1214,7 @@ fn showSettings(owner: c.HWND) void {
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         520,
-        345,
+        378,
         owner,
         null,
         hinst,
@@ -1005,27 +1230,30 @@ fn showSettings(owner: c.HWND) void {
     _ = label(hwnd, "Имя файла: %d — дата, %t — время, %n — номер", 14, 74, 400, 20);
     settings_win.template_box = editBox(hwnd, id_set_template, 14, 96, 300, 24);
 
-    _ = label(hwnd, "Порт сервера MCP", 14, 134, 160, 20);
-    settings_win.port_box = editBox(hwnd, id_set_port, 180, 132, 90, 24);
+    _ = label(hwnd, "Обвести область и писать", 14, 134, 200, 20);
+    settings_win.area_key_box = editBox(hwnd, id_set_area_key, 218, 132, 150, 24);
 
-    settings_win.serve_box = button(hwnd, "Поднимать сервер при запуске", id_set_serve, 14, 168, 300, 24, c.BS_AUTOCHECKBOX);
+    _ = label(hwnd, "Порт сервера MCP", 14, 168, 160, 20);
+    settings_win.port_box = editBox(hwnd, id_set_port, 218, 166, 90, 24);
+
+    settings_win.serve_box = button(hwnd, "Поднимать сервер при запуске", id_set_serve, 14, 200, 300, 24, c.BS_AUTOCHECKBOX);
 
     settings_win.portable_box = button(
         hwnd,
         "Portable: хранить своё рядом с программой",
         id_set_portable,
         14,
-        198,
+        228,
         360,
         24,
         c.BS_AUTOCHECKBOX,
     );
     // Прямо говорим, где программа оставляет следы: это её решение,
     // но знать о нём должен владелец машины.
-    settings_win.home_label = label(hwnd, "", 14, 226, 490, 20);
+    settings_win.home_label = label(hwnd, "", 14, 256, 490, 20);
 
-    _ = button(hwnd, "Сохранить", id_set_ok, 300, 262, 100, 30, 0);
-    _ = button(hwnd, "Отмена", id_set_cancel, 408, 262, 90, 30, 0);
+    _ = button(hwnd, "Сохранить", id_set_ok, 300, 292, 100, 30, 0);
+    _ = button(hwnd, "Отмена", id_set_cancel, 408, 292, 90, 30, 0);
 
     // Показываем то, что есть сейчас.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1036,6 +1264,7 @@ fn showSettings(owner: c.HWND) void {
 
     var port_buf: [16]u8 = undefined;
     setText(settings_win.port_box, std.fmt.bufPrint(&port_buf, "{d}", .{app.prefs.port}) catch "15599");
+    setText(settings_win.area_key_box, app.prefs.areaKey());
     _ = c.SendMessageW(settings_win.serve_box, c.BM_SETCHECK, if (app.prefs.serve_at_start) 1 else 0, 0);
 
     const mode = paths.currentMode();
@@ -1043,7 +1272,13 @@ fn showSettings(owner: c.HWND) void {
     var home_text: [640]u8 = undefined;
     setText(settings_win.home_label, std.fmt.bufPrint(&home_text, "Своё лежит в: {s}", .{app.home}) catch app.home);
 
-    for ([_]c.HWND{ settings_win.dir_box, settings_win.template_box, settings_win.port_box, settings_win.serve_box }) |h| applyFont(h);
+    for ([_]c.HWND{
+        settings_win.dir_box,
+        settings_win.template_box,
+        settings_win.port_box,
+        settings_win.serve_box,
+        settings_win.area_key_box,
+    }) |h| applyFont(h);
     var child = c.GetWindow(hwnd, c.GW_CHILD);
     while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) applyFont(child);
 
@@ -1692,6 +1927,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             switch (wp) {
                 hotkey_record => if (app.rec.isBusy()) stopRecording() else startRecording(),
                 hotkey_pause => togglePause(),
+                hotkey_area => areaKeyPressed(),
                 else => {},
             }
             return 0;
@@ -1749,6 +1985,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             removeTray(hwnd);
             _ = c.UnregisterHotKey(hwnd, hotkey_record);
             _ = c.UnregisterHotKey(hwnd, hotkey_pause);
+            _ = c.UnregisterHotKey(hwnd, hotkey_area);
             _ = c.DestroyWindow(hwnd);
             return 0;
         },
@@ -1919,6 +2156,26 @@ pub fn runWith(allocator: std.mem.Allocator, start_hidden: bool) !void {
 /// открывающая порт, — не то, что стоит ставить на рабочую машину.
 /// Ключ нужен самопроверке, которой некому нажимать кнопки.
 pub fn runFull(allocator: std.mem.Allocator, start_hidden: bool, serve_at_once: bool) !void {
+    return runInner(allocator, start_hidden, serve_at_once, null);
+}
+
+/// Построить окно, замерить раскладку и закрыть, не показывая.
+///
+/// Тот же путь, что и у настоящего запуска: те же кнопки, тот же порядок.
+/// Мерить раскладку по отдельному, «почти такому же» окну значит мерить
+/// не то, что видит человек.
+pub fn checkLayout(allocator: std.mem.Allocator) !Layout {
+    var out = Layout{};
+    try runInner(allocator, true, false, &out);
+    return out;
+}
+
+fn runInner(
+    allocator: std.mem.Allocator,
+    start_hidden: bool,
+    serve_at_once: bool,
+    report: ?*Layout,
+) !void {
     if (builtin.os.tag != .windows) return error.Unsupported;
     _ = c.SetProcessDPIAware();
 
@@ -1963,6 +2220,15 @@ pub fn runFull(allocator: std.mem.Allocator, start_hidden: bool, serve_at_once: 
 
     var title_buf: [128]u8 = undefined;
     const title = std.fmt.bufPrint(&title_buf, "Zig-Rec Studio v{s}", .{version.VERSION}) catch "Zig-Rec Studio";
+
+    // Размер окна считаем от содержимого, а не подбираем на глаз. Рамка,
+    // заголовок и полоса меню у разных версий Windows разной толщины,
+    // и зашитое число однажды оказалось на девять точек меньше нужного:
+    // нижняя кнопка уехала за край окна.
+    var outer = c.RECT{ .left = 0, .top = 0, .right = client_w, .bottom = client_h };
+    // Единица — «у окна есть полоса меню»: без неё окно выйдет ниже
+    // ровно на её высоту.
+    _ = c.AdjustWindowRectEx(&outer, main_style, 1, 0);
     var title_w: [128]u16 = undefined;
     const tn = try std.unicode.utf8ToUtf16Le(&title_w, title);
     title_w[tn] = 0;
@@ -1971,16 +2237,24 @@ pub fn runFull(allocator: std.mem.Allocator, start_hidden: bool, serve_at_once: 
         0,
         wide("ZigRecMain"),
         @ptrCast(&title_w),
-        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_MINIMIZEBOX,
+        main_style,
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
-        540,
-        540,
+        outer.right - outer.left,
+        outer.bottom - outer.top,
         null,
         null,
         hinst,
         null,
     ) orelse return error.WindowFailed;
+    if (report) |r| {
+        // Окно уже собрано: все кнопки созданы в WM_CREATE. Мерим и уходим,
+        // не показывая его и не заводя цикл сообщений.
+        r.* = measureLayout(hwnd);
+        _ = c.DestroyWindow(hwnd);
+        return;
+    }
+
     _ = c.ShowWindow(hwnd, if (start_hidden) c.SW_HIDE else c.SW_SHOW);
     _ = c.UpdateWindow(hwnd);
     // Сервер поднимается сам, только если человек это разрешил в настройках

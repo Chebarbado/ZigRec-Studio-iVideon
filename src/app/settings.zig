@@ -14,6 +14,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
+const hotkey = @import("hotkey.zig");
 const c = win32.c;
 
 pub const magic = "zigrec-settings";
@@ -25,6 +26,7 @@ pub const file_name = "настройки.txt";
 
 pub const max_path = 260;
 pub const max_template = 96;
+pub const max_hotkey = hotkey.max_text;
 
 pub const Settings = struct {
     /// Куда класть записи. Пусто — значит «как было по умолчанию».
@@ -34,6 +36,10 @@ pub const Settings = struct {
     /// Шаблон имени файла: `%d` дата, `%t` время, `%n` номер.
     template: [max_template]u8 = @splat(0),
     template_len: usize = 0,
+
+    /// Сочетание «обвести область и писать».
+    area_key: [max_hotkey]u8 = @splat(0),
+    area_key_len: usize = 0,
 
     /// Высота окна кадра в редакторе. Подогнал границу один раз —
     /// и при следующем запуске она там же.
@@ -53,7 +59,26 @@ pub const Settings = struct {
     pub fn init() Settings {
         var s = Settings{};
         s.setTemplate(default_template);
+        _ = s.setAreaKey(hotkey.default_text);
         return s;
+    }
+
+    pub fn areaKey(self: *const Settings) []const u8 {
+        // Пустое — значит «как было по умолчанию»: так настройки,
+        // прочитанные из старого файла, ведут себя разумно.
+        if (self.area_key_len == 0) return hotkey.default_text;
+        return self.area_key[0..self.area_key_len];
+    }
+
+    /// Запомнить сочетание. Негодное не берём: без клавиши остаться можно,
+    /// а вот тихо получить чужую — нельзя.
+    pub fn setAreaKey(self: *Settings, text: []const u8) bool {
+        const clean = std.mem.trim(u8, text, " \t");
+        _ = hotkey.parse(clean) catch return false;
+        const n = @min(clean.len, self.area_key.len);
+        @memcpy(self.area_key[0..n], clean[0..n]);
+        self.area_key_len = n;
+        return true;
     }
 
     pub fn dir(self: *const Settings) []const u8 {
@@ -109,6 +134,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("{s} {d}\n", .{ magic, version });
     try w.print("dir {s}\n", .{s.dir()});
     try w.print("template {s}\n", .{s.nameTemplate()});
+    try w.print("areakey {s}\n", .{s.areaKey()});
     try w.print("preview {d}\n", .{s.preview_h});
     try w.print("port {d}\n", .{s.port});
     try w.print("serve {d}\n", .{@intFromBool(s.serve_at_start)});
@@ -140,6 +166,8 @@ pub fn read(data: []const u8) Error!Settings {
             out.setDir(rest);
         } else if (std.mem.eql(u8, word, "template")) {
             out.setTemplate(rest);
+        } else if (std.mem.eql(u8, word, "areakey")) {
+            _ = out.setAreaKey(rest);
         } else if (std.mem.eql(u8, word, "preview")) {
             _ = out.setPreviewH(rest);
         } else if (std.mem.eql(u8, word, "port")) {
@@ -228,6 +256,7 @@ test "записанное читается обратно" {
     s.setTemplate("экран-%d-%n.mp4");
     s.port = 15600;
     s.preview_h = 333;
+    _ = s.setAreaKey("Ctrl+Alt+F8");
     s.serve_at_start = true;
 
     var buf: [4096]u8 = undefined;
@@ -239,6 +268,7 @@ test "записанное читается обратно" {
     try std.testing.expectEqualStrings("экран-%d-%n.mp4", back.nameTemplate());
     try std.testing.expectEqual(@as(u16, 15600), back.port);
     try std.testing.expectEqual(@as(i32, 333), back.preview_h);
+    try std.testing.expectEqualStrings("Ctrl+Alt+F8", back.areaKey());
     try std.testing.expect(back.serve_at_start);
 }
 
@@ -320,4 +350,25 @@ test "высота кадра: негодное число не схлопыва
     try std.testing.expect(!s.setPreviewH("99999"));
     try std.testing.expect(!s.setPreviewH("высоко"));
     try std.testing.expectEqual(@as(i32, 400), s.preview_h);
+}
+
+test "сочетание: годное берём, негодное не портит прежнее" {
+    var s = Settings.init();
+    try std.testing.expectEqualStrings(hotkey.default_text, s.areaKey());
+
+    try std.testing.expect(s.setAreaKey("Ctrl+Shift+R"));
+    try std.testing.expectEqualStrings("Ctrl+Shift+R", s.areaKey());
+
+    // Голая буква перехватывала бы ввод во всех программах, а «Win+Щ»
+    // просто не существует. Прежнее сочетание при этом остаётся.
+    try std.testing.expect(!s.setAreaKey("R"));
+    try std.testing.expect(!s.setAreaKey("Win+Щ"));
+    try std.testing.expect(!s.setAreaKey(""));
+    try std.testing.expectEqualStrings("Ctrl+Shift+R", s.areaKey());
+}
+
+test "файл без строки о сочетании даёт сочетание по умолчанию" {
+    // Настройки от прежнего выпуска: строки нет, но клавиша должна работать.
+    const back = try read("zigrec-settings 1\r\nport 15599\r\n");
+    try std.testing.expectEqualStrings(hotkey.default_text, back.areaKey());
 }
