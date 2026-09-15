@@ -27,6 +27,8 @@ const gain = @import("../sound/gain.zig");
 const control = @import("control.zig");
 const mcp = @import("mcp.zig");
 const settings_mod = @import("settings.zig");
+const paths = @import("paths.zig");
+const recent_mod = @import("recent.zig");
 
 pub const Rect = capture_types.Rect;
 
@@ -48,6 +50,10 @@ const id_menu_open_dir = 300;
 const id_menu_exit = 301;
 const id_menu_settings = 310;
 const id_menu_about = 320;
+const id_set_portable = 340;
+/// Номера строк в списке недавних. Берём с запасом, чтобы не столкнуться
+/// с номерами кнопок.
+const id_recent_base = 700;
 
 // Поля окна настроек.
 const id_set_dir = 330;
@@ -108,6 +114,10 @@ const App = struct {
     refresh_hz: u32 = 0,
     /// Настройки, которые переживают перезапуск.
     prefs: settings_mod.Settings = .{},
+    /// Где программа хранит своё: настройки, списки недавних.
+    home: []const u8 = "",
+    /// Недавние записи и просмотры.
+    recent: recent_mod.Recent = .{},
     sound_on: bool = false,
     microphone: mic.Capture = .{},
     tray_added: bool = false,
@@ -409,6 +419,18 @@ fn stopRecording() void {
     setText(app.btn_pause, "Пауза");
     _ = c.EnableWindow(app.btn_pause, 0);
     _ = c.EnableWindow(app.btn_open, 1);
+    rememberRecording();
+}
+
+/// Записанный файл попадает в «Недавно записанные».
+///
+/// Сохраняем сразу, а не при выходе: программу закрывают и через диспетчер
+/// задач, и выключением машины, а список должен пережить и это.
+fn rememberRecording() void {
+    if (app.last_path_len == 0) return;
+    app.recent.recorded.add(app.last_path[0..app.last_path_len]);
+    _ = recent_mod.save(&app.recent, app.home);
+    rebuildMenu(app.hwnd);
 }
 
 fn togglePause() void {
@@ -800,11 +822,17 @@ const SettingsWindow = struct {
     template_box: c.HWND = null,
     port_box: c.HWND = null,
     serve_box: c.HWND = null,
+    portable_box: c.HWND = null,
+    home_label: c.HWND = null,
     /// Нажали «Сохранить», а не «Отмена».
     accepted: bool = false,
 };
 
 var settings_win: SettingsWindow = .{};
+
+/// Место под путь к своему хозяйству. Отдельно от `app`, потому что
+/// переживает смену способа хранения прямо во время работы.
+var home_store: [paths.max_path]u8 = @splat(0);
 
 pub fn editBox(parent: c.HWND, id: c_int, x: i32, y: i32, w: i32, h: i32) c.HWND {
     const hwnd = c.CreateWindowExW(
@@ -881,7 +909,25 @@ fn collectSettings() void {
 
     app.prefs.serve_at_start = c.SendMessageW(settings_win.serve_box, c.BM_GETCHECK, 0, 0) != 0;
 
-    if (!settings_mod.save(&app.prefs, app.out_dir)) {
+    // Сначала способ хранения: от него зависит, куда лягут настройки.
+    const want: paths.Mode = if (c.SendMessageW(settings_win.portable_box, c.BM_GETCHECK, 0, 0) != 0)
+        .portable
+    else
+        .classic;
+    if (want != paths.currentMode()) {
+        if (paths.setMode(want)) {
+            var home_buf: [paths.max_path]u8 = undefined;
+            if (paths.base(&home_buf)) |dir| {
+                const n = @min(dir.len, home_store.len);
+                @memcpy(home_store[0..n], dir[0..n]);
+                app.home = home_store[0..n];
+            } else |_| {}
+        } else {
+            setText(app.status, "способ хранения не сменился: папка программы недоступна");
+        }
+    }
+
+    if (!settings_mod.save(&app.prefs, app.home)) {
         setText(app.status, "настройки не сохранились: папка недоступна");
         return;
     }
@@ -943,7 +989,7 @@ fn showSettings(owner: c.HWND) void {
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         520,
-        300,
+        345,
         owner,
         null,
         hinst,
@@ -964,8 +1010,22 @@ fn showSettings(owner: c.HWND) void {
 
     settings_win.serve_box = button(hwnd, "Поднимать сервер при запуске", id_set_serve, 14, 168, 300, 24, c.BS_AUTOCHECKBOX);
 
-    _ = button(hwnd, "Сохранить", id_set_ok, 300, 220, 100, 30, 0);
-    _ = button(hwnd, "Отмена", id_set_cancel, 408, 220, 90, 30, 0);
+    settings_win.portable_box = button(
+        hwnd,
+        "Portable: хранить своё рядом с программой",
+        id_set_portable,
+        14,
+        198,
+        360,
+        24,
+        c.BS_AUTOCHECKBOX,
+    );
+    // Прямо говорим, где программа оставляет следы: это её решение,
+    // но знать о нём должен владелец машины.
+    settings_win.home_label = label(hwnd, "", 14, 226, 490, 20);
+
+    _ = button(hwnd, "Сохранить", id_set_ok, 300, 262, 100, 30, 0);
+    _ = button(hwnd, "Отмена", id_set_cancel, 408, 262, 90, 30, 0);
 
     // Показываем то, что есть сейчас.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -977,6 +1037,11 @@ fn showSettings(owner: c.HWND) void {
     var port_buf: [16]u8 = undefined;
     setText(settings_win.port_box, std.fmt.bufPrint(&port_buf, "{d}", .{app.prefs.port}) catch "15599");
     _ = c.SendMessageW(settings_win.serve_box, c.BM_SETCHECK, if (app.prefs.serve_at_start) 1 else 0, 0);
+
+    const mode = paths.currentMode();
+    _ = c.SendMessageW(settings_win.portable_box, c.BM_SETCHECK, if (mode == .portable) 1 else 0, 0);
+    var home_text: [640]u8 = undefined;
+    setText(settings_win.home_label, std.fmt.bufPrint(&home_text, "Своё лежит в: {s}", .{app.home}) catch app.home);
 
     for ([_]c.HWND{ settings_win.dir_box, settings_win.template_box, settings_win.port_box, settings_win.serve_box }) |h| applyFont(h);
     var child = c.GetWindow(hwnd, c.GW_CHILD);
@@ -998,6 +1063,13 @@ fn buildMenu(hwnd: c.HWND) void {
     const file_menu = c.CreatePopupMenu();
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open_dir, wide("Папка с записями"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
+    _ = c.AppendMenuW(
+        file_menu,
+        c.MF_POPUP,
+        @intFromPtr(recentMenu(&app.recent.recorded, id_recent_base)),
+        wide("Недавно записанные"),
+    );
+    _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_exit, wide("Выход"));
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(file_menu), wide("Файл"));
 
@@ -1010,6 +1082,66 @@ fn buildMenu(hwnd: c.HWND) void {
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(help_menu), wide("Справка"));
 
     _ = c.SetMenu(hwnd, bar);
+}
+
+/// Выпадающий список недавних файлов.
+///
+/// Пропавший файл не прячем, а показываем и говорим, что его нет на месте:
+/// молча исчезнувшая строка выглядит так, будто программа что-то потеряла.
+/// Диск мог быть отключён, папка переименована — человек разберётся сам,
+/// если ему сказать.
+fn recentMenu(list: *const recent_mod.List, base_id: c_int) c.HMENU {
+    const menu = c.CreatePopupMenu();
+    if (menu == null) return menu;
+    if (list.count == 0) {
+        _ = c.AppendMenuW(menu, c.MF_STRING | c.MF_GRAYED, 0, wide("пока пусто"));
+        return menu;
+    }
+
+    var i: usize = 0;
+    while (i < list.count) : (i += 1) {
+        const path = list.at(i);
+        const here = recent_mod.onDisk(path);
+        var text: [400]u8 = undefined;
+        const shown = std.fmt.bufPrint(&text, "{s}{s}", .{
+            std.fs.path.basename(path),
+            if (here) "" else "  — нет на месте",
+        }) catch std.fs.path.basename(path);
+
+        var wide_buf: [512]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&wide_buf, shown) catch continue;
+        if (n >= wide_buf.len) continue;
+        wide_buf[n] = 0;
+        // Пропавший файл виден, но не нажимается: показать и не дать
+        // ткнуть — честнее, чем спрятать или открыть пустоту.
+        const flags: c.UINT = if (here) c.MF_STRING else c.MF_STRING | c.MF_GRAYED;
+        _ = c.AppendMenuW(
+            menu,
+            flags,
+            @intCast(base_id + @as(c_int, @intCast(i))),
+            @ptrCast(&wide_buf),
+        );
+    }
+    return menu;
+}
+
+/// Заново собрать меню: список недавних мог пополниться.
+fn rebuildMenu(hwnd: c.HWND) void {
+    const old = c.GetMenu(hwnd);
+    buildMenu(hwnd);
+    if (old != null) _ = c.DestroyMenu(old);
+    _ = c.DrawMenuBar(hwnd);
+}
+
+/// Открыть недавнюю запись в редакторе дорожек.
+fn openRecent(index: usize) void {
+    const path = app.recent.recorded.at(index);
+    if (path.len == 0) return;
+    if (!recent_mod.onDisk(path)) {
+        setText(app.status, "файла нет на месте");
+        return;
+    }
+    openEditorWith(path);
 }
 
 /// Показать папку с записями в проводнике.
@@ -1043,14 +1175,19 @@ fn showAbout(hwnd: c.HWND) void {
 /// сообщений и свои горячие клавиши, и делить их с редактором — значит
 /// получить окно, которое подвисает во время записи.
 fn openEditor() void {
+    openEditorWith("");
+}
+
+/// Открыть редактор дорожек, при желании сразу с файлом.
+fn openEditorWith(file: []const u8) void {
     var exe: [std.fs.max_path_bytes]u16 = undefined;
     const n = c.GetModuleFileNameW(null, &exe, exe.len);
     if (n == 0) return;
     exe[n] = 0;
 
-    // Командная строка: «путь» edit. Буфер изменяемый — CreateProcessW
-    // имеет право в него писать.
-    var line: [std.fs.max_path_bytes + 16]u16 = undefined;
+    // Командная строка: «путь» edit «файл». Буфер изменяемый —
+    // CreateProcessW имеет право в него писать.
+    var line: [std.fs.max_path_bytes * 2 + 32]u16 = undefined;
     var at: usize = 0;
     line[at] = '"';
     at += 1;
@@ -1059,6 +1196,24 @@ fn openEditor() void {
     const tail = wide("\" edit");
     @memcpy(line[at .. at + tail.len], tail);
     at += tail.len;
+
+    // Путь в кавычках: в нём бывают пробелы, и без кавычек редактор
+    // получил бы половину имени.
+    if (file.len > 0) {
+        line[at] = ' ';
+        at += 1;
+        line[at] = '"';
+        at += 1;
+        if (std.unicode.utf8ToUtf16Le(line[at..], file)) |wrote| {
+            at += wrote;
+            line[at] = '"';
+            at += 1;
+        } else |_| {
+            // Путь не переводится — открываем редактор пустым, а не
+            // с обрезанным именем.
+            at -= 2;
+        }
+    }
     line[at] = 0;
 
     // CREATE_NO_WINDOW: консоль не создаётся вовсе. Прятать её потом поздно —
@@ -1490,6 +1645,9 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_server => toggleServer(hwnd),
                 id_editor => openEditor(),
                 id_menu_open_dir => openOutputDir(),
+                id_recent_base...id_recent_base + recent_mod.max_items - 1 => {
+                    openRecent(@intCast((wp & 0xFFFF) - id_recent_base));
+                },
                 id_menu_exit => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_menu_settings => showSettings(hwnd),
                 id_menu_about => showAbout(hwnd),
@@ -1770,12 +1928,24 @@ pub fn runFull(allocator: std.mem.Allocator, start_hidden: bool, serve_at_once: 
     app.out_dir = try defaultDir(allocator);
     defer allocator.free(app.out_dir);
 
+    // Где программа хранит своё — до всего остального: оттуда читаются
+    // и настройки, и списки недавних.
+    var home_buf: [paths.max_path]u8 = undefined;
+    app.home = paths.base(&home_buf) catch app.out_dir;
+
     // Настройки читаем до создания окна: от них зависит и папка, и порт,
     // и то, поднимать ли сервер сразу.
     {
         var threaded: std.Io.Threaded = .init(allocator, .{});
         defer threaded.deinit();
-        app.prefs = settings_mod.load(threaded.io(), allocator, app.out_dir);
+        // Прежние выпуски клали настройки в папку записей. Если там они
+        // есть, а на новом месте нет — читаем оттуда: человек не должен
+        // обнаружить, что обновление стёрло его выбор.
+        app.prefs = if (settings_mod.present(app.home))
+            settings_mod.load(threaded.io(), allocator, app.home)
+        else
+            settings_mod.load(threaded.io(), allocator, app.out_dir);
+        app.recent = recent_mod.load(threaded.io(), allocator, app.home);
     }
 
     const hinst: c.HINSTANCE = @ptrCast(c.GetModuleHandleW(null));

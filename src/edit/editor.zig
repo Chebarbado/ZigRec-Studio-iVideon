@@ -18,6 +18,8 @@ const waveform = @import("../file/waveform.zig");
 const project_file = @import("../file/project_file.zig");
 const player_mod = @import("../file/player.zig");
 const settings_mod = @import("../app/settings.zig");
+const paths = @import("../app/paths.zig");
+const recent_mod = @import("../app/recent.zig");
 const png = @import("../file/png.zig");
 const ui = @import("../app/ui.zig");
 
@@ -38,6 +40,12 @@ const id_play = 211;
 const id_shot = 212;
 const id_rename_box = 213;
 const id_link = 214;
+const id_menu_open = 301;
+const id_menu_save = 302;
+const id_menu_close = 303;
+/// Номера строк в списках недавних. Два ряда подряд, по одному на список.
+const id_recent_rec = 700;
+const id_recent_view = 740;
 
 /// Высота панели кнопок. Таймлайн начинается под ней.
 /// Два ряда: сверху файл и дорожки, снизу правка.
@@ -148,6 +156,12 @@ const Editor = struct {
 
     /// Дорожка, с которой работают: её переименовывает F2.
     cur_track: usize = 0,
+    /// Где лежит своё: настройки и списки недавних.
+    home: [paths.max_path]u8 = @splat(0),
+    home_len: usize = 0,
+    /// Недавно записанное и недавно просмотренное.
+    recent: recent_mod.Recent = .{},
+
     /// Поле ввода имени, открытое поверх полосы дорожки.
     name_box: c.HWND = null,
     /// Чьё имя правим и какой обработчик у поля был до нас.
@@ -925,6 +939,8 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
         if (link != 0) " — связаны, Alt тянет врозь" else "",
     }) catch "файл открыт");
 
+    rememberViewed(path);
+
     // Показываем целиком: иначе человек открыл файл и не увидел ничего.
     fitToProject();
     showFrame();
@@ -1451,6 +1467,114 @@ fn finishRename(accept: bool) void {
     refresh();
 }
 
+// ------------------------------------------------------------- недавние
+
+fn homeDir() []const u8 {
+    return ed.home[0..ed.home_len];
+}
+
+/// Прочитать, где своё, и что открывали в прошлые разы.
+fn loadRecent() void {
+    var buf: [paths.max_path]u8 = undefined;
+    const dir = paths.base(&buf) catch return;
+    const n = @min(dir.len, ed.home.len);
+    @memcpy(ed.home[0..n], dir[0..n]);
+    ed.home_len = n;
+
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    ed.recent = recent_mod.load(threaded.io(), ed.allocator, homeDir());
+}
+
+/// Отметить, что этот файл смотрели.
+fn rememberViewed(path: []const u8) void {
+    if (ed.home_len == 0) return;
+    ed.recent.viewed.add(path);
+    _ = recent_mod.save(&ed.recent, homeDir());
+    buildMenu(ed.hwnd);
+}
+
+/// Выпадающий список недавних.
+///
+/// Пропавший файл виден, но не нажимается: молча исчезнувшая строка
+/// выглядит так, будто программа что-то потеряла, а открыть то, чего нет,
+/// всё равно нельзя.
+fn recentMenu(list: *const recent_mod.List, base_id: c_int) c.HMENU {
+    const menu = c.CreatePopupMenu();
+    if (menu == null) return menu;
+    if (list.count == 0) {
+        _ = c.AppendMenuW(menu, c.MF_STRING | c.MF_GRAYED, 0, ui.wide("пока пусто"));
+        return menu;
+    }
+
+    var i: usize = 0;
+    while (i < list.count) : (i += 1) {
+        const path = list.at(i);
+        const here = recent_mod.onDisk(path);
+        var text: [400]u8 = undefined;
+        const shown = std.fmt.bufPrint(&text, "{s}{s}", .{
+            std.fs.path.basename(path),
+            if (here) "" else "  — нет на месте",
+        }) catch std.fs.path.basename(path);
+
+        var wide_buf: [512]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&wide_buf, shown) catch continue;
+        if (n >= wide_buf.len) continue;
+        wide_buf[n] = 0;
+        const flags: c.UINT = if (here) c.MF_STRING else c.MF_STRING | c.MF_GRAYED;
+        _ = c.AppendMenuW(menu, flags, @intCast(base_id + @as(c_int, @intCast(i))), @ptrCast(&wide_buf));
+    }
+    return menu;
+}
+
+/// Полоса меню. Пересобирается целиком: списки недавних меняются на ходу.
+fn buildMenu(hwnd: c.HWND) void {
+    const bar = c.CreateMenu();
+    if (bar == null) return;
+
+    const file_menu = c.CreatePopupMenu();
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open, ui.wide("Открыть…\tCtrl+O"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save, ui.wide("Сохранить проект\tCtrl+S"));
+    _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
+    _ = c.AppendMenuW(
+        file_menu,
+        c.MF_POPUP,
+        @intFromPtr(recentMenu(&ed.recent.recorded, id_recent_rec)),
+        ui.wide("Недавно записанные"),
+    );
+    _ = c.AppendMenuW(
+        file_menu,
+        c.MF_POPUP,
+        @intFromPtr(recentMenu(&ed.recent.viewed, id_recent_view)),
+        ui.wide("Недавно просмотренные"),
+    );
+    _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_close, ui.wide("Закрыть"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(file_menu), ui.wide("Файл"));
+
+    const old = c.GetMenu(hwnd);
+    _ = c.SetMenu(hwnd, bar);
+    if (old != null) _ = c.DestroyMenu(old);
+    _ = c.DrawMenuBar(hwnd);
+}
+
+/// Открыть файл из списка недавних.
+fn openFromRecent(list: *const recent_mod.List, index: usize) void {
+    const path = list.at(index);
+    if (path.len == 0) return;
+    if (!recent_mod.onDisk(path)) {
+        ed.say("файла нет на месте");
+        refresh();
+        return;
+    }
+    // Путь надо скопировать: добавление в список недавних переставляет
+    // строки, и та, на которую мы смотрим, уедет под ногами.
+    var copy: [recent_mod.max_path]u8 = undefined;
+    const n = @min(path.len, copy.len);
+    @memcpy(copy[0..n], path[0..n]);
+    addFile(copy[0..n]);
+}
+
 // ------------------------------------------------------------------- окно
 
 fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
@@ -1487,6 +1611,9 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             // и масштаб не меняется.
             _ = c.SetFocus(hwnd);
 
+            loadRecent();
+            buildMenu(hwnd);
+
             ed.say("откройте файл, перетащите его сюда мышью или добавьте дорожку");
             refresh();
             return 0;
@@ -1506,6 +1633,15 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_play => togglePlay(),
                 id_shot => saveFrame(),
                 id_link => toggleLink(),
+                id_menu_open => openFile(),
+                id_menu_save => saveProject(),
+                id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
+                id_recent_rec...id_recent_rec + recent_mod.max_items - 1 => {
+                    openFromRecent(&ed.recent.recorded, @intCast((wp & 0xFFFF) - id_recent_rec));
+                },
+                id_recent_view...id_recent_view + recent_mod.max_items - 1 => {
+                    openFromRecent(&ed.recent.viewed, @intCast((wp & 0xFFFF) - id_recent_view));
+                },
                 else => {},
             }
             return 0;
@@ -1619,7 +1755,9 @@ fn paintBuffered(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
 /// Папка, где лежат настройки. Редактор — отдельная программа, и путь
 /// к ним он вычисляет сам, тем же способом, что и окно записи.
 fn settingsDir(allocator: std.mem.Allocator) ?[]const u8 {
-    return ui.defaultDir(allocator) catch null;
+    var buf: [paths.max_path]u8 = undefined;
+    const dir = paths.base(&buf) catch return ui.defaultDir(allocator) catch null;
+    return allocator.dupe(u8, dir) catch null;
 }
 
 /// Прочитать высоту кадра, подогнанную в прошлый раз.

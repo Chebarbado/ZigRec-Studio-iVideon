@@ -30,6 +30,10 @@ const usage =
     \\        с --audio в файл идёт ещё и звуковая дорожка с известным рисунком
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
+    \\  zigrec recent-smoke ПАПКА
+    \\        самопроверка списков недавних: запись, чтение, порядок
+    \\  zigrec home-smoke
+    \\        самопроверка хранения: Portable и Classic
     \\  zigrec shot-smoke ФАЙЛ.png [НОМЕР]
     \\        самопроверка снимка: эталонный кадр записывается картинкой
     \\  zigrec frame-smoke ФАЙЛ [СЕКУНДЫ]
@@ -157,6 +161,15 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
+    } else if (eq(cmd, "recent-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужна папка\n");
+            code = 2;
+        } else {
+            code = try recentSmoke(init.io, arena, w, args[2]);
+        }
+    } else if (eq(cmd, "home-smoke")) {
+        code = try homeSmoke(w);
     } else if (eq(cmd, "shot-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к картинке\n");
@@ -870,10 +883,120 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
     return 0;
 }
 
+/// Самопроверка списков недавних на диске.
+///
+/// Правила списка проверены тестами в памяти. Здесь добавляется диск:
+/// русские буквы в путях, пробелы в именах, кодировка файла — всё то,
+/// что в памяти не проверишь.
+fn recentSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, dir: []const u8) !u8 {
+    const recent = zigrec.recent;
+    zigrec.paths.ensureDir(dir);
+
+    var made = recent.Recent{};
+    made.recorded.add("D:\\Мои видео\\запись экрана 1.mp4");
+    made.recorded.add("D:\\Мои видео\\запись экрана 2.mp4");
+    // Тот же файл ещё раз — должен всплыть наверх, а не появиться дважды.
+    made.recorded.add("D:\\Мои видео\\запись экрана 1.mp4");
+    made.viewed.add("E:\\чужое\\клип с пробелами.mov");
+
+    if (!recent.save(&made, dir)) {
+        try w.print("[recent] ПРОВАЛ: не записалось в {s}\n", .{dir});
+        return 1;
+    }
+    try w.print("[recent] записано: записей {d}, просмотров {d}\n", .{
+        made.recorded.count,
+        made.viewed.count,
+    });
+
+    const back = recent.load(io, allocator, dir);
+    if (back.recorded.count != 2 or back.viewed.count != 1) {
+        try w.print("[recent] ПРОВАЛ: вернулось записей {d}, просмотров {d}\n", .{
+            back.recorded.count,
+            back.viewed.count,
+        });
+        return 1;
+    }
+    if (!std.mem.eql(u8, back.recorded.at(0), "D:\\Мои видео\\запись экрана 1.mp4")) {
+        try w.print("[recent] ПРОВАЛ: наверху оказалось «{s}»\n", .{back.recorded.at(0)});
+        return 1;
+    }
+    if (!std.mem.eql(u8, back.viewed.at(0), "E:\\чужое\\клип с пробелами.mov")) {
+        try w.writeAll("[recent] ПРОВАЛ: путь с пробелами развалился\n");
+        return 1;
+    }
+    try w.print("[recent] прочитано обратно, наверху: {s}\n", .{back.recorded.at(0)});
+
+    // Пропавший файл должен опознаваться как пропавший, а не прятаться.
+    if (recent.onDisk(back.recorded.at(0))) {
+        try w.writeAll("[recent] ПРОВАЛ: несуществующий файл выдан за существующий\n");
+        return 1;
+    }
+    try w.writeAll("[recent] пропавший файл опознан как пропавший\n");
+    try w.writeAll("[recent] СПИСКИ ЦЕЛЫ\n");
+    return 0;
+}
+
+/// Самопроверка хранения: оба способа, и возврат к тому, что было.
+///
+/// Трогаем настоящий признак рядом с программой — и обязательно возвращаем
+/// его в прежнее состояние: самопроверка не должна менять то, как человек
+/// настроил программу.
+fn homeSmoke(w: anytype) !u8 {
+    const paths = zigrec.paths;
+    const was = paths.currentMode();
+    try w.print("[home] сейчас: {s}\n", .{was.label()});
+
+    var exe_buf: [paths.max_path]u8 = undefined;
+    const exe_dir = paths.exeDir(&exe_buf) catch {
+        try w.writeAll("[home] ПРОВАЛ: не нашлась папка программы\n");
+        return 1;
+    };
+
+    var buf: [paths.max_path]u8 = undefined;
+    var code: u8 = 0;
+
+    if (paths.setMode(.portable)) {
+        const base = paths.base(&buf) catch "";
+        try w.print("[home] Portable: {s}\n", .{base});
+        if (paths.currentMode() != .portable or !std.mem.eql(u8, base, exe_dir)) {
+            try w.writeAll("[home] ПРОВАЛ: Portable не привёл к папке программы\n");
+            code = 1;
+        }
+    } else {
+        try w.writeAll("[home] ПРОВАЛ: признак Portable не создался\n");
+        code = 1;
+    }
+
+    if (code == 0) {
+        if (paths.setMode(.classic)) {
+            const base = paths.base(&buf) catch "";
+            try w.print("[home] Classic: {s}\n", .{base});
+            if (paths.currentMode() != .classic or std.mem.eql(u8, base, exe_dir)) {
+                try w.writeAll("[home] ПРОВАЛ: Classic не увёл из папки программы\n");
+                code = 1;
+            }
+        } else {
+            try w.writeAll("[home] ПРОВАЛ: признак Portable не убрался\n");
+            code = 1;
+        }
+    }
+
+    // Возвращаем как было — что бы ни случилось выше.
+    _ = paths.setMode(was);
+    if (paths.currentMode() != was) {
+        try w.writeAll("[home] ПРОВАЛ: способ хранения не вернулся к прежнему\n");
+        return 1;
+    }
+    try w.print("[home] вернулись к прежнему: {s}\n", .{was.label()});
+    if (code != 0) return code;
+    try w.writeAll("[home] ХРАНЕНИЕ ПЕРЕКЛЮЧАЕТСЯ\n");
+    return 0;
+}
+
 /// Самопроверка снимка кадра.
 ///
 /// Рисуем эталонный кадр с таймкодом, записываем его картинкой и печатаем
-/// числа. Дальше в дело вступает чужая программа: `tools\\\\check.cmd` просит
+/// числа. Дальше в дело вступает чужая программа: `tools\\check.cmd` просит
 /// ffmpeg распаковать нашу картинку обратно в пиксели, а `verify-raw` читает
 /// из них номер кадра. Своим же кодом проверять свою запись — значит
 /// не заметить ошибки, сделанной в обе стороны одинаково.

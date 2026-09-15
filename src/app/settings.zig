@@ -157,6 +157,23 @@ fn trim(text: []const u8) []const u8 {
     return out;
 }
 
+/// Лежит ли файл настроек в этой папке.
+///
+/// Нужна не из любопытства: прежние выпуски клали настройки в папку записей,
+/// и при переезде надо отличить «настроек тут нет» от «настройки по
+/// умолчанию». `load` этого не различает — он в обоих случаях отдаёт
+/// умолчания.
+pub fn present(dir_path: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+    var path_buf: [max_path * 2]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ dir_path, file_name }) catch return false;
+    var wide: [std.fs.max_path_bytes]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide, path) catch return false;
+    if (n >= wide.len) return false;
+    wide[n] = 0;
+    return c.GetFileAttributesW(@ptrCast(&wide)) != c.INVALID_FILE_ATTRIBUTES;
+}
+
 /// Прочитать настройки с диска. Нет файла — вернём умолчания: первый запуск
 /// не должен ничем отличаться от обычного.
 pub fn load(io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8) Settings {
