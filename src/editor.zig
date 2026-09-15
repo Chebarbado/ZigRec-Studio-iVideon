@@ -16,6 +16,7 @@ const view_mod = @import("editor_view.zig");
 const media = @import("media.zig");
 const waveform = @import("waveform.zig");
 const project_file = @import("project_file.zig");
+const player_mod = @import("player.zig");
 const ui = @import("ui.zig");
 
 const View = view_mod.View;
@@ -31,12 +32,18 @@ const id_redo = 207;
 const id_save = 208;
 const id_add_video = 209;
 const id_add_audio = 210;
+const id_play = 211;
 
 /// Высота панели кнопок. Таймлайн начинается под ней.
 /// Два ряда: сверху файл и дорожки, снизу правка.
 const toolbar_h: i32 = 82;
 /// Высота строки сообщения снизу.
 const status_h: i32 = 22;
+/// Высота окна предпросмотра над таймлайном.
+const preview_h: i32 = 260;
+/// Такт воспроизведения. Тридцать раз в секунду: чаще человек не заметит,
+/// реже — заметит рывки.
+const timer_play = 1;
 
 /// Дескриптор курсора — не адрес, а номер в таблице ядра, и выровнен он
 /// как попало. Приведение его к типизированному указателю Zig в безопасном
@@ -46,6 +53,25 @@ const setCursorRaw = @extern(
     *const fn (?*anyopaque) callconv(.winapi) ?*anyopaque,
     .{ .name = "SetCursor" },
 );
+
+/// Та же ловушка, шестая встреча: `HDROP` приходит числом в `wParam`,
+/// и превратить его в типизированный указатель Zig нельзя — упадёт
+/// на проверке выравнивания. Объявляем приёмники с целым параметром.
+const dragQueryFileW = @extern(
+    *const fn (usize, c.UINT, ?[*]u16, c.UINT) callconv(.winapi) c.UINT,
+    .{ .name = "DragQueryFileW" },
+);
+const dragQueryPoint = @extern(
+    *const fn (usize, *c.POINT) callconv(.winapi) c.BOOL,
+    .{ .name = "DragQueryPoint" },
+);
+const dragFinish = @extern(
+    *const fn (usize) callconv(.winapi) void,
+    .{ .name = "DragFinish" },
+);
+
+/// Сообщение о брошенных файлах.
+const wm_dropfiles = 0x0233;
 
 /// Что человек тянет мышью прямо сейчас.
 const Drag = enum { none, playhead, clip, trim_left, trim_right };
@@ -76,6 +102,15 @@ const Editor = struct {
     /// Волна каждого открытого файла. По исходнику на ячейку, номера те же,
     /// что у исходников проекта.
     waves: [timeline.max_sources]waveform.Envelope = @splat(.{}),
+
+    /// Открытый проигрыватель и чей исходник он показывает.
+    player: ?player_mod.Player = null,
+    player_source: u16 = 0,
+    /// Идёт ли воспроизведение.
+    playing: bool = false,
+    /// Когда был предыдущий такт — чтобы время шло по часам, а не по тактам.
+    last_tick_ns: u64 = 0,
+    btn_play: c.HWND = null,
 
     /// Последнее сообщение человеку.
     note: [256]u8 = @splat(0),
@@ -151,11 +186,13 @@ fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
     solid(dc, .{ .left = 0, .top = height - status_h, .right = width, .bottom = height }, 0x00F5F5F5);
     drawText(dc, 10, height - status_h + 3, ed.message(), col_text);
 
+    drawPreview(dc, width);
+
     // Ниже — таймлайн со своим началом координат. Так арифметика вида
     // остаётся той, что проверена тестами, и считает от нуля.
-    const lane_height = height - toolbar_h - status_h;
+    const lane_height = height - toolbar_h - preview_h - status_h;
     if (lane_height <= 0) return;
-    _ = c.SetViewportOrgEx(dc, 0, toolbar_h, null);
+    _ = c.SetViewportOrgEx(dc, 0, toolbar_h + preview_h, null);
     defer _ = c.SetViewportOrgEx(dc, 0, 0, null);
 
     drawRuler(dc, width);
@@ -163,6 +200,74 @@ fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
     drawEmptyHint(dc, width, lane_height);
     drawPlayhead(dc, lane_height);
     _ = hwnd;
+}
+
+/// Окно предпросмотра: кадр, который сейчас под указателем.
+///
+/// Чёрное поле, а не серое: на чёрном видно настоящие края кадра, и глаз
+/// не принимает поля за часть картинки.
+fn drawPreview(dc: c.HDC, width: i32) void {
+    const top = toolbar_h;
+    const bottom = top + preview_h;
+    solid(dc, .{ .left = 0, .top = top, .right = width, .bottom = bottom }, 0x00202020);
+    line(dc, 0, bottom - 1, width, bottom - 1, 0x00808080, 1);
+
+    // Время под указателем — всегда, даже когда кадра нет.
+    var time_buf: [64]u8 = undefined;
+    const stamp = view_mod.timeLabel(&time_buf, ed.playhead_ns, std.time.ns_per_ms * 100);
+    drawText(dc, 10, bottom - 22, stamp, 0x00C0C0C0);
+
+    const p = &(ed.player orelse {
+        drawCentered(dc, width, top, bottom, "здесь будет кадр: поставьте указатель на клип", 0x00808080);
+        return;
+    });
+    if (!p.ready) {
+        drawCentered(dc, width, top, bottom, "кадр не читается", 0x008080C0);
+        return;
+    }
+
+    const box_h = preview_h - 28;
+    const fit = player_mod.fitInto(p.width, p.height, width, box_h);
+    if (fit.w <= 0 or fit.h <= 0) return;
+
+    // Направление строк берём у самого кадра: положительная высота —
+    // строки снизу вверх, отрицательная — сверху вниз.
+    var info = std.mem.zeroes(c.BITMAPINFO);
+    info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = @intCast(p.width);
+    info.bmiHeader.biHeight = if (p.bottom_up)
+        @as(i32, @intCast(p.height))
+    else
+        -@as(i32, @intCast(p.height));
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = c.BI_RGB;
+
+    _ = c.SetStretchBltMode(dc, c.HALFTONE);
+    _ = c.StretchDIBits(
+        dc,
+        fit.x,
+        top + fit.y,
+        fit.w,
+        fit.h,
+        0,
+        0,
+        @intCast(p.width),
+        @intCast(p.height),
+        p.pixels.ptr,
+        &info,
+        c.DIB_RGB_COLORS,
+        c.SRCCOPY,
+    );
+}
+
+/// Строка посередине поля.
+fn drawCentered(dc: c.HDC, width: i32, top: i32, bottom: i32, text_line: []const u8, color: c.COLORREF) void {
+    var wide_buf: [160]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, text_line) catch return;
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(dc, &wide_buf, @intCast(n), &size) == 0) return;
+    drawText(dc, @divTrunc(width - size.cx, 2), @divTrunc(top + bottom - size.cy, 2), text_line, color);
 }
 
 /// Подсказка на пустом таймлайне.
@@ -333,6 +438,100 @@ fn drawPlayhead(dc: c.HDC, height: i32) void {
 }
 
 // ------------------------------------------------------------------ работа
+
+/// Показать кадр, который приходится на указатель.
+///
+/// Клип помнит, из какого места файла он взят, поэтому время в файле —
+/// это не время на дорожке: надо перевести одно в другое, иначе после
+/// обрезки картинка поедет.
+fn showFrame() void {
+    const found = clipUnderPlayhead() orelse {
+        if (ed.player) |*p| {
+            p.close();
+            ed.player = null;
+        }
+        return;
+    };
+    const clip = found.clip;
+
+    if (ed.player == null or ed.player_source != clip.source) {
+        if (ed.player) |*p| p.close();
+        ed.player = null;
+
+        const sources = ed.project.sourceList();
+        if (clip.source >= sources.len) return;
+        ed.player = player_mod.Player.open(ed.allocator, sources[clip.source].fullPath()) catch {
+            ed.say("кадр из этого файла не читается: в нём нет картинки");
+            return;
+        };
+        ed.player_source = clip.source;
+    }
+
+    // Время на дорожке → время внутри файла.
+    const inside = clip.in_ns + (ed.playhead_ns -| clip.at_ns);
+    if (ed.player) |*p| p.showAt(inside) catch {};
+}
+
+const FoundClip = struct { track: usize, clip: timeline.Clip };
+
+/// Клип с картинкой под указателем. Ищем по видеодорожкам сверху вниз:
+/// верхняя дорожка — то, что видит зритель.
+fn clipUnderPlayhead() ?FoundClip {
+    for (ed.project.trackList(), 0..) |track, i| {
+        if (track.kind != .video or track.muted) continue;
+        if (track.clipAt(ed.playhead_ns)) |index| {
+            return .{ .track = i, .clip = track.clips[index] };
+        }
+    }
+    return null;
+}
+
+/// Пустить или остановить воспроизведение.
+fn togglePlay() void {
+    if (ed.project.durationNs() == 0) {
+        ed.say("играть нечего: на дорожках пусто");
+        refresh();
+        return;
+    }
+    ed.playing = !ed.playing;
+    if (ed.playing) {
+        // Дошли до конца — начинаем сначала, а не стоим на месте.
+        if (ed.playhead_ns >= ed.project.durationNs()) ed.playhead_ns = 0;
+        ed.last_tick_ns = win32.nowNs();
+        _ = c.SetTimer(ed.hwnd, timer_play, 33, null);
+        ui.setText(ed.btn_play, "⏸ Пауза");
+        ed.say("играю");
+    } else {
+        _ = c.KillTimer(ed.hwnd, timer_play);
+        ui.setText(ed.btn_play, "▶ Играть");
+        ed.say("пауза");
+    }
+    showFrame();
+    refresh();
+}
+
+/// Такт воспроизведения.
+///
+/// Время идёт по часам, а не по числу тактов: такт может задержаться,
+/// и считать по тактам значит проигрывать медленнее, чем на самом деле.
+fn onPlayTick() void {
+    if (!ed.playing) return;
+    const now = win32.nowNs();
+    const step = now -| ed.last_tick_ns;
+    ed.last_tick_ns = now;
+
+    ed.playhead_ns += step;
+    const total = ed.project.durationNs();
+    if (ed.playhead_ns >= total) {
+        ed.playhead_ns = total;
+        ed.playing = false;
+        _ = c.KillTimer(ed.hwnd, timer_play);
+        ui.setText(ed.btn_play, "▶ Играть");
+        ed.say("конец");
+    }
+    showFrame();
+    refresh();
+}
 
 fn refresh() void {
     _ = c.InvalidateRect(ed.hwnd, null, 0);
@@ -544,8 +743,13 @@ fn saveProject() void {
     refresh();
 }
 
-/// Положить файл на таймлайн: по дорожке на каждую дорожку файла.
+/// Положить файл на таймлайн в начало.
 fn addFile(path: []const u8) void {
+    addFileAt(path, 0);
+}
+
+/// Положить файл на таймлайн: по дорожке на каждую дорожку файла.
+fn addFileAt(path: []const u8, at_ns: u64) void {
     var threaded: std.Io.Threaded = .init(ed.allocator, .{});
     defer threaded.deinit();
 
@@ -579,7 +783,7 @@ fn addFile(path: []const u8) void {
         const index = ed.project.addTrack(kind, name) catch |err| return complain(err);
         const len = if (track.duration_ns > 0) track.duration_ns else info.duration_ns;
         if (len < timeline.min_len_ns) continue;
-        ed.project.place(index, source, 0, len) catch |err| return complain(err);
+        ed.project.place(index, source, at_ns, len) catch |err| return complain(err);
         added += 1;
     }
 
@@ -593,6 +797,7 @@ fn addFile(path: []const u8) void {
 
     // Показываем целиком: иначе человек открыл файл и не увидел ничего.
     fitToProject();
+    showFrame();
     refresh();
 }
 
@@ -690,16 +895,17 @@ fn redoStep() void {
 /// Мышь приходит в координатах окна, а таймлайн живёт под панелью кнопок.
 /// Приводим в одном месте, чтобы сдвиг не расползся по обработчикам.
 fn toLane(y: i32) i32 {
-    return y - toolbar_h;
+    return y - toolbar_h - preview_h;
 }
 
 fn onDown(x: i32, y: i32) void {
-    if (y < toolbar_h) return;
+    if (y < toolbar_h + preview_h) return;
     const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
     switch (hit.target) {
         .ruler => {
             ed.playhead_ns = hit.when_ns;
             ed.drag = .playhead;
+            showFrame();
             _ = c.SetCapture(ed.hwnd);
         },
         .clip, .clip_left, .clip_right => {
@@ -719,6 +925,7 @@ fn onDown(x: i32, y: i32) void {
         .lane => {
             ed.has_selection = false;
             ed.playhead_ns = hit.when_ns;
+            showFrame();
         },
         .header => {
             // Щелчок по имени дорожки выключает и включает её.
@@ -731,7 +938,7 @@ fn onDown(x: i32, y: i32) void {
 
 fn onMove(x: i32, y: i32) void {
     if (ed.drag == .none) {
-        if (y < toolbar_h) return;
+        if (y < toolbar_h + preview_h) return;
         // Курсор подсказывает, что будет: у края — растяжение.
         const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
         var cursor: ?*anyopaque = null;
@@ -744,6 +951,7 @@ fn onMove(x: i32, y: i32) void {
     switch (ed.drag) {
         .playhead => {
             ed.playhead_ns = when;
+            showFrame();
             refresh();
         },
         .clip => {
@@ -795,6 +1003,52 @@ fn onUp() void {
     }
 }
 
+/// Файлы, брошенные на окно.
+///
+/// Раскладываем так же, как при открытии: каждая дорожка файла — своя полоса.
+/// Если бросили на пустое место таймлайна, клипы встают под курсор, а не
+/// в начало: человек показал мышью, куда именно.
+fn onDrop(drop: usize) void {
+    defer dragFinish(drop);
+
+    var point = c.POINT{ .x = 0, .y = 0 };
+    _ = dragQueryPoint(drop, &point);
+    const at_ns: u64 = if (point.x > view_mod.header_w and point.y > toolbar_h + preview_h)
+        ed.view.xToTime(point.x)
+    else
+        0;
+
+    // Сколько файлов бросили: 0xFFFFFFFF — это просьба назвать их число.
+    const count = dragQueryFileW(drop, 0xFFFFFFFF, null, 0);
+    if (count == 0) return;
+
+    var wide: [1024]u16 = undefined;
+    var utf8: [1024]u8 = undefined;
+    var added: u32 = 0;
+    var i: c.UINT = 0;
+    while (i < count) : (i += 1) {
+        const n = dragQueryFileW(drop, i, &wide, wide.len);
+        if (n == 0) continue;
+        const len = std.unicode.utf16LeToUtf8(&utf8, wide[0..n]) catch continue;
+        const path = utf8[0..len];
+
+        if (looksLikeProject(path)) {
+            // Проект заменяет всё, что открыто: складывать два проекта
+            // в один — это не «добавить», это каша.
+            loadProject(path);
+            return;
+        }
+        addFileAt(path, at_ns);
+        added += 1;
+    }
+
+    if (added > 1) {
+        var buf: [128]u8 = undefined;
+        ed.say(std.fmt.bufPrint(&buf, "добавлено файлов: {d}", .{added}) catch "файлы добавлены");
+        refresh();
+    }
+}
+
 fn onWheel(delta: i16, screen_x: i32) void {
     var point = c.POINT{ .x = screen_x, .y = 0 };
     _ = c.ScreenToClient(ed.hwnd, &point);
@@ -816,6 +1070,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             _ = ui.button(hwnd, "💾 Сохранить", id_save, 146, 8, 132, 28, 0);
             _ = ui.button(hwnd, "➕ Видеодорожка", id_add_video, 294, 8, 168, 28, 0);
             _ = ui.button(hwnd, "➕ Звуковая дорожка", id_add_audio, 470, 8, 196, 28, 0);
+            ed.btn_play = ui.button(hwnd, "▶ Играть", id_play, 674, 8, 110, 28, 0);
 
             // Нижний ряд: правка того, что уже лежит на дорожках.
             _ = ui.button(hwnd, "✂ Разрезать", id_split, 10, 46, 120, 28, 0);
@@ -828,7 +1083,14 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             var child = c.GetWindow(hwnd, c.GW_CHILD);
             while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) ui.applyFont(child);
 
-            ed.say("откройте файл (mp4, mov, avi, mp3, wav, ogg, flac, midi) или добавьте дорожку");
+            // Принимаем файлы, брошенные мышью из проводника.
+            c.DragAcceptFiles(hwnd, 1);
+            // Колесо приходит окну с клавиатурным вниманием. Без этой строки
+            // внимание остаётся на первой кнопке, кнопка колесо не пересылает,
+            // и масштаб не меняется.
+            _ = c.SetFocus(hwnd);
+
+            ed.say("откройте файл, перетащите его сюда мышью или добавьте дорожку");
             refresh();
             return 0;
         },
@@ -844,6 +1106,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_save => saveProject(),
                 id_add_video => addEmptyTrack(.video),
                 id_add_audio => addEmptyTrack(.audio),
+                id_play => togglePlay(),
                 else => {},
             }
             return 0;
@@ -859,7 +1122,14 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
         },
         c.WM_ERASEBKGND => return 1, // всё рисуем сами, в буфере
         c.WM_LBUTTONDOWN => {
+            // Возвращаем внимание окну: после нажатия кнопки оно осталось
+            // на ней, и колесо с клавиатурой перестали доходить.
+            _ = c.SetFocus(hwnd);
             onDown(loWord(lp), hiWord(lp));
+            return 0;
+        },
+        wm_dropfiles => {
+            onDrop(@bitCast(wp));
             return 0;
         },
         c.WM_MOUSEMOVE => {
@@ -885,10 +1155,16 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 c.VK_DELETE => deleteSelected(),
                 c.VK_HOME => {
                     ed.playhead_ns = 0;
+                    showFrame();
                     refresh();
                 },
+                c.VK_SPACE => togglePlay(),
                 else => {},
             }
+            return 0;
+        },
+        c.WM_TIMER => {
+            if (wp == timer_play) onPlayTick();
             return 0;
         },
         c.WM_SIZE => {
@@ -896,6 +1172,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             return 0;
         },
         c.WM_DESTROY => {
+            if (ed.player) |*p| p.close();
+            ed.player = null;
             c.PostQuitMessage(0);
             return 0;
         },
@@ -973,7 +1251,7 @@ pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         1000,
-        620,
+        860,
         null,
         null,
         hinst,
