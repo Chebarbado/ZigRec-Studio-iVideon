@@ -30,6 +30,8 @@ const usage =
     \\        с --audio в файл идёт ещё и звуковая дорожка с известным рисунком
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
+    \\  zigrec project-smoke ФАЙЛ.zrs
+    \\        самопроверка файла проекта: записать, прочитать, сверить
     \\  zigrec mcp-smoke [ПОРТ]
     \\        самопроверка сервера: настоящий разговор с окном и сверка ответов
     \\  zigrec audio-sync ФАЙЛ.wav
@@ -151,6 +153,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
+    } else if (eq(cmd, "project-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к файлу проекта\n");
+            code = 2;
+        } else {
+            code = try projectSmoke(init.io, arena, w, args[2]);
+        }
     } else if (eq(cmd, "mcp-smoke")) {
         code = try mcpSmoke(arena, w, argInt(args, 2, zigrec.control.default_port));
     } else if (eq(cmd, "audio-sync")) {
@@ -838,6 +847,87 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
         return 1;
     }
     try w.writeAll("[sync] ЗВУК НА МЕСТЕ\n");
+    return 0;
+}
+
+/// Самопроверка файла проекта: собрать, записать на диск, прочитать, сверить.
+///
+/// Тесты проверяют запись и чтение в памяти. Этот стенд добавляет диск:
+/// путь с русскими буквами, перевод строк, кодировку файла — всё то, что
+/// в памяти не проверишь.
+fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8) !u8 {
+    const timeline = zigrec.timeline;
+    const pf = zigrec.project_file;
+
+    const made = try allocator.create(timeline.Project);
+    defer allocator.destroy(made);
+    made.* = .{};
+
+    const src = try made.addSource("D:\\видео\\моя запись 2026.mp4", 60 * std.time.ns_per_s);
+    _ = try made.addTrack(.video, "Видео");
+    _ = try made.addTrack(.audio, "Микрофон ведущего");
+    try made.place(0, src, 0, 10 * std.time.ns_per_s);
+    try made.split(0, 4 * std.time.ns_per_s);
+    try made.place(1, src, 2 * std.time.ns_per_s, 8 * std.time.ns_per_s);
+    try made.setMuted(1, true);
+
+    try w.print("[project] собран проект: дорожек {d}, клипов {d}\n", .{
+        made.track_count,
+        made.trackList()[0].list().len + made.trackList()[1].list().len,
+    });
+
+    var text: [64 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&text);
+    try pf.write(made, &writer);
+    const bytes = writer.buffered();
+
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
+        try w.print("[project] ПРОВАЛ: не записывается {s}: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+    try w.print("[project] записано {d} байт в {s}\n", .{ bytes.len, std.fs.path.basename(path) });
+
+    const back_data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 22)) catch |err| {
+        try w.print("[project] ПРОВАЛ: не читается обратно: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(back_data);
+
+    const back = try allocator.create(timeline.Project);
+    defer allocator.destroy(back);
+    back.* = .{};
+    pf.read(back, back_data) catch |err| {
+        try w.print("[project] ПРОВАЛ: {s}\n", .{pf.explain(err)});
+        return 1;
+    };
+
+    if (back.track_count != made.track_count or back.source_count != made.source_count) {
+        try w.writeAll("[project] ПРОВАЛ: дорожек или исходников стало не столько\n");
+        return 1;
+    }
+    if (!std.mem.eql(u8, back.sourceList()[0].fullPath(), made.sourceList()[0].fullPath())) {
+        try w.writeAll("[project] ПРОВАЛ: путь к исходнику не совпал\n");
+        return 1;
+    }
+    for (made.trackList(), back.trackList()) |a, b| {
+        if (a.kind != b.kind or a.muted != b.muted or a.count != b.count) {
+            try w.writeAll("[project] ПРОВАЛ: дорожка изменилась\n");
+            return 1;
+        }
+        if (!std.mem.eql(u8, a.title(), b.title())) {
+            try w.writeAll("[project] ПРОВАЛ: имя дорожки не совпало\n");
+            return 1;
+        }
+        for (a.list(), b.list()) |x, y| {
+            if (x.source != y.source or x.in_ns != y.in_ns or x.len_ns != y.len_ns or x.at_ns != y.at_ns) {
+                try w.writeAll("[project] ПРОВАЛ: клип изменился\n");
+                return 1;
+            }
+        }
+    }
+
+    try w.print("[project] прочитано обратно: дорожек {d}, пути и имена целы\n", .{back.track_count});
+    try w.writeAll("[project] ПРОЕКТ СОШЁЛСЯ\n");
     return 0;
 }
 

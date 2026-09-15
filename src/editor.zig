@@ -15,6 +15,7 @@ const timeline = @import("timeline.zig");
 const view_mod = @import("editor_view.zig");
 const media = @import("media.zig");
 const waveform = @import("waveform.zig");
+const project_file = @import("project_file.zig");
 const ui = @import("ui.zig");
 
 const View = view_mod.View;
@@ -27,6 +28,7 @@ const id_ripple = 204;
 const id_compact = 205;
 const id_undo = 206;
 const id_redo = 207;
+const id_save = 208;
 
 /// Высота панели кнопок. Таймлайн начинается под ней.
 const toolbar_h: i32 = 44;
@@ -328,6 +330,10 @@ fn complain(err: anyerror) void {
 }
 
 fn openFile() void {
+    // Список форматов длинный, и перевод его в UTF-16 на этапе сборки
+    // упирается в счётчик шагов вычисления. Поднимаем предел здесь, а не
+    // укорачиваем список: список нужен человеку, а предел — только сборке.
+    @setEvalBranchQuota(20000);
     var path: [1024]u16 = @splat(0);
     var ofn = std.mem.zeroes(c.OPENFILENAMEW);
     ofn.lStructSize = @sizeOf(c.OPENFILENAMEW);
@@ -336,7 +342,8 @@ fn openFile() void {
     ofn.nMaxFile = path.len;
     // Список форматов: сначала «всё, что мы открываем», потом по отдельности.
     ofn.lpstrFilter = ui.wide(
-        "Видео и звук\x00*.mp4;*.mov;*.avi;*.mp3;*.wav;*.ogg;*.flac;*.mid;*.midi\x00" ++
+        "Проекты, видео и звук\x00*.zrs;*.mp4;*.mov;*.avi;*.mp3;*.wav;*.ogg;*.flac;*.mid;*.midi\x00" ++
+            "Проект Zig-Rec\x00*.zrs\x00" ++
             "Видео\x00*.mp4;*.mov;*.avi\x00" ++
             "Звук\x00*.mp3;*.wav;*.ogg;*.flac;*.mid;*.midi\x00" ++
             "Все файлы\x00*.*\x00\x00",
@@ -346,7 +353,146 @@ fn openFile() void {
 
     var utf8: [1024]u8 = undefined;
     const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&path, 0)) catch return;
-    addFile(utf8[0..len]);
+    const chosen = utf8[0..len];
+
+    // Что открыли — проект или запись — решаем по содержимому, а не по
+    // расширению: расширение врёт так же, как у видеофайлов.
+    if (looksLikeProject(chosen)) loadProject(chosen) else addFile(chosen);
+}
+
+/// Начинается ли файл подписью проекта.
+fn looksLikeProject(path: []const u8) bool {
+    var wide: [std.fs.max_path_bytes]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide, path) catch return false;
+    wide[n] = 0;
+    const handle = c.CreateFileW(
+        @ptrCast(&wide),
+        c.GENERIC_READ,
+        c.FILE_SHARE_READ,
+        null,
+        c.OPEN_EXISTING,
+        c.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (handle == c.INVALID_HANDLE_VALUE) return false;
+    defer _ = c.CloseHandle(handle);
+
+    var head: [64]u8 = undefined;
+    var got: c.DWORD = 0;
+    if (c.ReadFile(handle, &head, head.len, &got, null) == 0) return false;
+    return got >= project_file.magic.len and
+        std.mem.eql(u8, head[0..project_file.magic.len], project_file.magic);
+}
+
+/// Прочитать проект с диска.
+fn loadProject(path: []const u8) void {
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+
+    const data = std.Io.Dir.cwd().readFileAlloc(threaded.io(), path, ed.allocator, .limited(1 << 22)) catch {
+        ed.say("файл проекта не читается");
+        refresh();
+        return;
+    };
+    defer ed.allocator.free(data);
+
+    project_file.read(ed.project, data) catch |err| {
+        ed.say(project_file.explain(err));
+        refresh();
+        return;
+    };
+
+    // Волны считаем заново: в проекте их нет, там только пути.
+    // Файл мог и переехать — тогда волны просто не будет, а дорожка
+    // останется на месте.
+    var missing: usize = 0;
+    for (ed.project.sourceList(), 0..) |src, i| {
+        if (i >= ed.waves.len) break;
+        ed.waves[i] = waveform.read(src.fullPath()) catch blk: {
+            missing += 1;
+            break :blk .{};
+        };
+    }
+
+    ed.has_selection = false;
+    ed.playhead_ns = 0;
+    fitToProject();
+
+    var buf: [320]u8 = undefined;
+    ed.say(if (missing > 0)
+        std.fmt.bufPrint(&buf, "{s}: дорожек {d}, но {d} исходник(ов) не нашлось на месте", .{
+            std.fs.path.basename(path),
+            ed.project.track_count,
+            missing,
+        }) catch "проект открыт"
+    else
+        std.fmt.bufPrint(&buf, "{s}: проект открыт, дорожек {d}", .{
+            std.fs.path.basename(path),
+            ed.project.track_count,
+        }) catch "проект открыт");
+    refresh();
+}
+
+/// Сохранить проект: спросить имя и записать текстом.
+fn saveProject() void {
+    if (ed.project.track_count == 0) {
+        ed.say("сохранять нечего: в проекте нет дорожек");
+        refresh();
+        return;
+    }
+
+    var path: [1024]u16 = @splat(0);
+    const default = ui.wide("проект.zrs");
+    @memcpy(path[0..default.len], default);
+
+    var ofn = std.mem.zeroes(c.OPENFILENAMEW);
+    ofn.lStructSize = @sizeOf(c.OPENFILENAMEW);
+    ofn.hwndOwner = ed.hwnd;
+    ofn.lpstrFile = &path;
+    ofn.nMaxFile = path.len;
+    ofn.lpstrFilter = ui.wide("Проект Zig-Rec\x00*.zrs\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrDefExt = ui.wide("zrs");
+    ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_NOCHANGEDIR;
+    if (c.GetSaveFileNameW(&ofn) == 0) return;
+
+    var text: [64 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&text);
+    project_file.write(ed.project, &w) catch {
+        ed.say("проект не помещается в файл: слишком много клипов");
+        refresh();
+        return;
+    };
+
+    const handle = c.CreateFileW(
+        @ptrCast(&path),
+        c.GENERIC_WRITE,
+        0,
+        null,
+        c.CREATE_ALWAYS,
+        c.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (handle == c.INVALID_HANDLE_VALUE) {
+        ed.say("файл не создаётся: путь недоступен или файл занят");
+        refresh();
+        return;
+    }
+    defer _ = c.CloseHandle(handle);
+
+    const bytes = w.buffered();
+    var written: c.DWORD = 0;
+    const ok = c.WriteFile(handle, bytes.ptr, @intCast(bytes.len), &written, null) != 0;
+
+    var name: [512]u8 = undefined;
+    const name_len = std.unicode.utf16LeToUtf8(&name, std.mem.sliceTo(&path, 0)) catch 0;
+    var buf: [320]u8 = undefined;
+    ed.say(if (ok and written == bytes.len)
+        std.fmt.bufPrint(&buf, "сохранено: {s}", .{
+            std.fs.path.basename(name[0..name_len]),
+        }) catch "сохранено"
+    else
+        "файл записался не целиком: проверьте место на диске");
+    refresh();
 }
 
 /// Положить файл на таймлайн: по дорожке на каждую дорожку файла.
@@ -623,6 +769,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             _ = ui.button(hwnd, "Встык", id_compact, 444, 8, 84, 28, 0);
             ed.btn_undo = ui.button(hwnd, "Отменить", id_undo, 544, 8, 100, 28, 0);
             ed.btn_redo = ui.button(hwnd, "Вернуть", id_redo, 652, 8, 92, 28, 0);
+            _ = ui.button(hwnd, "Сохранить", id_save, 752, 8, 110, 28, 0);
 
             var child = c.GetWindow(hwnd, c.GW_CHILD);
             while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) ui.applyFont(child);
@@ -640,6 +787,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_compact => compactSelected(),
                 id_undo => undoStep(),
                 id_redo => redoStep(),
+                id_save => saveProject(),
                 else => {},
             }
             return 0;
@@ -676,7 +824,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 'Z' => if (ctrl) undoStep(),
                 'Y' => if (ctrl) redoStep(),
                 'O' => if (ctrl) openFile(),
-                'S' => splitAtPlayhead(),
+                // Одна буква, два смысла: с Ctrl сохраняем, без — режем.
+                'S' => if (ctrl) saveProject() else splitAtPlayhead(),
                 c.VK_DELETE => deleteSelected(),
                 c.VK_HOME => {
                     ed.playhead_ns = 0;
