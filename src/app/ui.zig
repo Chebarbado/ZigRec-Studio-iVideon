@@ -30,6 +30,7 @@ const settings_mod = @import("settings.zig");
 const paths = @import("paths.zig");
 const recent_mod = @import("recent.zig");
 const hotkey_mod = @import("hotkey.zig");
+const tray_menu = @import("tray_menu.zig");
 
 pub const Rect = capture_types.Rect;
 
@@ -53,6 +54,15 @@ const id_menu_settings = 310;
 const id_menu_about = 320;
 const id_set_portable = 340;
 const id_set_area_key = 341;
+/// Номера строк меню значка в трее. Далеко от прочих: они приходят тем же
+/// путём, что и нажатия кнопок.
+const id_tray_base = 800;
+
+/// Сообщение о брошенных файлах.
+const wm_dropfiles = 0x0233;
+
+/// Поле, куда бросают файл. Координаты рабочей части окна.
+const drop_zone = c.RECT{ .left = 214, .top = 432, .right = 510, .bottom = 470 };
 /// Номера строк в списке недавних. Берём с запасом, чтобы не столкнуться
 /// с номерами кнопок.
 const id_recent_base = 700;
@@ -131,6 +141,7 @@ const App = struct {
     home: []const u8 = "",
     /// Недавние записи и просмотры.
     recent: recent_mod.Recent = .{},
+
     /// Запись начата сочетанием «обвёл и пишешь»: по окончании спросим имя.
     started_by_area_key: bool = false,
     sound_on: bool = false,
@@ -634,6 +645,17 @@ pub fn measureLayout(hwnd: c.HWND) Layout {
     return out;
 }
 
+/// Та же ловушка с выравниванием, что и в редакторе: `HDROP` приходит
+/// числом, и превращать его в типизированный указатель Zig нельзя.
+const dragQueryFileW = @extern(
+    *const fn (usize, c.UINT, ?[*]u16, c.UINT) callconv(.winapi) c.UINT,
+    .{ .name = "DragQueryFileW" },
+);
+const dragFinish = @extern(
+    *const fn (usize) callconv(.winapi) void,
+    .{ .name = "DragFinish" },
+);
+
 /// Как в итоге зарегистрировались горячие клавиши.
 var hotkey_note: []const u8 = "";
 
@@ -1003,6 +1025,41 @@ fn drawServerLamp(dc: c.HDC) void {
     defer _ = c.SelectObject(dc, old_pen);
 
     _ = c.Ellipse(dc, box.left, box.top, box.right, box.bottom);
+}
+
+/// Поле, куда бросают файл.
+///
+/// Пунктир, а не сплошная рамка: сплошная читается как кнопка, а сюда
+/// не нажимают. Пунктирную рамку с подписью посередине понимают без слов —
+/// так выглядит место для броска везде.
+fn drawDropZone(dc: c.HDC) void {
+    const box = drop_zone;
+    const pen = c.CreatePen(c.PS_DOT, 1, 0x00A0A0A0);
+    defer _ = c.DeleteObject(@ptrCast(pen));
+    const old_pen = c.SelectObject(dc, @ptrCast(pen));
+    defer _ = c.SelectObject(dc, old_pen);
+    const hollow = c.GetStockObject(c.NULL_BRUSH);
+    const old_brush = c.SelectObject(dc, hollow);
+    defer _ = c.SelectObject(dc, old_brush);
+    _ = c.Rectangle(dc, box.left, box.top, box.right, box.bottom);
+
+    const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
+    const old_font = c.SelectObject(dc, font);
+    defer _ = c.SelectObject(dc, old_font);
+    _ = c.SetBkMode(dc, c.TRANSPARENT);
+    _ = c.SetTextColor(dc, 0x00808080);
+
+    var rect = box;
+    var wide_buf: [128]u16 = undefined;
+    const text = "Бросьте сюда файл — откроется в редакторе";
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch return;
+    _ = c.DrawTextW(
+        dc,
+        @ptrCast(&wide_buf),
+        @intCast(n),
+        &rect,
+        c.DT_CENTER | c.DT_VCENTER | c.DT_WORDBREAK,
+    );
 }
 
 /// Что написано рядом с лампочкой.
@@ -1389,6 +1446,110 @@ fn openRecent(index: usize) void {
         return;
     }
     openEditorWith(path);
+}
+
+/// Меню по правой кнопке на значке в трее.
+///
+/// Состав меню решает `tray_menu`: это чистый счёт и проверяется тестами.
+/// Здесь остаётся только показать его и вернуть выбранное.
+fn showTrayMenu(hwnd: c.HWND) void {
+    const menu = c.CreatePopupMenu();
+    if (menu == null) return;
+    defer _ = c.DestroyMenu(menu);
+
+    const p = app.rec.snapshot();
+    const paused = p.state == .paused;
+    var buf: [tray_menu.max_items]tray_menu.Item = undefined;
+    const items = tray_menu.build(.{
+        .recording = app.rec.isBusy(),
+        .paused = paused,
+        .has_last = app.last_path_len > 0,
+    }, &buf);
+
+    for (items, 0..) |item, i| {
+        if (item == .separator) {
+            _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+            continue;
+        }
+        var wide_buf: [128]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&wide_buf, item.label(paused)) catch continue;
+        wide_buf[n] = 0;
+        _ = c.AppendMenuW(menu, c.MF_STRING, @intCast(id_tray_base + @as(c_int, @intCast(i))), @ptrCast(&wide_buf));
+    }
+
+    var at: c.POINT = undefined;
+    _ = c.GetCursorPos(&at);
+    // Окно должно стать передним, иначе меню не закроется при щелчке мимо:
+    // так устроены всплывающие меню у значков в трее.
+    _ = c.SetForegroundWindow(hwnd);
+    const chosen = c.TrackPopupMenu(
+        menu,
+        c.TPM_RIGHTBUTTON | c.TPM_RETURNCMD | c.TPM_NONOTIFY,
+        at.x,
+        at.y,
+        0,
+        hwnd,
+        null,
+    );
+    if (chosen == 0) return;
+
+    const index: usize = @intCast(chosen - id_tray_base);
+    if (index >= items.len) return;
+    switch (items[index]) {
+        .show => {
+            _ = c.ShowWindow(hwnd, c.SW_SHOW);
+            _ = c.SetForegroundWindow(hwnd);
+        },
+        .record_area => areaKeyPressed(),
+        .stop => {
+            stopRecording();
+            updateStatus();
+        },
+        .pause => togglePause(),
+        .open_last => openLastFile(),
+        .settings => {
+            _ = c.ShowWindow(hwnd, c.SW_SHOW);
+            showSettings(hwnd);
+        },
+        // Закрыть совсем, а не спрятать: за этим сюда и приходят.
+        .exit => quit(hwnd),
+        .separator => {},
+    }
+}
+
+/// Закрыть программу совсем.
+fn quit(hwnd: c.HWND) void {
+    // Начатую запись доводим до конца: бросить её на середине значило бы
+    // отдать испорченный файл.
+    if (app.rec.isBusy()) stopRecording();
+    _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0);
+}
+
+/// Файлы, брошенные на окно: открываем их в редакторе.
+///
+/// Принимаем бросок в любом месте окна, а не только в отведённом поле:
+/// поле показывает, куда целиться, но промахнуться мимо программы обиднее,
+/// чем попасть не в тот её угол.
+fn onDrop(drop: usize) void {
+    defer dragFinish(drop);
+
+    const count = dragQueryFileW(drop, 0xFFFFFFFF, null, 0);
+    if (count == 0) return;
+
+    var wide_buf: [1024]u16 = undefined;
+    var utf8: [1024]u8 = undefined;
+    var opened: u32 = 0;
+    var i: c.UINT = 0;
+    while (i < count) : (i += 1) {
+        const n = dragQueryFileW(drop, i, &wide_buf, wide_buf.len);
+        if (n == 0) continue;
+        const len = std.unicode.utf16LeToUtf8(&utf8, wide_buf[0..n]) catch continue;
+        openEditorWith(utf8[0..len]);
+        opened += 1;
+    }
+
+    var note: [160]u8 = undefined;
+    setText(app.status, std.fmt.bufPrint(&note, "открываю в редакторе: файлов {d}", .{opened}) catch "открываю в редакторе");
 }
 
 /// Показать папку с записями в проводнике.
@@ -1804,6 +1965,9 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
 
             app.btn_server = button(hwnd, "Сервер MCP", id_server, 14, 396, 140, 30, 0);
             _ = button(hwnd, "Редактор дорожек…", id_editor, 14, 438, 190, 30, 0);
+
+            // Принимаем файлы, брошенные мышью из проводника.
+            c.DragAcceptFiles(hwnd, 1);
             app.lbl_server = label(hwnd, "", 194, 402, 300, 20);
 
             _ = label(hwnd, "Кадров/с", 14, 152, 90, 20);
@@ -1912,6 +2076,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             const dc = c.BeginPaint(hwnd, &ps);
             paintWaveBuffered(hwnd, dc);
             drawServerLamp(dc);
+            drawDropZone(dc);
             _ = c.EndPaint(hwnd, &ps);
             return 0;
         },
@@ -1976,6 +2141,11 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                     _ = c.SetForegroundWindow(hwnd);
                 }
             }
+            if (lp == c.WM_RBUTTONUP or lp == c.WM_CONTEXTMENU) showTrayMenu(hwnd);
+            return 0;
+        },
+        wm_dropfiles => {
+            onDrop(@bitCast(wp));
             return 0;
         },
         c.WM_KEYDOWN => {

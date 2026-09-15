@@ -97,6 +97,9 @@ const callWindowProcW = @extern(
 /// Сообщение о брошенных файлах.
 const wm_dropfiles = 0x0233;
 
+/// Волна посчиталась: пора перерисовать дорожку.
+const wm_wave_ready = c.WM_APP + 3;
+
 /// Держат ли Alt — «сделать врозь, не трогая связку».
 ///
 /// Alt, а не кнопка на панели: решение принимается в тот момент, когда
@@ -914,11 +917,11 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
 
     const source = ed.project.addSource(path, info.duration_ns) catch |err| return complain(err);
 
-    // Волна считается один раз, при открытии. Файл без звука — не беда:
-    // просто рисовать будет нечего.
-    if (source < ed.waves.len) {
-        ed.waves[source] = waveform.read(path) catch .{};
-    }
+    // Волну считаем в стороне, а не здесь. Декодирование звука часового
+    // файла занимает секунды, и всё это время окно стояло бы столбом
+    // с брошенным на него файлом. Клип появится сразу, волна — когда
+    // досчитается.
+    if (source < ed.waves.len) startWave(path, source);
 
     // Дорожки одного файла связываем сразу: звук должен ходить за
     // картинкой с первой секунды, а не после того, как человек об этом
@@ -1478,6 +1481,45 @@ fn finishRename(accept: bool) void {
     refresh();
 }
 
+// ------------------------------------------------------------ волна
+
+/// Задание фоновому счёту волны.
+///
+/// Путь копируем к себе: тот, что пришёл, живёт на стеке вызывающего
+/// и к началу счёта его уже не будет.
+const WaveJob = struct {
+    path: [512]u8 = @splat(0),
+    len: usize = 0,
+    source: u16 = 0,
+};
+
+/// Посчитать волну в стороне от окна.
+fn startWave(path: []const u8, source: u16) void {
+    if (path.len >= 512) return;
+    const job = ed.allocator.create(WaveJob) catch return;
+    job.* = .{ .source = source, .len = path.len };
+    @memcpy(job.path[0..path.len], path);
+
+    const thread = std.Thread.spawn(.{}, waveWorker, .{job}) catch {
+        // Поток не завёлся — считаем прямо здесь. Лучше подождать,
+        // чем остаться без волны.
+        ed.allocator.destroy(job);
+        ed.waves[source] = waveform.read(path) catch .{};
+        return;
+    };
+    // Не ждём его: он сам сообщит окну, когда досчитает.
+    thread.detach();
+}
+
+fn waveWorker(job: *WaveJob) void {
+    const made = waveform.read(job.path[0..job.len]) catch waveform.Envelope{};
+    if (job.source < ed.waves.len) ed.waves[job.source] = made;
+    // Просим окно перерисоваться из его же потока: трогать окно из чужого
+    // потока нельзя, а сообщение — можно.
+    _ = c.PostMessageW(ed.hwnd, wm_wave_ready, 0, 0);
+    ed.allocator.destroy(job);
+}
+
 // ------------------------------------------------------------- недавние
 
 fn homeDir() []const u8 {
@@ -1676,6 +1718,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
         },
         wm_dropfiles => {
             onDrop(@bitCast(wp));
+            return 0;
+        },
+        wm_wave_ready => {
+            refresh();
             return 0;
         },
         c.WM_LBUTTONDBLCLK => {

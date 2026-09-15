@@ -21,6 +21,7 @@ pub const version = @import("version.zig");
 pub const settings = @import("app/settings.zig");
 pub const paths = @import("app/paths.zig");
 pub const hotkey = @import("app/hotkey.zig");
+pub const tray_menu = @import("app/tray_menu.zig");
 pub const recent = @import("app/recent.zig");
 pub const capture_types = @import("capture/capture_types.zig");
 pub const capture = @import("capture/capture.zig");

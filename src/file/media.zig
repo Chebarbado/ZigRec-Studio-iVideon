@@ -485,11 +485,133 @@ fn readGif(data: []const u8) Error!Info {
     return out;
 }
 
+/// Сколько головы файла обычно хватает, чтобы узнать, что внутри.
+///
+/// Восемь мегабайт: в них помещается оглавление часовой записи. Число
+/// подобрано не на глаз — оглавление mp4 растёт примерно по килобайту
+/// на секунду видео, и восьми мегабайт хватает на два часа с запасом.
+pub const head_limit: usize = 8 << 20;
+
 /// Прочитать файл с диска и разобрать.
+///
+/// Сначала пробуем обойтись головой файла: полутарагигабайтную запись
+/// незачем поднимать в память целиком ради того, чтобы узнать её длину
+/// и дорожки. Если в голове оглавления не оказалось — читаем целиком.
+///
+/// Оглавление бывает и в хвосте: так пишут те, кто не переносит `moov`
+/// в начало. Мы своё переносим, но чужие файлы бывают всякие, и отказывать
+/// им нельзя.
 pub fn read(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Info {
+    if (readHead(io, allocator, path)) |quick| {
+        if (usable(quick)) return quick;
+    } else |_| {}
+
+    // У mp4 оглавление бывает и в хвосте: так пишут те, кто не переносит
+    // `moov` в начало. Идём к нему по цепочке боксов — это несколько чтений
+    // по шестнадцать байт, а не полтораста мегабайт середины.
+    if (peekFormat(io, path)) |format| {
+        if (format == .mp4 or format == .mov) {
+            if (readMoovOnly(io, allocator, path, format)) |quick| {
+                if (usable(quick)) return quick;
+            } else |_| {}
+        }
+    } else |_| {}
+
     const data = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 31));
     defer allocator.free(data);
     return parse(data);
+}
+
+/// Узнать формат по первым байтам, не читая файл.
+pub fn peekFormat(io: std.Io, path: []const u8) !Format {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var scratch: [512]u8 = undefined;
+    var reader = file.reader(io, &scratch);
+    var head: [64]u8 = undefined;
+    const got = try reader.interface.readSliceShort(&head);
+    return detect(head[0..got]);
+}
+
+/// Больше этого оглавление mp4 не бывает.
+///
+/// Шестьдесят четыре мегабайта — это оглавление многочасовой записи
+/// с мелкими кусками. Больше — признак того, что мы читаем не оглавление,
+/// а приняли за него что-то другое.
+const max_moov: u64 = 64 << 20;
+
+/// Дойти до `moov` по цепочке боксов и прочитать только его.
+///
+/// Боксы верхнего уровня идут подряд, и каждый называет свою длину.
+/// Значит, до оглавления можно дошагать, читая по шестнадцать байт
+/// на шаг, — и не трогать самую тяжёлую часть файла, картинку и звук.
+fn readMoovOnly(io: std.Io, allocator: std.mem.Allocator, path: []const u8, format: Format) !Info {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+
+    var scratch: [4096]u8 = undefined;
+    var reader = file.reader(io, &scratch);
+    const size = try reader.getSize();
+
+    var at: u64 = 0;
+    // Боксов верхнего уровня в mp4 единицы. Ограничение — от испорченного
+    // файла, в котором длина бокса нулевая и шаг не двигается с места.
+    var guard: usize = 0;
+    while (at + 8 <= size and guard < 256) : (guard += 1) {
+        try reader.seekTo(at);
+        var head: [16]u8 = undefined;
+        const got = try reader.interface.readSliceShort(&head);
+        if (got < 8) break;
+
+        var length: u64 = std.mem.readInt(u32, head[0..4], .big);
+        const name = head[4..8];
+        if (length == 1) {
+            if (got < 16) break;
+            length = std.mem.readInt(u64, head[8..16], .big);
+        }
+        if (length == 0) length = size - at;
+        if (length < 8 or at + length > size) break;
+
+        if (std.mem.eql(u8, name, "moov")) {
+            if (length > max_moov) return Error.Unsupported;
+            const buf = try allocator.alloc(u8, @intCast(length));
+            defer allocator.free(buf);
+            try reader.seekTo(at);
+            const read_len = try reader.interface.readSliceShort(buf);
+            if (read_len < length) return Error.Truncated;
+            // Разбираем один бокс: внутри него все ссылки свои, и ничего
+            // из остального файла ему не нужно.
+            return readBoxes(buf[0..read_len], format);
+        }
+
+        at += length;
+    }
+    return Error.Unsupported;
+}
+
+/// Годится ли разбор по голове: дорожки нашлись и длительность известна.
+fn usable(info: Info) bool {
+    return info.count > 0 and info.duration_ns > 0;
+}
+
+/// Разобрать только начало файла.
+pub fn readHead(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Info {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+
+    // Буфер чтения и место под данные — разные вещи. Отдать читателю тот же
+    // кусок памяти, в который он же и читает, значит получить кашу: он
+    // складывает туда своё.
+    const head = try allocator.alloc(u8, head_limit);
+    defer allocator.free(head);
+    var scratch: [64 * 1024]u8 = undefined;
+
+    var reader = file.reader(io, &scratch);
+    // `readSliceShort` честно отдаёт, сколько прочиталось: короткий файл —
+    // не ошибка, а просто короткий файл.
+    const got = try reader.interface.readSliceShort(head);
+    if (got == 0) return Error.Truncated;
+    return parse(head[0..got]);
 }
 
 /// Объяснение ошибки словами — для окна и для командной строки.

@@ -31,6 +31,8 @@ const usage =
     \\        с --audio в файл идёт ещё и звуковая дорожка с известным рисунком
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
+    \\  zigrec open-smoke ФАЙЛ
+    \\        самопроверка открытия: быстрый путь и медленный дают одно
     \\  zigrec ui-smoke
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec hotkey-smoke [СОЧЕТАНИЕ]
@@ -170,6 +172,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
+    } else if (eq(cmd, "open-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к файлу\n");
+            code = 2;
+        } else {
+            code = try openSmoke(init.io, arena, w, args[2]);
+        }
     } else if (eq(cmd, "ui-smoke")) {
         code = try uiSmoke(arena, w);
     } else if (eq(cmd, "hotkey-smoke")) {
@@ -977,6 +986,73 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
         return 1;
     }
     try w.writeAll("[sync] ЗВУК НА МЕСТЕ\n");
+    return 0;
+}
+
+/// Самопроверка открытия файла.
+///
+/// Редактор узнаёт, что внутри файла, не поднимая в память полуторагигабайтную
+/// запись целиком: сначала голова, потом — если оглавление в хвосте — проход
+/// по цепочке боксов. Быстрый путь обязан сказать то же, что и полное чтение:
+/// иначе окно покажет одну длительность, а играть будет другая.
+///
+/// Заодно меряем время. «Моментально» — это число, а не ощущение.
+fn openSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8) !u8 {
+    const media = zigrec.media;
+
+    const t0 = zigrec.win32.nowNs();
+    const quick = media.read(io, allocator, path) catch |err| {
+        try w.print("[open] ПРОВАЛ: файл не открылся: {s}\n", .{media.explain(err)});
+        return 1;
+    };
+    const t1 = zigrec.win32.nowNs();
+
+    // Полное чтение — то, как было раньше: поднять весь файл и разобрать.
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 31)) catch |err| {
+        try w.print("[open] ПРОВАЛ: файл не читается целиком: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(data);
+    const full = media.parse(data) catch |err| {
+        try w.print("[open] ПРОВАЛ: разбор целого файла: {s}\n", .{media.explain(err)});
+        return 1;
+    };
+    const t2 = zigrec.win32.nowNs();
+
+    const fast_ms = @as(f64, @floatFromInt(t1 - t0)) / @as(f64, std.time.ns_per_ms);
+    const slow_ms = @as(f64, @floatFromInt(t2 - t1)) / @as(f64, std.time.ns_per_ms);
+    try w.print("[open] {s}: {s}, {d:.2} с, дорожек {d}, {d} МБ\n", .{
+        std.fs.path.basename(path),
+        full.format.label(),
+        full.seconds(),
+        full.count,
+        data.len / (1 << 20),
+    });
+    try w.print("[open] быстрый путь {d:.1} мс, полное чтение {d:.1} мс\n", .{ fast_ms, slow_ms });
+    if (fast_ms > 0.01) {
+        try w.print("[open] быстрее в {d:.0} раз\n", .{slow_ms / fast_ms});
+    }
+
+    // Сойтись должны и длительность, и состав дорожек: по ним рисуется
+    // таймлайн, и разойдясь, они разойдутся молча.
+    if (quick.count != full.count) {
+        try w.print("[open] ПРОВАЛ: дорожек быстрым путём {d}, полным {d}\n", .{ quick.count, full.count });
+        return 1;
+    }
+    if (quick.duration_ns != full.duration_ns) {
+        try w.print("[open] ПРОВАЛ: длительность быстрым путём {d}, полным {d}\n", .{
+            quick.duration_ns,
+            full.duration_ns,
+        });
+        return 1;
+    }
+    for (quick.list(), full.list()) |a, b| {
+        if (a.kind != b.kind or a.width != b.width or a.height != b.height) {
+            try w.writeAll("[open] ПРОВАЛ: дорожка быстрым путём не та, что полным\n");
+            return 1;
+        }
+    }
+    try w.writeAll("[open] БЫСТРЫЙ ПУТЬ СОШЁЛСЯ С ПОЛНЫМ\n");
     return 0;
 }
 
