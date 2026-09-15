@@ -98,6 +98,32 @@ if not defined FFMPEG (
   )
 )
 
+rem Чтение чужих форматов. Проверяем на файлах, сделанных ЧУЖОЙ программой:
+rem на своих записях мы бы проверяли себя собой и не заметили бы общей
+rem ошибки. ffmpeg делает пять форматов из одного эталонного тона и куска
+rem записи, а мы должны узнать каждый и найти в нём дорожки.
+if defined FFMPEG (
+  echo [check] самопроверка чтения форматов
+  if not exist ".check\formats" mkdir ".check\formats"
+  "%FFMPEG%" -y -v error -i ".check\audio\tone_6.wav" -c:a libmp3lame -b:a 128k ".check\formats\t.mp3"
+  "%FFMPEG%" -y -v error -i ".check\audio\tone_6.wav" -c:a flac ".check\formats\t.flac"
+  "%FFMPEG%" -y -v error -i ".check\audio\tone_6.wav" -c:a libvorbis ".check\formats\t.ogg"
+  "%FFMPEG%" -y -v error -i ".check\sound.mp4" -c copy ".check\formats\t.mov"
+  "%FFMPEG%" -y -v error -i ".check\sound.mp4" -c:v mpeg4 -c:a mp3 ".check\formats\t.avi"
+  for %%f in (mp3 flac ogg mov avi) do (
+    "zig-out\bin\zigrec.exe" info ".check\formats\t.%%f"
+    if errorlevel 1 (
+      echo [check] ПРОВАЛ: не прочитан формат %%f
+      exit /b 1
+    )
+  )
+  "zig-out\bin\zigrec.exe" info ".check\audio\tone_6.wav"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: не прочитан формат wav
+    exit /b 1
+  )
+)
+
 rem Сервер MCP. Проверяем не «открылся ли порт», а то, ради чего он сделан:
 rem что на той стороне отвечает работающее окно и что ответы — годный JSON.
 rem Окно поднимаем с ключом --server: кнопку тут нажимать некому.

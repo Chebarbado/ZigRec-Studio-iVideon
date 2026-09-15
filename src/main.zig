@@ -18,7 +18,8 @@ const usage =
     \\        --sound          писать звук с микрофона в ту же дорожку
     \\  zigrec monitors                   какие есть мониторы
     \\  zigrec windows                    какие есть видимые окна
-    \\  zigrec info ФАЙЛ                  что внутри mp4: дорожки, длительность, кодеки
+    \\  zigrec info ФАЙЛ                  что внутри файла: формат, дорожки, кодеки
+    \\        понимает mp4, mov, avi, wav, mp3, ogg, flac, midi
     \\  zigrec verify-mp4 ФАЙЛ            разобрать mp4: боксы, быстрый старт, данные
     \\
     \\  zigrec capture-smoke [N] [dxgi|gdi]
@@ -839,34 +840,33 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
 /// научится его проигрывать. Декодер для этого не нужен — всё написано
 /// в заголовке.
 fn fileInfo(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8) !u8 {
-    const info = zigrec.probe.read(io, allocator, path) catch |err| {
-        const why = switch (err) {
-            error.NotMp4 => "это не mp4",
-            error.NoMoov => "в файле нет заголовка: запись не была дописана до конца",
-            error.Truncated => "файл обрывается на полуслове",
-            else => @errorName(err),
-        };
-        try w.print("[info] ПРОВАЛ: {s} — {s}\n", .{ std.fs.path.basename(path), why });
+    const info = zigrec.media.read(io, allocator, path) catch |err| {
+        try w.print("[info] ПРОВАЛ: {s} — {s}\n", .{
+            std.fs.path.basename(path),
+            zigrec.media.explain(err),
+        });
         return 1;
     };
 
-    try w.print("[info] {s}: {d:.2} с, дорожек {d}\n", .{
+    try w.print("[info] {s}: {s}, {d:.2} с, дорожек {d}\n", .{
         std.fs.path.basename(path),
+        info.format.label(),
         info.seconds(),
         info.list().len,
-    });
-    try w.print("[info] быстрый старт: {s}\n", .{
-        if (info.fast_start) "да, заголовок в начале" else "нет, заголовок в конце файла",
     });
 
     for (info.list(), 0..) |t, i| {
         if (t.kind == .video) {
             try w.print("[info]  {d}. {s}: {s}, {d}x{d}, {d:.1} кадр/с, {d:.2} с\n", .{
-                i + 1, t.kind.label(), t.codecLabel(), t.width, t.height, t.fps(), t.seconds(),
+                i + 1, t.kind.label(), t.codec, t.width, t.height, t.fps, t.seconds(),
+            });
+        } else if (t.sample_rate > 0) {
+            try w.print("[info]  {d}. {s}: {s}, {d} Гц, каналов {d}, {d:.2} с\n", .{
+                i + 1, t.kind.label(), t.codec, t.sample_rate, t.channels, t.seconds(),
             });
         } else {
             try w.print("[info]  {d}. {s}: {s}, {d:.2} с\n", .{
-                i + 1, t.kind.label(), t.codecLabel(), t.seconds(),
+                i + 1, t.kind.label(), t.codec, t.seconds(),
             });
         }
     }

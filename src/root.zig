@@ -26,6 +26,7 @@ pub const resample = @import("resample.zig");
 pub const tone = @import("tone.zig");
 pub const track = @import("track.zig");
 pub const probe = @import("probe.zig");
+pub const media = @import("media.zig");
 pub const timeline = @import("timeline.zig");
 pub const edit = @import("edit.zig");
 pub const mcp = @import("mcp.zig");
