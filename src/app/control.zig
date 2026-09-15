@@ -8,7 +8,10 @@
 //! тогда, когда человек нажал кнопку. Программа, которая открывает порт
 //! молча, — это не то, что стоит ставить на рабочую машину.
 //!
-//! Слушаем только `127.0.0.1`: наружу порт не выходит.
+//! По умолчанию слушаем `127.0.0.1`: наружу порт не выходит сам собой.
+//! Адрес можно сменить — вплоть до `0.0.0.0` и IPv6, — но об этом окно
+//! говорит прямо: открытый наружу порт человек должен увидеть, а не узнать
+//! потом и от кого-то другого.
 //!
 //! Главное решение здесь — **исполняет всё поток окна, а не поток сервера**.
 //! Поток сервера только принимает соединение, разбирает строку и передаёт
@@ -19,6 +22,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const mcp = @import("mcp.zig");
+const listen = @import("listen.zig");
 const c = win32.c;
 const net = std.Io.net;
 
@@ -63,6 +67,8 @@ pub const Error = error{
     /// Поток не завёлся.
     ThreadFailed,
     Unsupported,
+    /// Адрес не разобрался.
+    BadAddress,
 };
 
 /// Состояние сервера — то, что показывает лампочка.
@@ -74,6 +80,9 @@ pub const State = enum {
 
 pub const Server = struct {
     port: u16 = default_port,
+    /// На каком адресе слушаем.
+    address: [listen.max_text]u8 = @splat(0),
+    address_len: usize = 0,
     hwnd: c.HWND = null,
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = .init(false),
@@ -92,8 +101,29 @@ pub const Server = struct {
         return .off;
     }
 
+    /// Адрес, на котором слушаем. Пусто — значит умолчание.
+    pub fn listenAddress(self: *const Server) []const u8 {
+        if (self.address_len == 0) return listen.default_text;
+        return self.address[0..self.address_len];
+    }
+
+    /// Адрес с портом, как это принято показывать.
+    pub fn where(self: *const Server, buf: []u8) []const u8 {
+        return listen.write(buf, self.listenAddress(), self.port);
+    }
+
     pub fn start(self: *Server, hwnd: c.HWND, port: u16) Error!void {
+        return self.startAt(hwnd, listen.default_text, port);
+    }
+
+    pub fn startAt(self: *Server, hwnd: c.HWND, address: []const u8, port: u16) Error!void {
         if (builtin.os.tag != .windows) return Error.Unsupported;
+        // Негодный адрес не берём: слушать по нему нечего, а молча
+        // подставить свой значило бы соврать про то, где мы слушаем.
+        if (!listen.valid(address)) return Error.BadAddress;
+        const n = @min(address.len, self.address.len);
+        @memcpy(self.address[0..n], address[0..n]);
+        self.address_len = n;
         if (self.running.load(.acquire)) return;
         self.hwnd = hwnd;
         self.port = port;
@@ -112,7 +142,7 @@ pub const Server = struct {
         // Приём соединений ждёт клиента и сам по себе не проснётся.
         // Будим его собственным подключением — это надёжнее, чем закрывать
         // сокет из чужого потока в тот момент, когда он в нём же и ждёт.
-        knock(self.port);
+        knock(self.listenAddress(), self.port);
         if (self.thread) |t| {
             t.join();
             self.thread = null;
@@ -137,7 +167,7 @@ pub const Server = struct {
         defer threaded.deinit();
         const io = threaded.io();
 
-        var addr = try net.IpAddress.parseLiteral("127.0.0.1:1");
+        var addr = listen.parse(self.listenAddress(), self.port) catch return Error.BadAddress;
         addr.setPort(self.port);
         var server = addr.listen(io, .{ .reuse_address = true }) catch {
             return Error.PortBusy;
@@ -256,11 +286,26 @@ pub const Server = struct {
 };
 
 /// Постучаться в собственный порт, чтобы разбудить ожидание соединения.
-fn knock(port: u16) void {
+/// Куда стучаться, чтобы разбудить своё же ожидание входящего.
+///
+/// По тому же адресу, что и слушаем, — иначе на IPv6 или на другом
+/// сетевом имени стук уйдёт в пустоту, и сервер останется висеть
+/// в ожидании до конца работы программы.
+///
+/// Исключение — «слушаем всех»: по такому адресу не соединяются,
+/// он означает «любой мой», и стучаться надо в петлю на себя.
+pub fn knockAddress(address: []const u8) []const u8 {
+    const scope = listen.scopeOf(address) catch return "127.0.0.1";
+    if (scope != .any) return address;
+    // У «всех» две записи, и петля у каждой своя.
+    return if (std.mem.indexOfScalar(u8, address, ':') != null) "::1" else "127.0.0.1";
+}
+
+fn knock(address: []const u8, port: u16) void {
     var threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var addr = net.IpAddress.parseLiteral("127.0.0.1:1") catch return;
+    var addr = listen.parse(knockAddress(address), port) catch return;
     addr.setPort(port);
     const stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch return;
     stream.close(io);
@@ -299,4 +344,29 @@ test "порт по умолчанию не из общеизвестных" {
     // Порты ниже 1024 требуют прав и заняты системой; наш — из частного
     // диапазона, и его не отберут.
     try std.testing.expect(default_port > 1024);
+}
+
+test "стучимся туда же, где слушаем" {
+    // Иначе на IPv6 стук уйдёт в пустоту, и сервер останется висеть
+    // в ожидании входящего до конца работы программы.
+    try std.testing.expectEqualStrings("127.0.0.1", knockAddress("127.0.0.1"));
+    try std.testing.expectEqualStrings("::1", knockAddress("::1"));
+    try std.testing.expectEqualStrings("192.168.1.5", knockAddress("192.168.1.5"));
+}
+
+test "по «всем» не соединяются: стучимся в петлю той же семьи" {
+    try std.testing.expectEqualStrings("127.0.0.1", knockAddress("0.0.0.0"));
+    try std.testing.expectEqualStrings("::1", knockAddress("::"));
+}
+
+test "негодный адрес не мешает достучаться" {
+    // Сервер по нему всё равно не поднялся бы, но и падать тут незачем.
+    try std.testing.expectEqualStrings("127.0.0.1", knockAddress("чепуха"));
+}
+
+test "у нового сервера адрес — умолчание" {
+    var s = Server{};
+    try std.testing.expectEqualStrings(listen.default_text, s.listenAddress());
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("127.0.0.1:15599", s.where(&buf));
 }

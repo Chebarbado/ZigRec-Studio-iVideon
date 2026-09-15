@@ -15,6 +15,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const hotkey = @import("hotkey.zig");
+const listen_mod = @import("listen.zig");
 const c = win32.c;
 
 pub const magic = "zigrec-settings";
@@ -47,6 +48,9 @@ pub const Settings = struct {
 
     /// Порт, на котором слушает сервер для Claude Code.
     port: u16 = 15599,
+    /// Адрес, на котором он слушает.
+    listen_addr: [listen_mod.max_text]u8 = @splat(0),
+    listen_addr_len: usize = 0,
     /// Поднимать сервер сразу при запуске окна.
     serve_at_start: bool = false,
 
@@ -61,6 +65,23 @@ pub const Settings = struct {
         s.setTemplate(default_template);
         _ = s.setAreaKey(hotkey.default_text);
         return s;
+    }
+
+    /// Адрес прослушивания. Пусто — значит умолчание.
+    pub fn listenAddress(self: *const Settings) []const u8 {
+        if (self.listen_addr_len == 0) return listen_mod.default_text;
+        return self.listen_addr[0..self.listen_addr_len];
+    }
+
+    /// Запомнить адрес. Негодный не берём: сервер по нему всё равно
+    /// не поднимется, а человек будет думать, что поднялся.
+    pub fn setListenAddress(self: *Settings, text: []const u8) bool {
+        const clean = std.mem.trim(u8, text, " \t");
+        if (!listen_mod.valid(clean)) return false;
+        const n = @min(clean.len, self.listen_addr.len);
+        @memcpy(self.listen_addr[0..n], clean[0..n]);
+        self.listen_addr_len = n;
+        return true;
     }
 
     pub fn areaKey(self: *const Settings) []const u8 {
@@ -137,6 +158,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("areakey {s}\n", .{s.areaKey()});
     try w.print("preview {d}\n", .{s.preview_h});
     try w.print("port {d}\n", .{s.port});
+    try w.print("listen {s}\n", .{s.listenAddress()});
     try w.print("serve {d}\n", .{@intFromBool(s.serve_at_start)});
 }
 
@@ -170,6 +192,8 @@ pub fn read(data: []const u8) Error!Settings {
             _ = out.setAreaKey(rest);
         } else if (std.mem.eql(u8, word, "preview")) {
             _ = out.setPreviewH(rest);
+        } else if (std.mem.eql(u8, word, "listen")) {
+            _ = out.setListenAddress(rest);
         } else if (std.mem.eql(u8, word, "port")) {
             _ = out.setPort(rest);
         } else if (std.mem.eql(u8, word, "serve")) {
@@ -371,4 +395,34 @@ test "файл без строки о сочетании даёт сочетан
     // Настройки от прежнего выпуска: строки нет, но клавиша должна работать.
     const back = try read("zigrec-settings 1\r\nport 15599\r\n");
     try std.testing.expectEqualStrings(hotkey.default_text, back.areaKey());
+}
+
+test "адрес прослушивания: годный берём, негодный не портит прежний" {
+    var s = Settings.init();
+    // Умолчание никого наружу не пускает.
+    try std.testing.expectEqualStrings("127.0.0.1", s.listenAddress());
+
+    try std.testing.expect(s.setListenAddress("0.0.0.0"));
+    try std.testing.expectEqualStrings("0.0.0.0", s.listenAddress());
+    try std.testing.expect(s.setListenAddress("::1"));
+    try std.testing.expectEqualStrings("::1", s.listenAddress());
+
+    try std.testing.expect(!s.setListenAddress("локалхост"));
+    try std.testing.expect(!s.setListenAddress(""));
+    try std.testing.expectEqualStrings("::1", s.listenAddress());
+}
+
+test "адрес переживает запись и чтение" {
+    var s = Settings.init();
+    try std.testing.expect(s.setListenAddress("2001:db8::1"));
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&s, &w);
+    const back = try read(w.buffered());
+    try std.testing.expectEqualStrings("2001:db8::1", back.listenAddress());
+}
+
+test "файл прежнего выпуска без строки об адресе даёт умолчание" {
+    const back = try read("zigrec-settings 1\r\nport 15599\r\n");
+    try std.testing.expectEqualStrings(listen_mod.default_text, back.listenAddress());
 }

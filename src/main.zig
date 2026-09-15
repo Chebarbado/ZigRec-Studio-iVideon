@@ -31,6 +31,8 @@ const usage =
     \\        с --audio в файл идёт ещё и звуковая дорожка с известным рисунком
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
+    \\  zigrec listen-smoke [ПОРТ]
+    \\        самопроверка адресов: слушать и достучаться, IPv4 и IPv6
     \\  zigrec open-smoke ФАЙЛ
     \\        самопроверка открытия: быстрый путь и медленный дают одно
     \\  zigrec ui-smoke
@@ -172,6 +174,8 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
+    } else if (eq(cmd, "listen-smoke")) {
+        code = try listenSmoke(init.io, w, @intCast(argInt(args, 2, 15690)));
     } else if (eq(cmd, "open-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");
@@ -986,6 +990,62 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
         return 1;
     }
     try w.writeAll("[sync] ЗВУК НА МЕСТЕ\n");
+    return 0;
+}
+
+/// Самопроверка адресов прослушивания.
+///
+/// Разбор адреса проверен тестами, но «разбирается» и «на нём можно слушать»
+/// — разные вещи. IPv6 на машине может быть выключен, петля `::1` может
+/// не отвечать. Поэтому здесь мы по-настоящему поднимаем ожидание входящего
+/// и по-настоящему в него стучимся.
+///
+/// `0.0.0.0` нарочно не трогаем: открывать порт всей сети ради самопроверки
+/// невежливо. Что мы про него знаем, проверено тестами на разборе.
+fn listenSmoke(io: std.Io, w: anytype, port: u16) !u8 {
+    const listen = zigrec.listen;
+    var bad: u8 = 0;
+
+    for ([_][]const u8{ "127.0.0.1", "::1" }) |address| {
+        var where_buf: [listen.max_text + 8]u8 = undefined;
+        const where = listen.write(&where_buf, address, port);
+
+        var addr = listen.parse(address, port) catch {
+            try w.print("[listen] ПРОВАЛ: {s} не разобрался\n", .{address});
+            bad = 1;
+            continue;
+        };
+        addr.setPort(port);
+
+        var server = addr.listen(io, .{ .reuse_address = true }) catch |err| {
+            // IPv6 на машине может быть выключен — это не поломка программы,
+            // но и «работает» сказать нельзя.
+            try w.print("[listen] {s}: слушать не вышло ({s})\n", .{ where, @errorName(err) });
+            continue;
+        };
+        defer server.deinit(io);
+
+        const knock_at = zigrec.control.knockAddress(address);
+        var to = listen.parse(knock_at, port) catch {
+            try w.print("[listen] ПРОВАЛ: некуда стучаться для {s}\n", .{address});
+            bad = 1;
+            continue;
+        };
+        to.setPort(port);
+
+        const stream = to.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch |err| {
+            try w.print("[listen] ПРОВАЛ: {s} слушает, но не отвечает ({s})\n", .{ where, @errorName(err) });
+            bad = 1;
+            continue;
+        };
+        stream.close(io);
+
+        const scope = listen.scopeOf(address) catch listen.Scope.loopback;
+        try w.print("[listen] {s} — {s}: слушает и отвечает\n", .{ where, scope.label() });
+    }
+
+    if (bad != 0) return 1;
+    try w.writeAll("[listen] АДРЕСА РАБОТАЮТ\n");
     return 0;
 }
 

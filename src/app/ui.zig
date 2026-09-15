@@ -31,6 +31,8 @@ const paths = @import("paths.zig");
 const recent_mod = @import("recent.zig");
 const hotkey_mod = @import("hotkey.zig");
 const tray_menu = @import("tray_menu.zig");
+const listen = @import("listen.zig");
+const corner = @import("mcp_corner.zig");
 
 pub const Rect = capture_types.Rect;
 
@@ -46,6 +48,7 @@ const id_area_rec = 109;
 const id_sound = 110;
 const id_server = 111;
 const id_editor = 112;
+const id_server_help = 113;
 
 // Пункты меню. Отдельный ряд номеров, чтобы не путать их с кнопками.
 const id_menu_open_dir = 300;
@@ -54,6 +57,7 @@ const id_menu_settings = 310;
 const id_menu_about = 320;
 const id_set_portable = 340;
 const id_set_area_key = 341;
+const id_set_listen = 342;
 /// Номера строк меню значка в трее. Далеко от прочих: они приходят тем же
 /// путём, что и нажатия кнопок.
 const id_tray_base = 800;
@@ -993,26 +997,26 @@ fn paintWaveBuffered(hwnd: c.HWND, dc: c.HDC) void {
 }
 
 /// Где горит лампочка сервера.
-fn serverLampRect() c.RECT {
-    return .{ .left = 166, .top = 404, .right = 184, .bottom = 422 };
-}
-
-/// Цвет лампочки по состоянию сервера.
-///
-/// Вынесено отдельно от рисования, чтобы правило можно было проверить
-/// тестом, а не разглядыванием окна.
-fn serverLampColor(state: control.State) c.COLORREF {
-    return switch (state) {
-        // Цвета записаны как BGR: так их ждёт Windows.
-        .listening => 0x0040C040,
-        .failed => 0x004040E0,
-        .off => 0x00A8A8A8,
+/// Всё, что уголку нужно знать о сервере.
+fn cornerFacts() corner.Facts {
+    return .{
+        .state = app.server.state(),
+        .address = app.prefs.listenAddress(),
+        .port = app.prefs.port,
+        .running = app.server.isRunning(),
+        .served = app.server.served.load(.monotonic),
+        .why = if (app.server.failure) |err| errors.short(err) else "",
     };
 }
 
+fn serverLampRect() c.RECT {
+    return .{ .left = 214, .top = 406, .right = 228, .bottom = 420 };
+}
+
 fn drawServerLamp(dc: c.HDC) void {
+    var text_buf: [96]u8 = undefined;
     const box = serverLampRect();
-    const color = serverLampColor(app.server.state());
+    const color = corner.look(&text_buf, cornerFacts()).dot;
 
     const brush = c.CreateSolidBrush(color);
     defer _ = c.DeleteObject(@ptrCast(brush));
@@ -1051,36 +1055,24 @@ fn drawDropZone(dc: c.HDC) void {
 
     var rect = box;
     var wide_buf: [128]u16 = undefined;
-    const text = "Бросьте сюда файл — откроется в редакторе";
+    // Одна строка: `DT_VCENTER` работает только с одной, а с двумя нижняя
+    // уезжает под нижний край поля.
+    const text = "Бросьте файл — откроется в редакторе";
     const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch return;
     _ = c.DrawTextW(
         dc,
         @ptrCast(&wide_buf),
         @intCast(n),
         &rect,
-        c.DT_CENTER | c.DT_VCENTER | c.DT_WORDBREAK,
+        c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE,
     );
 }
 
-/// Что написано рядом с лампочкой.
-fn serverNote(buf: []u8, server: *const control.Server) []const u8 {
-    return switch (server.state()) {
-        .listening => std.fmt.bufPrint(buf, "слушает 127.0.0.1:{d} · просьб {d}", .{
-            server.port,
-            server.served.load(.monotonic),
-        }) catch "слушает",
-        .failed => blk: {
-            const why = if (server.failure) |err| errors.short(err) else "не завёлся";
-            break :blk std.fmt.bufPrint(buf, "не завёлся: {s}", .{why}) catch "не завёлся";
-        },
-        .off => "выключен",
-    };
-}
-
 fn refreshServerRow(hwnd: c.HWND) void {
-    var buf: [128]u8 = undefined;
-    setText(app.lbl_server, serverNote(&buf, &app.server));
-    setText(app.btn_server, if (app.server.isRunning()) "Остановить" else "Сервер MCP");
+    var corner_text: [96]u8 = undefined;
+    setText(app.lbl_server, corner.look(&corner_text, cornerFacts()).text);
+    var corner_button: [96]u8 = undefined;
+    setText(app.btn_server, corner.look(&corner_button, cornerFacts()).button);
     var lamp = serverLampRect();
     _ = c.InvalidateRect(hwnd, &lamp, 0);
 }
@@ -1105,6 +1097,7 @@ const SettingsWindow = struct {
     portable_box: c.HWND = null,
     home_label: c.HWND = null,
     area_key_box: c.HWND = null,
+    listen_box: c.HWND = null,
     /// Нажали «Сохранить», а не «Отмена».
     accepted: bool = false,
 };
@@ -1187,6 +1180,22 @@ fn collectSettings() void {
     // Негодный порт не берём и прежний не портим: правило живёт в настройках
     // и проверено тестами.
     _ = app.prefs.setPort(boxText(settings_win.port_box, &buf3));
+
+    var addr_buf: [128]u8 = undefined;
+    const addr_text = boxText(settings_win.listen_box, &addr_buf);
+    if (!app.prefs.setListenAddress(addr_text)) {
+        var note: [256]u8 = undefined;
+        setText(app.status, std.fmt.bufPrint(&note, "адрес «{s}» не понят — остался прежний", .{
+            addr_text,
+        }) catch "адрес не понят");
+    } else if (listen.opensToNetwork(app.prefs.listenAddress())) {
+        // Про открытый наружу порт говорим прямо и сразу: человек должен
+        // узнать об этом здесь, а не потом и от кого-то другого.
+        var note: [256]u8 = undefined;
+        setText(app.status, std.fmt.bufPrint(&note, "внимание: {s} — порт будет виден из сети", .{
+            app.prefs.listenAddress(),
+        }) catch "порт будет виден из сети");
+    }
 
     var key_buf: [128]u8 = undefined;
     const key_text = boxText(settings_win.area_key_box, &key_buf);
@@ -1302,8 +1311,9 @@ fn showSettings(owner: c.HWND) void {
     _ = label(hwnd, "Обвести область и писать", 14, 134, 200, 20);
     settings_win.area_key_box = editBox(hwnd, id_set_area_key, 218, 132, 150, 24);
 
-    _ = label(hwnd, "Порт сервера MCP", 14, 168, 160, 20);
-    settings_win.port_box = editBox(hwnd, id_set_port, 218, 166, 90, 24);
+    _ = label(hwnd, "Сервер MCP: адрес и порт", 14, 168, 200, 20);
+    settings_win.listen_box = editBox(hwnd, id_set_listen, 218, 166, 150, 24);
+    settings_win.port_box = editBox(hwnd, id_set_port, 376, 166, 90, 24);
 
     settings_win.serve_box = button(hwnd, "Поднимать сервер при запуске", id_set_serve, 14, 200, 300, 24, c.BS_AUTOCHECKBOX);
 
@@ -1334,6 +1344,7 @@ fn showSettings(owner: c.HWND) void {
     var port_buf: [16]u8 = undefined;
     setText(settings_win.port_box, std.fmt.bufPrint(&port_buf, "{d}", .{app.prefs.port}) catch "15599");
     setText(settings_win.area_key_box, app.prefs.areaKey());
+    setText(settings_win.listen_box, app.prefs.listenAddress());
     _ = c.SendMessageW(settings_win.serve_box, c.BM_SETCHECK, if (app.prefs.serve_at_start) 1 else 0, 0);
 
     const mode = paths.currentMode();
@@ -1347,6 +1358,7 @@ fn showSettings(owner: c.HWND) void {
         settings_win.port_box,
         settings_win.serve_box,
         settings_win.area_key_box,
+        settings_win.listen_box,
     }) |h| applyFont(h);
     var child = c.GetWindow(hwnd, c.GW_CHILD);
     while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) applyFont(child);
@@ -1446,6 +1458,14 @@ fn openRecent(index: usize) void {
         return;
     }
     openEditorWith(path);
+}
+
+/// Короткая справка про сервер MCP.
+fn showServerHelp(owner: c.HWND) void {
+    var wide_buf: [1024]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, corner.help_text) catch return;
+    wide_buf[n] = 0;
+    _ = c.MessageBoxW(owner, @ptrCast(&wide_buf), wide("Сервер MCP"), c.MB_OK | c.MB_ICONINFORMATION);
 }
 
 /// Меню по правой кнопке на значке в трее.
@@ -1654,7 +1674,7 @@ fn toggleServer(hwnd: c.HWND) void {
     if (app.server.isRunning()) {
         app.server.stop();
     } else {
-        app.server.start(hwnd, app.prefs.port) catch |err| {
+        app.server.startAt(hwnd, app.prefs.listenAddress(), app.prefs.port) catch |err| {
             app.server.failure = err;
         };
         // Даём потоку сесть на порт, чтобы лампочка сразу сказала правду,
@@ -1963,12 +1983,15 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             app.slider_gain = gainSlider(hwnd, 106, 322, 320, 30);
             app.lbl_sound_note = label(hwnd, "с галочкой звук идёт и в индикатор, и в файл", 14, 362, 496, 20);
 
-            app.btn_server = button(hwnd, "Сервер MCP", id_server, 14, 396, 140, 30, 0);
+            // Уголок: точка, надпись, кнопка «пуск/стоп» и «?». Про сервер
+            // смотрят раз в день — целый ряд посреди окна он не заслужил.
+            app.btn_server = button(hwnd, "▶", id_server, 446, 400, 28, 24, 0);
+            _ = button(hwnd, "?", id_server_help, 478, 400, 28, 24, 0);
             _ = button(hwnd, "Редактор дорожек…", id_editor, 14, 438, 190, 30, 0);
 
             // Принимаем файлы, брошенные мышью из проводника.
             c.DragAcceptFiles(hwnd, 1);
-            app.lbl_server = label(hwnd, "", 194, 402, 300, 20);
+            app.lbl_server = label(hwnd, "", 234, 404, 206, 20);
 
             _ = label(hwnd, "Кадров/с", 14, 152, 90, 20);
             app.cb_fps = combo(hwnd, id_fps, 104, 148, 84, 200);
@@ -2054,6 +2077,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                     _ = c.InvalidateRect(hwnd, null, 1);
                 },
                 id_server => toggleServer(hwnd),
+                id_server_help => showServerHelp(hwnd),
                 id_editor => openEditor(),
                 id_menu_open_dir => openOutputDir(),
                 id_recent_base...id_recent_base + recent_mod.max_items - 1 => {
