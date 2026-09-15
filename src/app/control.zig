@@ -17,7 +17,7 @@
 //! или поздно они встретились бы на середине.
 const std = @import("std");
 const builtin = @import("builtin");
-const win32 = @import("win32.zig");
+const win32 = @import("../win32.zig");
 const mcp = @import("mcp.zig");
 const c = win32.c;
 const net = std.Io.net;
@@ -241,7 +241,7 @@ pub const Server = struct {
 
     fn answer(self: *Server, w: *std.Io.Writer, id: ?mcp.Id, request: mcp.Request) !void {
         switch (request) {
-            .initialize => return mcp.writeInitialize(w, id, @import("version.zig").VERSION),
+            .initialize => return mcp.writeInitialize(w, id, @import("../version.zig").VERSION),
             .list_tools => return mcp.writeToolList(w, id),
             .initialized => return,
             else => {},

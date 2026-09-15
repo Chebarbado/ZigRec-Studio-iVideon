@@ -12,10 +12,10 @@
 //! loopback, несколько дорожек в одном файле и коррекция накапливающегося
 //! дрейфа на длинной записи.
 const std = @import("std");
-const encode = @import("encode.zig");
+const encode = @import("../file/encode.zig");
 const mic = @import("mic.zig");
 const track_mod = @import("track.zig");
-const win32 = @import("win32.zig");
+const win32 = @import("../win32.zig");
 
 pub const Source = enum { microphone, system_loopback };
 

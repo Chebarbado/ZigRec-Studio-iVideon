@@ -15,7 +15,7 @@
 //! Время везде в наносекундах — теми же числами, что и в модели. Переводить
 //! в секунды при записи значило бы терять точность на каждом сохранении.
 const std = @import("std");
-const timeline = @import("timeline.zig");
+const timeline = @import("../edit/timeline.zig");
 
 /// Подпись в первой строке. По ней узнаётся файл и его поколение.
 pub const magic = "zigrec-project";

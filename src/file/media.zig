@@ -13,7 +13,7 @@
 //! показать полосу дорожки, картинка не нужна.
 const std = @import("std");
 const probe = @import("probe.zig");
-const wav = @import("wav.zig");
+const wav = @import("../sound/wav.zig");
 
 pub const Error = error{
     /// Ни одна подпись не подошла.

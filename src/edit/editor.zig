@@ -9,17 +9,17 @@
 //! у видео одна заливка, у звука другая.
 const std = @import("std");
 const builtin = @import("builtin");
-const win32 = @import("win32.zig");
+const win32 = @import("../win32.zig");
 const c = win32.c;
 const timeline = @import("timeline.zig");
 const view_mod = @import("editor_view.zig");
-const media = @import("media.zig");
-const waveform = @import("waveform.zig");
-const project_file = @import("project_file.zig");
-const player_mod = @import("player.zig");
-const settings_mod = @import("settings.zig");
-const png = @import("png.zig");
-const ui = @import("ui.zig");
+const media = @import("../file/media.zig");
+const waveform = @import("../file/waveform.zig");
+const project_file = @import("../file/project_file.zig");
+const player_mod = @import("../file/player.zig");
+const settings_mod = @import("../app/settings.zig");
+const png = @import("../file/png.zig");
+const ui = @import("../app/ui.zig");
 
 const View = view_mod.View;
 const Target = view_mod.Target;
@@ -1580,7 +1580,7 @@ pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
 
     var title_buf: [128]u8 = undefined;
     const title = std.fmt.bufPrint(&title_buf, "Zig-Rec Studio — редактор v{s}", .{
-        @import("version.zig").VERSION,
+        @import("../version.zig").VERSION,
     }) catch "Zig-Rec Studio — редактор";
     var title_w: [128]u16 = undefined;
     const tn = try std.unicode.utf8ToUtf16Le(&title_w, title);

@@ -15,7 +15,7 @@
 //! и своего декодера тут заводить незачем.
 const std = @import("std");
 const builtin = @import("builtin");
-const win32 = @import("win32.zig");
+const win32 = @import("../win32.zig");
 const c = win32.c;
 
 pub const Error = error{

@@ -10,7 +10,7 @@
 //! кусок, записи нужен непрерывный поток без единой потери.
 const std = @import("std");
 const builtin = @import("builtin");
-const win32 = @import("win32.zig");
+const win32 = @import("../win32.zig");
 const resample = @import("resample.zig");
 const track_mod = @import("track.zig");
 const c = win32.c;

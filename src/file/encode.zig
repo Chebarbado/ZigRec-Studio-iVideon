@@ -16,7 +16,7 @@
 //! Поэтому переносим сами, после закрытия файла: `mp4.makeFastStart`.
 const std = @import("std");
 const builtin = @import("builtin");
-const win32 = @import("win32.zig");
+const win32 = @import("../win32.zig");
 const c = win32.c;
 
 pub const Error = error{

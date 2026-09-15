@@ -8,7 +8,7 @@
 //! состоянии. Рисование — в окне, а правила отдельно, потому что их можно
 //! проверить тестом, а рисование нет.
 const std = @import("std");
-const recorder = @import("recorder.zig");
+const recorder = @import("../app/recorder.zig");
 
 /// Форма значка на кнопке.
 pub const Shape = enum { circle, ring, square };

@@ -11,9 +11,9 @@
 //! молчит. Поэтому источник изменений создаём сами.
 const std = @import("std");
 const builtin = @import("builtin");
-const win32 = @import("win32.zig");
+const win32 = @import("../win32.zig");
 const c = win32.c;
-const capture = @import("capture.zig");
+const capture = @import("../capture/capture.zig");
 const testbench = @import("testbench.zig");
 
 pub const Options = struct {

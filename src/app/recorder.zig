@@ -9,15 +9,15 @@
 //! в паузу, где ничего не происходит.
 const std = @import("std");
 const builtin = @import("builtin");
-const win32 = @import("win32.zig");
-const capture = @import("capture.zig");
-const capture_types = @import("capture_types.zig");
-const cursor = @import("cursor.zig");
-const encode = @import("encode.zig");
-const source = @import("source.zig");
-const mp4 = @import("mp4.zig");
-const audio = @import("audio.zig");
-const errors = @import("errors.zig");
+const win32 = @import("../win32.zig");
+const capture = @import("../capture/capture.zig");
+const capture_types = @import("../capture/capture_types.zig");
+const cursor = @import("../capture/cursor.zig");
+const encode = @import("../file/encode.zig");
+const source = @import("../capture/source.zig");
+const mp4 = @import("../file/mp4.zig");
+const audio = @import("../sound/audio.zig");
+const errors = @import("../errors.zig");
 
 pub const Rect = capture_types.Rect;
 

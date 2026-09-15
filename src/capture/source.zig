@@ -8,7 +8,7 @@
 //! время записи, и область должна ехать следом.
 const std = @import("std");
 const builtin = @import("builtin");
-const win32 = @import("win32.zig");
+const win32 = @import("../win32.zig");
 const c = win32.c;
 const types = @import("capture_types.zig");
 
