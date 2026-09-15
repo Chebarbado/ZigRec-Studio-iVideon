@@ -171,6 +171,16 @@ pub const Source = struct {
     path_len: usize = 0,
     duration_ns: u64 = 0,
 
+    /// Перенаправить исходник на другой файл.
+    ///
+    /// Нужно при открытии архива: внутри лежит копия, и брать надо её,
+    /// а не путь, записанный на чужой машине.
+    pub fn setPath(self: *Source, text: []const u8) void {
+        const n = @min(text.len, self.path.len);
+        @memcpy(self.path[0..n], text[0..n]);
+        self.path_len = n;
+    }
+
     /// Полный путь, как его открыли.
     pub fn fullPath(self: *const Source) []const u8 {
         return self.path[0..self.path_len];

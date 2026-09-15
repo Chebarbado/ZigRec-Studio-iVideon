@@ -51,6 +51,8 @@ const usage =
     \\        самопроверка снимка: эталонный кадр записывается картинкой
     \\  zigrec frame-smoke ФАЙЛ [СЕКУНДЫ]
     \\        самопроверка кадра: размер, шаг строки, длина буфера
+    \\  zigrec pack-smoke ФАЙЛ.zigrec
+    \\        самопроверка архива проекта: собрать, прочитать, сверить
     \\  zigrec project-smoke ФАЙЛ.zrs
     \\        самопроверка файла проекта: записать, прочитать, сверить
     \\  zigrec mcp-smoke [ПОРТ]
@@ -223,6 +225,13 @@ pub fn main(init: std.process.Init) !void {
             code = 2;
         } else {
             code = try frameSmoke(arena, w, args[2], argInt(args, 3, 1));
+        }
+    } else if (eq(cmd, "pack-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к архиву\n");
+            code = 2;
+        } else {
+            code = try packSmoke(init.io, arena, w, args[2]);
         }
     } else if (eq(cmd, "project-smoke")) {
         if (args.len < 3) {
@@ -1598,6 +1607,121 @@ fn frameSmoke(allocator: std.mem.Allocator, w: anytype, path: []const u8, second
         return 1;
     }
     try w.writeAll("[frame] КАДР ПОЛУЧЕН\n");
+    return 0;
+}
+
+/// Самопроверка архива проекта `.zigrec`.
+///
+/// Собираем архив с разметкой и с исходником внутри, пишем на диск, читаем
+/// обратно своим кодом и сверяем. А в `check.cmd` тот же архив открывает
+/// ЧУЖАЯ программа — питон умеет ZIP из коробки: ZIP мы пишем сами, и если
+/// мы ошиблись в заголовках, наш же читатель ошибётся так же и ничего
+/// не заметит.
+fn packSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8) !u8 {
+    const timeline = zigrec.timeline;
+    const pack = zigrec.project_pack;
+
+    const made = try allocator.create(timeline.Project);
+    defer allocator.destroy(made);
+    made.* = .{};
+
+    const src = try made.addSource("D:\\\\видео\\\\моя запись 2026.mp4", 60 * std.time.ns_per_s);
+    _ = try made.addTrack(.video, "Видео");
+    _ = try made.addTrack(.audio, "Микрофон ведущего");
+    const link = made.newLink();
+    try made.placeLinked(0, src, 0, 10 * std.time.ns_per_s, link);
+    try made.placeLinked(1, src, 0, 10 * std.time.ns_per_s, link);
+    try made.split(0, 4 * std.time.ns_per_s);
+
+    // Вместо настоящего видео кладём узнаваемый кусок: проверяем оболочку,
+    // а не кодеки.
+    const payload = "это не видео, а метка для проверки: " ** 64;
+    const media = [_]pack.Media{.{ .path = "D:\\\\видео\\\\моя запись 2026.mp4", .data = payload }};
+
+    const bytes = pack.write(allocator, made, zigrec.version.VERSION, &media) catch |err| {
+        try w.print("[pack] ПРОВАЛ: архив не собрался: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(bytes);
+
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
+        try w.print("[pack] ПРОВАЛ: не записывается {s}: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+    try w.print("[pack] собран {s}: {d} байт, внутри исходник на {d} байт\n", .{
+        std.fs.path.basename(path),
+        bytes.len,
+        payload.len,
+    });
+
+    const back = try allocator.create(timeline.Project);
+    defer allocator.destroy(back);
+    back.* = .{};
+
+    const opened = pack.readMarkup(allocator, io, path, back) catch |err| {
+        try w.print("[pack] ПРОВАЛ: архив не читается: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    try w.print("[pack] прочитан: сделан версией {s}, исходников внутри {d}\n", .{
+        opened.madeBy(),
+        opened.media,
+    });
+
+    if (!std.mem.eql(u8, opened.madeBy(), zigrec.version.VERSION)) {
+        try w.writeAll("[pack] ПРОВАЛ: метка не та\n");
+        return 1;
+    }
+    if (opened.media != 1) {
+        try w.writeAll("[pack] ПРОВАЛ: исходник внутри не нашёлся\n");
+        return 1;
+    }
+    if (back.track_count != made.track_count) {
+        try w.print("[pack] ПРОВАЛ: дорожек было {d}, стало {d}\n", .{ made.track_count, back.track_count });
+        return 1;
+    }
+    for (made.trackList(), back.trackList()) |a, b| {
+        if (a.kind != b.kind or a.count != b.count or !std.mem.eql(u8, a.title(), b.title())) {
+            try w.writeAll("[pack] ПРОВАЛ: дорожка не сошлась\n");
+            return 1;
+        }
+        for (a.list(), b.list()) |x, y| {
+            if (x.source != y.source or x.in_ns != y.in_ns or x.len_ns != y.len_ns or
+                x.at_ns != y.at_ns or x.link != y.link)
+            {
+                try w.writeAll("[pack] ПРОВАЛ: клип не сошёлся\n");
+                return 1;
+            }
+        }
+    }
+    try w.print("[pack] дорожки и клипы сошлись: дорожек {d}\n", .{back.track_count});
+
+    // Распаковка исходников: архив на то и собирали.
+    var dir_buf: [1024]u8 = undefined;
+    const dir = std.fmt.bufPrint(&dir_buf, "{s}.распаковано", .{path}) catch path;
+    zigrec.paths.ensureDir(dir);
+    const unpacked = pack.unpackMedia(io, path, dir) catch |err| {
+        try w.print("[pack] ПРОВАЛ: исходники не распаковались: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    if (unpacked != 1) {
+        try w.print("[pack] ПРОВАЛ: распаковано {d} вместо одного\n", .{unpacked});
+        return 1;
+    }
+
+    var check_buf: [1024]u8 = undefined;
+    const copy = pack.sourcePath(&check_buf, made.sourceList()[0].fullPath(), dir, true);
+    const got = std.Io.Dir.cwd().readFileAlloc(io, copy, allocator, .limited(1 << 20)) catch |err| {
+        try w.print("[pack] ПРОВАЛ: распакованное не читается: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(got);
+    if (!std.mem.eql(u8, got, payload)) {
+        try w.writeAll("[pack] ПРОВАЛ: распакованное не совпало с положенным\n");
+        return 1;
+    }
+    try w.print("[pack] исходник распакован и совпал байт в байт ({d} байт)\n", .{got.len});
+
+    try w.writeAll("[pack] АРХИВ СОШЁЛСЯ\n");
     return 0;
 }
 

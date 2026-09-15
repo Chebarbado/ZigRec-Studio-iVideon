@@ -196,6 +196,28 @@ if defined FFMPEG (
   )
 )
 
+rem Архив проекта .zigrec. ZIP мы пишем сами, поэтому читает нас ЧУЖАЯ
+rem программа: питон умеет ZIP из коробки и проверяет контрольные суммы.
+rem Своим же читателем проверять свою запись — значит повторить ошибку
+rem в обе стороны и ничего не заметить.
+echo [check] самопроверка архива проекта
+if not exist ".check" mkdir ".check"
+"zig-out\bin\zigrec.exe" pack-smoke ".check\pack.zigrec"
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: архив проекта не сошёлся
+  exit /b 1
+)
+where python >nul 2>&1
+if errorlevel 1 (
+  echo [check] python не найден — чужая проверка архива пропущена
+) else (
+  python "tools\check_zip.py" ".check\pack.zigrec"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: чужая программа не открыла наш архив
+    exit /b 1
+  )
+)
+
 rem Файл проекта. Тесты проверяют запись и чтение в памяти; здесь добавляется
 rem диск: путь с русскими буквами, переводы строк, кодировка файла — всё то,
 rem что в памяти не проверишь.

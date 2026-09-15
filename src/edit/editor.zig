@@ -16,6 +16,7 @@ const view_mod = @import("editor_view.zig");
 const media = @import("../file/media.zig");
 const waveform = @import("../file/waveform.zig");
 const project_file = @import("../file/project_file.zig");
+const pack = @import("../file/project_pack.zig");
 const player_mod = @import("../file/player.zig");
 const settings_mod = @import("../app/settings.zig");
 const paths = @import("../app/paths.zig");
@@ -43,6 +44,7 @@ const id_link = 214;
 const id_menu_open = 301;
 const id_menu_save = 302;
 const id_menu_save_as = 304;
+const id_menu_save_bundle = 305;
 const id_menu_close = 303;
 /// Номера строк в списках недавних. Два ряда подряд, по одному на список.
 const id_recent_rec = 700;
@@ -166,6 +168,9 @@ const Editor = struct {
     /// вопрос при каждом Ctrl+S отучает нажимать Ctrl+S.
     project_path: [512]u8 = @splat(0),
     project_path_len: usize = 0,
+    /// Как сохранён проект: только разметка или со всем нужным.
+    /// Ctrl+S сохраняет так же, как в прошлый раз.
+    bundle: pack.Bundle = .markup_only,
 
     /// Где лежит своё: настройки и списки недавних.
     home: [paths.max_path]u8 = @splat(0),
@@ -770,6 +775,8 @@ fn looksLikeProject(path: []const u8) bool {
 
 /// Прочитать проект с диска.
 fn loadProject(path: []const u8) void {
+    if (pack.wantsPack(path)) return loadPack(path);
+
     var threaded: std.Io.Threaded = .init(ed.allocator, .{});
     defer threaded.deinit();
 
@@ -867,11 +874,22 @@ fn rememberProjectPath(path: []const u8) void {
 /// работа — это несохранённая работа.
 fn saveProject() void {
     if (ed.project_path_len == 0) return saveProjectAs();
-    writeProjectTo(projectPath());
+    // Сохраняем так же, как сохранили в прошлый раз: если проект собран
+    // со всем нужным, он таким и остаётся.
+    writeProjectTo(projectPath(), ed.bundle);
 }
 
-/// Спросить имя и сохранить.
+/// Спросить имя и сохранить только разметку.
 fn saveProjectAs() void {
+    askAndSave(.markup_only);
+}
+
+/// Спросить имя и сложить в архив всё нужное.
+fn saveProjectBundle() void {
+    askAndSave(.with_media);
+}
+
+fn askAndSave(bundle: pack.Bundle) void {
     if (ed.project.track_count == 0) {
         ed.say("сохранять нечего: в проекте нет дорожек");
         refresh();
@@ -895,9 +913,12 @@ fn saveProjectAs() void {
     ofn.hwndOwner = ed.hwnd;
     ofn.lpstrFile = &path;
     ofn.nMaxFile = path.len;
-    ofn.lpstrFilter = ui.wide("Проект Zig-Rec\x00*.zrs\x00Все файлы\x00*.*\x00\x00");
-    ofn.lpstrDefExt = ui.wide("zrs");
-    ofn.lpstrTitle = ui.wide("Сохранить проект как");
+    ofn.lpstrFilter = ui.wide("Проект Zig-Rec\x00*.zigrec\x00Прежний формат\x00*.zrs\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrDefExt = ui.wide("zigrec");
+    ofn.lpstrTitle = if (bundle == .with_media)
+        ui.wide("Собрать всё в один файл")
+    else
+        ui.wide("Сохранить проект как");
     ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_NOCHANGEDIR;
     if (c.GetSaveFileNameW(&ofn) == 0) return;
 
@@ -907,16 +928,17 @@ fn saveProjectAs() void {
         refresh();
         return;
     };
-    writeProjectTo(utf8[0..len]);
+    writeProjectTo(utf8[0..len], bundle);
 }
 
 /// Записать проект по этому пути.
-fn writeProjectTo(where: []const u8) void {
+fn writeProjectTo(where: []const u8, bundle: pack.Bundle) void {
     if (ed.project.track_count == 0) {
         ed.say("сохранять нечего: в проекте нет дорожек");
         refresh();
         return;
     }
+    if (pack.wantsPack(where)) return writePackTo(where, bundle);
 
     var path: [1024]u16 = @splat(0);
     const n = std.unicode.utf8ToUtf16Le(&path, where) catch {
@@ -955,12 +977,135 @@ fn writeProjectTo(where: []const u8) void {
     const ok = c.WriteFile(handle, bytes.ptr, @intCast(bytes.len), &written, null) != 0;
 
     if (ok and written == bytes.len) {
+        ed.bundle = .markup_only;
         rememberProjectPath(where);
         var buf: [320]u8 = undefined;
         ed.say(std.fmt.bufPrint(&buf, "сохранено: {s}", .{std.fs.path.basename(where)}) catch "сохранено");
     } else {
         ed.say("файл записался не целиком: проверьте место на диске");
     }
+    refresh();
+}
+
+/// Записать проект архивом.
+fn writePackTo(where: []const u8, bundle: pack.Bundle) void {
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Собираем исходники, если просили. Читаем их целиком: архив на то
+    // и собирают, чтобы всё лежало внутри.
+    var inside: std.ArrayList(pack.Media) = .empty;
+    defer {
+        for (inside.items) |m| ed.allocator.free(m.data);
+        inside.deinit(ed.allocator);
+    }
+    var skipped: usize = 0;
+    if (bundle == .with_media) {
+        for (ed.project.sourceList()) |src| {
+            const data = std.Io.Dir.cwd().readFileAlloc(io, src.fullPath(), ed.allocator, .limited(1 << 31)) catch {
+                // Пропавший файл не повод не сохранить проект: разметка
+                // важнее, а про пропажу мы скажем словами.
+                skipped += 1;
+                continue;
+            };
+            inside.append(ed.allocator, .{ .path = src.fullPath(), .data = data }) catch {
+                ed.allocator.free(data);
+                skipped += 1;
+            };
+        }
+    }
+
+    const bytes = pack.write(ed.allocator, ed.project, @import("../version.zig").VERSION, inside.items) catch |err| {
+        var buf: [200]u8 = undefined;
+        ed.say(std.fmt.bufPrint(&buf, "архив не собрался: {s}", .{@errorName(err)}) catch "архив не собрался");
+        refresh();
+        return;
+    };
+    defer ed.allocator.free(bytes);
+
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = where, .data = bytes }) catch {
+        ed.say("файл не создаётся: путь недоступен или файл занят");
+        refresh();
+        return;
+    };
+
+    ed.bundle = bundle;
+    rememberProjectPath(where);
+
+    var buf: [400]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "сохранено: {s} — {s}, {d} КБ{s}", .{
+        std.fs.path.basename(where),
+        bundle.label(),
+        (bytes.len + 1023) / 1024,
+        if (skipped > 0) " (часть исходников не нашлась)" else "",
+    }) catch "сохранено");
+    refresh();
+}
+
+/// Открыть архив проекта.
+fn loadPack(path: []const u8) void {
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const opened = pack.readMarkup(ed.allocator, io, path, ed.project) catch |err| {
+        var buf: [200]u8 = undefined;
+        ed.say(std.fmt.bufPrint(&buf, "архив не открылся: {s}", .{@errorName(err)}) catch "архив не открылся");
+        refresh();
+        return;
+    };
+
+    // Если внутри лежат исходники, берём их: архив на то и собирали,
+    // чтобы проект открылся там, где исходных файлов нет.
+    var unpacked_dir: [1024]u8 = undefined;
+    var have_copies = false;
+    if (opened.media > 0) {
+        const dir = std.fmt.bufPrint(&unpacked_dir, "{s}.распаковано", .{path}) catch path;
+        paths.ensureDir(dir);
+        const n = pack.unpackMedia(io, path, dir) catch 0;
+        have_copies = n > 0;
+        if (have_copies) {
+            var one: [1024]u8 = undefined;
+            for (ed.project.sources[0..ed.project.source_count]) |*src| {
+                const to = pack.sourcePath(&one, src.fullPath(), dir, true);
+                src.setPath(to);
+            }
+        }
+    }
+
+    ed.bundle = if (opened.media > 0) .with_media else .markup_only;
+    rememberProjectPath(path);
+    afterProjectLoaded(opened.madeBy(), opened.media, have_copies);
+}
+
+/// Что сказать и что пересчитать после открытия проекта.
+fn afterProjectLoaded(made_by: []const u8, inside: usize, unpacked: bool) void {
+    var missing: usize = 0;
+    for (ed.project.sourceList(), 0..) |src, i| {
+        if (i >= ed.waves.len) break;
+        ed.waves[i] = .{};
+        startWave(src.fullPath(), @intCast(i));
+        if (!recent_mod.onDisk(src.fullPath())) missing += 1;
+    }
+
+    var buf: [400]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "открыт проект: дорожек {d}{s}{s}{s}", .{
+        ed.project.track_count,
+        if (made_by.len > 0) " · сделан версией " else "",
+        if (made_by.len > 0) made_by else "",
+        if (unpacked)
+            " · исходники взяты из архива"
+        else if (inside > 0)
+            " · исходники в архиве есть, но не распаковались"
+        else if (missing > 0)
+            " · часть исходников не на месте"
+        else
+            "",
+    }) catch "проект открыт");
+
+    fitToProject();
+    showFrame();
     refresh();
 }
 
@@ -1677,6 +1822,7 @@ fn buildMenu(hwnd: c.HWND) void {
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open, ui.wide("Открыть…\tCtrl+O"));
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save, ui.wide("Сохранить проект\tCtrl+S"));
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_as, ui.wide("Сохранить как…\tCtrl+Shift+S"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_bundle, ui.wide("Собрать всё в один файл…"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(
         file_menu,
@@ -1778,6 +1924,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_open => openFile(),
                 id_menu_save => saveProject(),
                 id_menu_save_as => saveProjectAs(),
+                id_menu_save_bundle => saveProjectBundle(),
                 id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_recent_rec...id_recent_rec + recent_mod.max_items - 1 => {
                     openFromRecent(&ed.recent.recorded, @intCast((wp & 0xFFFF) - id_recent_rec));
