@@ -42,6 +42,7 @@ const id_rename_box = 213;
 const id_link = 214;
 const id_menu_open = 301;
 const id_menu_save = 302;
+const id_menu_save_as = 304;
 const id_menu_close = 303;
 /// Номера строк в списках недавних. Два ряда подряд, по одному на список.
 const id_recent_rec = 700;
@@ -159,6 +160,13 @@ const Editor = struct {
 
     /// Дорожка, с которой работают: её переименовывает F2.
     cur_track: usize = 0,
+    /// Куда сохранён проект. Пусто — проект ещё ни разу не сохраняли.
+    ///
+    /// Нужен, чтобы «Сохранить» сохраняло, а не спрашивало каждый раз:
+    /// вопрос при каждом Ctrl+S отучает нажимать Ctrl+S.
+    project_path: [512]u8 = @splat(0),
+    project_path_len: usize = 0,
+
     /// Где лежит своё: настройки и списки недавних.
     home: [paths.max_path]u8 = @splat(0),
     home_len: usize = 0,
@@ -778,6 +786,8 @@ fn loadProject(path: []const u8) void {
         return;
     };
 
+    rememberProjectPath(path);
+
     // Волны считаем заново: в проекте их нет, там только пути.
     // Файл мог и переехать — тогда волны просто не будет, а дорожка
     // останется на месте.
@@ -834,7 +844,34 @@ fn addEmptyTrack(kind: timeline.TrackKind) void {
     refresh();
 }
 
+/// Куда сохранён проект.
+fn projectPath() []const u8 {
+    return ed.project_path[0..ed.project_path_len];
+}
+
+fn rememberProjectPath(path: []const u8) void {
+    const n = @min(path.len, ed.project_path.len);
+    @memcpy(ed.project_path[0..n], path[0..n]);
+    ed.project_path_len = n;
+    // Имя проекта — в заголовке окна: так видно, что правишь, не открывая
+    // меню и не вспоминая.
+    setEditorTitle();
+    // И в «недавно просмотренные»: проект — это ровно то, что монтировали,
+    // и вернуться к нему должно быть чем.
+    rememberViewed(path);
+}
+
+/// Сохранить туда же, куда в прошлый раз. Первый раз — спросить.
+///
+/// Вопрос при каждом Ctrl+S отучает нажимать Ctrl+S, а несохранённая
+/// работа — это несохранённая работа.
 fn saveProject() void {
+    if (ed.project_path_len == 0) return saveProjectAs();
+    writeProjectTo(projectPath());
+}
+
+/// Спросить имя и сохранить.
+fn saveProjectAs() void {
     if (ed.project.track_count == 0) {
         ed.say("сохранять нечего: в проекте нет дорожек");
         refresh();
@@ -842,8 +879,16 @@ fn saveProject() void {
     }
 
     var path: [1024]u16 = @splat(0);
-    const default = ui.wide("проект.zrs");
-    @memcpy(path[0..default.len], default);
+    if (ed.project_path_len > 0) {
+        // Предлагаем то же имя: «Сохранить как» чаще всего значит
+        // «то же самое, но рядом».
+        if (std.unicode.utf8ToUtf16Le(&path, projectPath())) |n| {
+            path[n] = 0;
+        } else |_| {}
+    } else {
+        const default = ui.wide("проект.zrs");
+        @memcpy(path[0..default.len], default);
+    }
 
     var ofn = std.mem.zeroes(c.OPENFILENAMEW);
     ofn.lStructSize = @sizeOf(c.OPENFILENAMEW);
@@ -852,8 +897,34 @@ fn saveProject() void {
     ofn.nMaxFile = path.len;
     ofn.lpstrFilter = ui.wide("Проект Zig-Rec\x00*.zrs\x00Все файлы\x00*.*\x00\x00");
     ofn.lpstrDefExt = ui.wide("zrs");
+    ofn.lpstrTitle = ui.wide("Сохранить проект как");
     ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_NOCHANGEDIR;
     if (c.GetSaveFileNameW(&ofn) == 0) return;
+
+    var utf8: [1024]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&path, 0)) catch {
+        ed.say("путь не переводится: сохраните в другое место");
+        refresh();
+        return;
+    };
+    writeProjectTo(utf8[0..len]);
+}
+
+/// Записать проект по этому пути.
+fn writeProjectTo(where: []const u8) void {
+    if (ed.project.track_count == 0) {
+        ed.say("сохранять нечего: в проекте нет дорожек");
+        refresh();
+        return;
+    }
+
+    var path: [1024]u16 = @splat(0);
+    const n = std.unicode.utf8ToUtf16Le(&path, where) catch {
+        ed.say("путь не переводится: сохраните в другое место");
+        refresh();
+        return;
+    };
+    path[n] = 0;
 
     var text: [64 * 1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
@@ -883,16 +954,33 @@ fn saveProject() void {
     var written: c.DWORD = 0;
     const ok = c.WriteFile(handle, bytes.ptr, @intCast(bytes.len), &written, null) != 0;
 
-    var name: [512]u8 = undefined;
-    const name_len = std.unicode.utf16LeToUtf8(&name, std.mem.sliceTo(&path, 0)) catch 0;
-    var buf: [320]u8 = undefined;
-    ed.say(if (ok and written == bytes.len)
-        std.fmt.bufPrint(&buf, "сохранено: {s}", .{
-            std.fs.path.basename(name[0..name_len]),
-        }) catch "сохранено"
-    else
-        "файл записался не целиком: проверьте место на диске");
+    if (ok and written == bytes.len) {
+        rememberProjectPath(where);
+        var buf: [320]u8 = undefined;
+        ed.say(std.fmt.bufPrint(&buf, "сохранено: {s}", .{std.fs.path.basename(where)}) catch "сохранено");
+    } else {
+        ed.say("файл записался не целиком: проверьте место на диске");
+    }
     refresh();
+}
+
+/// Заголовок окна: имя проекта, если он сохранён.
+fn setEditorTitle() void {
+    var title_buf: [640]u8 = undefined;
+    const version = @import("../version.zig").VERSION;
+    const title = if (ed.project_path_len > 0)
+        std.fmt.bufPrint(&title_buf, "{s} — Zig-Rec Studio, редактор v{s}", .{
+            std.fs.path.basename(projectPath()),
+            version,
+        }) catch "Zig-Rec Studio — редактор"
+    else
+        std.fmt.bufPrint(&title_buf, "Zig-Rec Studio — редактор v{s}", .{version}) catch
+            "Zig-Rec Studio — редактор";
+
+    var wide_buf: [640]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, title) catch return;
+    wide_buf[n] = 0;
+    _ = c.SetWindowTextW(ed.hwnd, @ptrCast(&wide_buf));
 }
 
 /// Положить файл на таймлайн в начало.
@@ -1588,6 +1676,7 @@ fn buildMenu(hwnd: c.HWND) void {
     const file_menu = c.CreatePopupMenu();
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open, ui.wide("Открыть…\tCtrl+O"));
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save, ui.wide("Сохранить проект\tCtrl+S"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_as, ui.wide("Сохранить как…\tCtrl+Shift+S"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(
         file_menu,
@@ -1688,6 +1777,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_link => toggleLink(),
                 id_menu_open => openFile(),
                 id_menu_save => saveProject(),
+                id_menu_save_as => saveProjectAs(),
                 id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_recent_rec...id_recent_rec + recent_mod.max_items - 1 => {
                     openFromRecent(&ed.recent.recorded, @intCast((wp & 0xFFFF) - id_recent_rec));
@@ -1747,7 +1837,14 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 'Y' => if (ctrl) redoStep(),
                 'O' => if (ctrl) openFile(),
                 // Одна буква, два смысла: с Ctrl сохраняем, без — режем.
-                'S' => if (ctrl) saveProject() else splitAtPlayhead(),
+                // Одна буква, три смысла: с Ctrl сохраняем, с Ctrl+Shift
+                // спрашиваем имя, без них режем.
+                'S' => if (ctrl and c.GetKeyState(c.VK_SHIFT) < 0)
+                    saveProjectAs()
+                else if (ctrl)
+                    saveProject()
+                else
+                    splitAtPlayhead(),
                 c.VK_DELETE => deleteSelected(),
                 c.VK_HOME => {
                     ed.playhead_ns = 0;
