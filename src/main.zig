@@ -30,6 +30,8 @@ const usage =
     \\        с --audio в файл идёт ещё и звуковая дорожка с известным рисунком
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
+    \\  zigrec frame-smoke ФАЙЛ [СЕКУНДЫ]
+    \\        самопроверка кадра: размер, шаг строки, длина буфера
     \\  zigrec project-smoke ФАЙЛ.zrs
     \\        самопроверка файла проекта: записать, прочитать, сверить
     \\  zigrec mcp-smoke [ПОРТ]
@@ -153,6 +155,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
+    } else if (eq(cmd, "frame-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к файлу\n");
+            code = 2;
+        } else {
+            code = try frameSmoke(arena, w, args[2], argInt(args, 3, 1));
+        }
     } else if (eq(cmd, "project-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу проекта\n");
@@ -849,6 +858,71 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
         return 1;
     }
     try w.writeAll("[sync] ЗВУК НА МЕСТЕ\n");
+    return 0;
+}
+
+/// Самопроверка кадра: числа, по которым видно, как лежит картинка в памяти.
+///
+/// Появился после того, как кадр с камеры расползся косыми полосами,
+/// а два предположения о шаге строки подряд оказались неверными. Мерить
+/// надо, а не догадываться.
+fn frameSmoke(allocator: std.mem.Allocator, w: anytype, path: []const u8, seconds: u32) !u8 {
+    var p = zigrec.player.Player.open(allocator, path) catch |err| {
+        try w.print("[frame] ПРОВАЛ: {s} — {s}\n", .{ std.fs.path.basename(path), @errorName(err) });
+        return 1;
+    };
+    defer p.close();
+
+    try w.print("[frame] {s}: кадр {d}x{d}, длительность {d:.2} с\n", .{
+        std.fs.path.basename(path),
+        p.width,
+        p.height,
+        @as(f64, @floatFromInt(p.duration_ns)) / @as(f64, std.time.ns_per_s),
+    });
+
+    p.showAt(@as(u64, seconds) * std.time.ns_per_s) catch |err| {
+        try w.print("[frame] ПРОВАЛ на кадре: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    if (!p.ready) {
+        try w.writeAll("[frame] ПРОВАЛ: кадр не получен\n");
+        return 1;
+    }
+
+    const row_bytes = @as(usize, p.width) * 4;
+    const measured = if (p.height > 0) p.last_length / p.height else 0;
+    try w.print("[frame] строка по ширине {d} байт, шаг из типа {d}, длина буфера {d}\n", .{
+        row_bytes,
+        p.stride,
+        p.last_length,
+    });
+    try w.print("[frame] длина делить на высоту: {d}, остаток {d}\n", .{
+        measured,
+        if (p.height > 0) p.last_length % p.height else 0,
+    });
+    try w.print("[frame] шаг взят: {s}\n", .{switch (p.route) {
+        1 => "у исходного буфера кадра",
+        2 => "у склеенного буфера",
+        3 => "из типа (двумерный доступ не дали)",
+        else => "никак: кадра нет",
+    }});
+    try w.print("[frame] строки {s} вверх, время кадра {d:.3} с\n", .{
+        if (p.bottom_up) "снизу" else "сверху",
+        @as(f64, @floatFromInt(p.at_ns)) / @as(f64, std.time.ns_per_s),
+    });
+
+    // Кадр не должен быть пустым: чёрное поле означает, что декодер ничего
+    // не отдал, а мы этого не заметили.
+    var non_zero: usize = 0;
+    for (p.pixels) |b| {
+        if (b != 0) non_zero += 1;
+    }
+    try w.print("[frame] ненулевых байт {d} из {d}\n", .{ non_zero, p.pixels.len });
+    if (non_zero * 20 < p.pixels.len) {
+        try w.writeAll("[frame] ПРОВАЛ: кадр почти пустой\n");
+        return 1;
+    }
+    try w.writeAll("[frame] КАДР ПОЛУЧЕН\n");
     return 0;
 }
 

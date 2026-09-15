@@ -8,6 +8,7 @@ const std = @import("std");
 pub const win32 = @import("win32.zig");
 pub const errors = @import("errors.zig");
 pub const version = @import("version.zig");
+pub const settings = @import("settings.zig");
 pub const capture_types = @import("capture_types.zig");
 pub const capture = @import("capture.zig");
 pub const cursor = @import("cursor.zig");

@@ -46,6 +46,16 @@ pub const Player = struct {
     at_ns: u64 = 0,
     /// Есть ли что показывать.
     ready: bool = false,
+    /// Шаг строки, как его назвал тип. Может быть нулём: тогда шаг
+    /// считается из длины самого буфера. Держим для справки и на случай,
+    /// когда буфер приходит короче ожидаемого.
+    stride: usize = 0,
+    /// Длина последнего полученного буфера — для замеров.
+    last_length: usize = 0,
+    /// Каким путём пришёл кадр: 1 — шаг у исходного буфера, 2 — у склеенного,
+    /// 3 — шаг из типа. Нужно для замеров: без этого приходится гадать,
+    /// какая ветка сработала.
+    route: u8 = 0,
     /// Строки идут снизу вверх.
     ///
     /// Направление спрашиваем у самого типа — по знаку шага строки, —
@@ -108,6 +118,12 @@ pub const Player = struct {
         const pixels = allocator.alloc(u8, @as(usize, width) * height * 4) catch return Error.OutOfMemory;
         @memset(pixels, 0);
 
+        // Шаг может не прийти вовсе — тогда считаем его по ширине.
+        const step: usize = if (stride == 0)
+            @as(usize, width) * 4
+        else
+            @intCast(@abs(stride));
+
         return .{
             .allocator = allocator,
             .reader = r,
@@ -115,6 +131,7 @@ pub const Player = struct {
             .height = height,
             .duration_ns = durationOf(r),
             .pixels = pixels,
+            .stride = step,
             .bottom_up = stride < 0,
         };
     }
@@ -164,6 +181,30 @@ pub const Player = struct {
         self.at_ns = 0;
     }
 
+    /// Переложить строки кадра к себе.
+    ///
+    /// `pitch` — шаг строки в источнике; отрицательный означает, что строки
+    /// в памяти идут задом наперёд, и первая строка картинки лежит последней.
+    fn copyRows(self: *Player, scan0: [*c]u8, pitch: c_long) void {
+        const row_bytes = @as(usize, self.width) * 4;
+        const step: usize = @intCast(@abs(pitch));
+        if (step < row_bytes) return;
+
+        var row: u32 = 0;
+        while (row < self.height) : (row += 1) {
+            const to = @as(usize, row) * row_bytes;
+            if (to + row_bytes > self.pixels.len) break;
+            // При отрицательном шаге идём от последней строки к первой.
+            const src_row = if (pitch < 0) self.height - 1 - row else row;
+            const from = @as(usize, src_row) * step;
+            @memcpy(self.pixels[to .. to + row_bytes], scan0[from .. from + row_bytes]);
+        }
+        // Строки уже лежат сверху вниз: ниже по коду о направлении думать
+        // не надо, и заголовок картинки его не переворачивает.
+        self.bottom_up = false;
+        self.stride = step;
+    }
+
     /// Прочитать очередной кадр. `false` — файл кончился.
     fn readOne(self: *Player) Error!bool {
         const r = self.reader orelse return Error.NoVideo;
@@ -186,21 +227,70 @@ pub const Player = struct {
         const got = sample orelse return true; // пустой ответ — просто идём дальше
         defer _ = got.lpVtbl.*.Release.?(@ptrCast(got));
 
+        // Шаг строки спрашиваем у ИСХОДНОГО буфера кадра, а не у склеенного.
+        // Склеивание отдаёт плоский буфер, который про двумерную раскладку
+        // уже ничего не знает и отвечает отказом. У кадра 642 точки в ширину
+        // настоящая раскладка — 656 точек с шагом 2624 байта; ни ширина
+        // из типа, ни шаг из типа об этом не говорят, и оба привели
+        // к косым полосам.
+        var plane: ?*c.IMFMediaBuffer = null;
+        if (!win32.failed(got.lpVtbl.*.GetBufferByIndex.?(got, 0, &plane))) {
+            defer _ = plane.?.lpVtbl.*.Release.?(@ptrCast(plane.?));
+            var flat: ?*c.IMF2DBuffer = null;
+            if (!win32.failed(plane.?.lpVtbl.*.QueryInterface.?(
+                plane.?,
+                &c.IID_IMF2DBuffer,
+                @ptrCast(&flat),
+            ))) {
+                defer _ = flat.?.lpVtbl.*.Release.?(@ptrCast(flat.?));
+                var scan0: [*c]u8 = undefined;
+                var pitch: c_long = 0;
+                if (!win32.failed(flat.?.lpVtbl.*.Lock2D.?(flat.?, &scan0, &pitch))) {
+                    defer _ = flat.?.lpVtbl.*.Unlock2D.?(flat.?);
+                    self.route = 1;
+                    self.copyRows(scan0, pitch);
+                    self.at_ns = @as(u64, @intCast(@max(timestamp, 0))) * 100;
+                    self.ready = true;
+                    return true;
+                }
+            }
+        }
+
         var buffer: ?*c.IMFMediaBuffer = null;
         if (win32.failed(got.lpVtbl.*.ConvertToContiguousBuffer.?(got, &buffer))) return Error.DecodeFailed;
         defer _ = buffer.?.lpVtbl.*.Release.?(@ptrCast(buffer.?));
+
+        var two_d: ?*c.IMF2DBuffer = null;
+        if (!win32.failed(buffer.?.lpVtbl.*.QueryInterface.?(
+            buffer.?,
+            &c.IID_IMF2DBuffer,
+            @ptrCast(&two_d),
+        ))) {
+            defer _ = two_d.?.lpVtbl.*.Release.?(@ptrCast(two_d.?));
+            var scan0: [*c]u8 = undefined;
+            var pitch: c_long = 0;
+            if (!win32.failed(two_d.?.lpVtbl.*.Lock2D.?(two_d.?, &scan0, &pitch))) {
+                defer _ = two_d.?.lpVtbl.*.Unlock2D.?(two_d.?);
+                self.route = 2;
+                self.copyRows(scan0, pitch);
+                self.at_ns = @as(u64, @intCast(@max(timestamp, 0))) * 100;
+                self.ready = true;
+                return true;
+            }
+        }
 
         var data: [*c]u8 = undefined;
         var length: c.DWORD = 0;
         if (win32.failed(buffer.?.lpVtbl.*.Lock.?(buffer.?, &data, null, &length))) return Error.DecodeFailed;
         defer _ = buffer.?.lpVtbl.*.Unlock.?(buffer.?);
+        self.last_length = @intCast(length);
 
-        // Копируем как есть: направление строк уже известно из типа,
-        // и переворачивать руками нечего — этим займётся заголовок картинки
-        // при рисовании. Ручной переворот здесь однажды уже поставил кадр
-        // на голову вместе с заголовком.
-        const take = @min(@as(usize, length), self.pixels.len);
-        @memcpy(self.pixels[0..take], data[0..take]);
+        // Обычный путь: двумерный доступ Media Foundation не даёт, и шаг
+        // приходится выводить из длины буфера. Правило вынесено отдельно
+        // и проверено на настоящих замерах.
+        const guessed = strideFor(self.width, self.height, @intCast(length));
+        self.route = 3;
+        self.copyRows(data, @intCast(guessed));
 
         self.at_ns = @as(u64, @intCast(@max(timestamp, 0))) * 100;
         self.ready = true;
@@ -218,6 +308,40 @@ fn durationOf(r: *c.IMFSourceReader) u64 {
     ))) return 0;
     defer _ = c.PropVariantClear(&value);
     return @as(u64, @intCast(value.unnamed_0.unnamed_0.unnamed_0.uhVal.QuadPart)) * 100;
+}
+
+/// Шаг строки, выведенный из длины буфера.
+///
+/// Media Foundation хранит кадр выровненным: у кадра 642 точки в ширину
+/// буфер держит 656 точек, у кадра 1080 строк — 1088 строк. Ни размер
+/// из типа, ни шаг из типа об этом не говорят, а двумерный доступ к буферу
+/// не даётся. Поэтому шаг выводим: перебираем разумные выравнивания и берём
+/// первое, на которое длина делится нацело и строк выходит не меньше высоты.
+///
+/// Ошибка здесь не роняет программу, а тихо портит картинку: каждая
+/// следующая строка уезжает вбок, и кадр расползается косыми полосами.
+pub fn strideFor(width: u32, height: u32, length: usize) usize {
+    const row_bytes = @as(usize, width) * 4;
+    if (width == 0 or height == 0 or length == 0) return row_bytes;
+
+    // Без выравнивания — самый частый случай, проверяем первым.
+    if (length == row_bytes * height) return row_bytes;
+
+    // Выравнивания идут от мелкого к крупному: берём наименьшее подходящее,
+    // иначе на длинном буфере подойдёт заведомо слишком широкий шаг.
+    const alignments = [_]u32{ 4, 8, 16, 32, 64, 128 };
+    for (alignments) |step| {
+        const aligned_w = (width + step - 1) / step * step;
+        const stride = @as(usize, aligned_w) * 4;
+        if (stride < row_bytes) continue;
+        if (length % stride != 0) continue;
+        if (length / stride < height) continue;
+        return stride;
+    }
+
+    // Ничего не подошло: пусть будет хотя бы ширина. Косые полосы лучше,
+    // чем чтение за границей буфера.
+    return row_bytes;
 }
 
 /// Куда вписать кадр, чтобы он не растянулся и не обрезался.
@@ -298,4 +422,65 @@ test "пустой кадр или пустое поле не делят на н
 test "допуск попадания — меньше кадра при тридцати в секунду" {
     // Иначе проигрыватель показывал бы соседний кадр как искомый.
     try std.testing.expect(tolerance_ns < std.time.ns_per_s / 30);
+}
+
+test "шаг строки может быть больше ширины" {
+    // Ширина 1922 точки — не кратна восьми, и Media Foundation выровняет
+    // строку. Копировать такой кадр одним куском значит сдвинуть каждую
+    // следующую строку; так кадр и расползался полосами.
+    const width: usize = 1922;
+    const height: usize = 4;
+    const row_bytes = width * 4;
+    const src_stride = row_bytes + 8; // выравнивание
+
+    var src: [4 * (1922 * 4 + 8)]u8 = undefined;
+    for (0..height) |row| {
+        for (0..src_stride) |i| {
+            src[row * src_stride + i] = @intCast(row + 1);
+        }
+    }
+
+    var dst: [1922 * 4 * 4]u8 = undefined;
+    for (0..height) |row| {
+        const from = row * src_stride;
+        const to = row * row_bytes;
+        @memcpy(dst[to .. to + row_bytes], src[from .. from + row_bytes]);
+    }
+
+    // Каждая строка целиком своего цвета — значит сдвига нет.
+    for (0..height) |row| {
+        for (0..row_bytes) |i| {
+            try std.testing.expectEqual(@as(u8, @intCast(row + 1)), dst[row * row_bytes + i]);
+        }
+    }
+}
+
+test "шаг выводится из длины буфера: замеры с настоящих файлов" {
+    // Кадр с выровненной шириной: буфер 2624 * 368 у кадра 642x362.
+    try std.testing.expectEqual(@as(usize, 2624), strideFor(642, 362, 965_632));
+    // Кадр, у которого ширина уже выровнена: 7680 * 1088 у 1920x1080.
+    try std.testing.expectEqual(@as(usize, 7680), strideFor(1920, 1080, 8_355_840));
+}
+
+test "ровный буфер без выравнивания узнаётся сразу" {
+    try std.testing.expectEqual(@as(usize, 2560), strideFor(640, 480, 640 * 4 * 480));
+}
+
+test "шаг никогда не меньше строки" {
+    // Иначе копирование залезет в соседнюю строку.
+    for ([_]u32{ 1, 3, 17, 642, 1921 }) |w| {
+        const stride = strideFor(w, 100, 12345);
+        try std.testing.expect(stride >= @as(usize, w) * 4);
+    }
+}
+
+test "пустые числа не роняют и не делят на ноль" {
+    try std.testing.expectEqual(@as(usize, 0), strideFor(0, 100, 1000));
+    try std.testing.expectEqual(@as(usize, 400), strideFor(100, 0, 1000));
+    try std.testing.expectEqual(@as(usize, 400), strideFor(100, 10, 0));
+}
+
+test "буфер короче кадра не даёт шага больше строки" {
+    // Если длина явно мала, лучше честная ширина, чем чтение за границей.
+    try std.testing.expectEqual(@as(usize, 2568), strideFor(642, 362, 1000));
 }

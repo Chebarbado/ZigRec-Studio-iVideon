@@ -29,6 +29,8 @@ pub const c = if (builtin.os.tag == .windows) @cImport({
     @cInclude("commctrl.h");
     @cInclude("shellapi.h");
     @cInclude("commdlg.h");
+    // shlobj.h: системный выбор папки для настроек.
+    @cInclude("shlobj.h");
 }) else struct {};
 
 /// HRESULT как беззнаковое: так его печатают в документации и в отладчике.

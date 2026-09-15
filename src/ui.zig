@@ -26,6 +26,7 @@ const mic = @import("mic.zig");
 const gain = @import("gain.zig");
 const control = @import("control.zig");
 const mcp = @import("mcp.zig");
+const settings_mod = @import("settings.zig");
 
 pub const Rect = capture_types.Rect;
 
@@ -41,6 +42,21 @@ const id_area_rec = 109;
 const id_sound = 110;
 const id_server = 111;
 const id_editor = 112;
+
+// Пункты меню. Отдельный ряд номеров, чтобы не путать их с кнопками.
+const id_menu_open_dir = 300;
+const id_menu_exit = 301;
+const id_menu_settings = 310;
+const id_menu_about = 320;
+
+// Поля окна настроек.
+const id_set_dir = 330;
+const id_set_browse = 331;
+const id_set_template = 332;
+const id_set_port = 333;
+const id_set_serve = 334;
+const id_set_ok = 335;
+const id_set_cancel = 336;
 
 const hotkey_record = 1;
 const hotkey_pause = 2;
@@ -90,6 +106,8 @@ const App = struct {
     /// Сколько раз в секунду обновляется экран, с которого пишем.
     /// Это потолок для числа разных кадров.
     refresh_hz: u32 = 0,
+    /// Настройки, которые переживают перезапуск.
+    prefs: settings_mod.Settings = .{},
     sound_on: bool = false,
     microphone: mic.Capture = .{},
     tray_added: bool = false,
@@ -339,8 +357,15 @@ fn defaultDir(allocator: std.mem.Allocator) ![]const u8 {
 
 fn nextPath(out: []u8) ![]const u8 {
     var name_buf: [128]u8 = undefined;
-    const name = try recorder.buildName(&name_buf, "zigrec-%d-%t.mp4", recorder.DateTime.now(), app.counter);
-    return std.fmt.bufPrint(out, "{s}\\{s}", .{ app.out_dir, name });
+    // Шаблон — из настроек; папка — тоже, если её там задали.
+    const name = try recorder.buildName(
+        &name_buf,
+        app.prefs.nameTemplate(),
+        recorder.DateTime.now(),
+        app.counter,
+    );
+    const dir = if (app.prefs.dir().len > 0) app.prefs.dir() else app.out_dir;
+    return std.fmt.bufPrint(out, "{s}\\{s}", .{ dir, name });
 }
 
 fn startRecording() void {
@@ -758,6 +783,260 @@ fn refreshServerRow(hwnd: c.HWND) void {
     _ = c.InvalidateRect(hwnd, &lamp, 0);
 }
 
+/// Создать папку, если её нет. Ошибку не возвращаем: папка может уже быть,
+/// и это не повод беспокоить человека.
+fn ensureDir(path: []const u8) void {
+    if (path.len == 0) return;
+    var wide_buf: [std.fs.max_path_bytes]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, path) catch return;
+    wide_buf[n] = 0;
+    _ = c.CreateDirectoryW(@ptrCast(&wide_buf), null);
+}
+
+/// Поля окна настроек: пока оно открыто, здесь лежат его элементы.
+const SettingsWindow = struct {
+    hwnd: c.HWND = null,
+    dir_box: c.HWND = null,
+    template_box: c.HWND = null,
+    port_box: c.HWND = null,
+    serve_box: c.HWND = null,
+    /// Нажали «Сохранить», а не «Отмена».
+    accepted: bool = false,
+};
+
+var settings_win: SettingsWindow = .{};
+
+fn editBox(parent: c.HWND, id: c_int, x: i32, y: i32, w: i32, h: i32) c.HWND {
+    const hwnd = c.CreateWindowExW(
+        c.WS_EX_CLIENTEDGE,
+        wide("EDIT"),
+        wide(""),
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL,
+        x,
+        y,
+        w,
+        h,
+        parent,
+        null,
+        @ptrCast(c.GetModuleHandleW(null)),
+        null,
+    );
+    _ = c.SetWindowLongPtrW(hwnd, c.GWLP_ID, id);
+    applyFont(hwnd);
+    return hwnd;
+}
+
+fn boxText(hwnd: c.HWND, buf: []u8) []const u8 {
+    var wide_buf: [512]u16 = undefined;
+    const n = c.GetWindowTextW(hwnd, &wide_buf, wide_buf.len);
+    if (n <= 0) return "";
+    const len = std.unicode.utf16LeToUtf8(buf, wide_buf[0..@intCast(n)]) catch return "";
+    return buf[0..len];
+}
+
+fn settingsProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
+    switch (msg) {
+        c.WM_COMMAND => {
+            switch (wp & 0xFFFF) {
+                id_set_browse => browseForDir(hwnd),
+                id_set_ok => {
+                    settings_win.accepted = true;
+                    _ = c.DestroyWindow(hwnd);
+                },
+                id_set_cancel => _ = c.DestroyWindow(hwnd),
+                else => {},
+            }
+            return 0;
+        },
+        c.WM_CLOSE => {
+            _ = c.DestroyWindow(hwnd);
+            return 0;
+        },
+        c.WM_DESTROY => {
+            // Снимаем поля до того, как окно исчезнет: после этого читать
+            // из них уже нечего.
+            if (settings_win.accepted) collectSettings();
+            settings_win.hwnd = null;
+            return 0;
+        },
+        else => {},
+    }
+    return c.DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+/// Забрать введённое в настройки.
+fn collectSettings() void {
+    var buf: [512]u8 = undefined;
+
+    const dir_text = boxText(settings_win.dir_box, &buf);
+    if (dir_text.len > 0) app.prefs.setDir(dir_text);
+
+    var buf2: [512]u8 = undefined;
+    app.prefs.setTemplate(boxText(settings_win.template_box, &buf2));
+
+    var buf3: [64]u8 = undefined;
+    // Негодный порт не берём и прежний не портим: правило живёт в настройках
+    // и проверено тестами.
+    _ = app.prefs.setPort(boxText(settings_win.port_box, &buf3));
+
+    app.prefs.serve_at_start = c.SendMessageW(settings_win.serve_box, c.BM_GETCHECK, 0, 0) != 0;
+
+    if (!settings_mod.save(&app.prefs, app.out_dir)) {
+        setText(app.status, "настройки не сохранились: папка недоступна");
+        return;
+    }
+    // Новая папка может ещё не существовать — создаём, иначе первая же
+    // запись упадёт на ровном месте.
+    ensureDir(app.prefs.dir());
+    setText(app.status, "настройки сохранены");
+}
+
+/// Выбрать папку записей.
+///
+/// Системный выбор папки, а не ввод пути руками: путь с опечаткой
+/// обнаруживается только в момент записи, когда уже поздно.
+fn browseForDir(hwnd: c.HWND) void {
+    var display: [std.fs.max_path_bytes]u16 = undefined;
+    var info = std.mem.zeroes(c.BROWSEINFOW);
+    info.hwndOwner = hwnd;
+    info.pszDisplayName = &display;
+    info.lpszTitle = wide("Куда класть записи");
+    info.ulFlags = c.BIF_RETURNONLYFSDIRS | c.BIF_NEWDIALOGSTYLE;
+
+    const list = c.SHBrowseForFolderW(&info);
+    if (list == null) return;
+
+    var path: [std.fs.max_path_bytes]u16 = undefined;
+    if (c.SHGetPathFromIDListW(list, &path) == 0) return;
+
+    var utf8: [std.fs.max_path_bytes]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&path, 0)) catch return;
+    var wide_buf: [std.fs.max_path_bytes]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, utf8[0..len]) catch return;
+    wide_buf[n] = 0;
+    _ = c.SetWindowTextW(settings_win.dir_box, @ptrCast(&wide_buf));
+}
+
+/// Окно настроек.
+fn showSettings(owner: c.HWND) void {
+    if (settings_win.hwnd != null) {
+        _ = c.SetForegroundWindow(settings_win.hwnd);
+        return;
+    }
+
+    const hinst: c.HINSTANCE = @ptrCast(c.GetModuleHandleW(null));
+    var wc = std.mem.zeroes(c.WNDCLASSEXW);
+    wc.cbSize = @sizeOf(c.WNDCLASSEXW);
+    wc.lpfnWndProc = settingsProc;
+    wc.hInstance = hinst;
+    wc.lpszClassName = wide("ZigRecSettings");
+    wc.hbrBackground = @ptrFromInt(@as(usize, c.COLOR_BTNFACE) + 1);
+    setSystemCursor(&wc.hCursor, idc_arrow);
+    setAppIcon(&wc.hIcon);
+    _ = c.RegisterClassExW(&wc);
+
+    const hwnd = c.CreateWindowExW(
+        c.WS_EX_DLGMODALFRAME,
+        wide("ZigRecSettings"),
+        wide("Настройки"),
+        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
+        c.CW_USEDEFAULT,
+        c.CW_USEDEFAULT,
+        520,
+        300,
+        owner,
+        null,
+        hinst,
+        null,
+    ) orelse return;
+
+    settings_win = .{ .hwnd = hwnd };
+
+    _ = label(hwnd, "Папка для записей", 14, 16, 200, 20);
+    settings_win.dir_box = editBox(hwnd, id_set_dir, 14, 38, 380, 24);
+    _ = button(hwnd, "Обзор…", id_set_browse, 402, 37, 90, 26, 0);
+
+    _ = label(hwnd, "Имя файла: %d — дата, %t — время, %n — номер", 14, 74, 400, 20);
+    settings_win.template_box = editBox(hwnd, id_set_template, 14, 96, 300, 24);
+
+    _ = label(hwnd, "Порт сервера MCP", 14, 134, 160, 20);
+    settings_win.port_box = editBox(hwnd, id_set_port, 180, 132, 90, 24);
+
+    settings_win.serve_box = button(hwnd, "Поднимать сервер при запуске", id_set_serve, 14, 168, 300, 24, c.BS_AUTOCHECKBOX);
+
+    _ = button(hwnd, "Сохранить", id_set_ok, 300, 220, 100, 30, 0);
+    _ = button(hwnd, "Отмена", id_set_cancel, 408, 220, 90, 30, 0);
+
+    // Показываем то, что есть сейчас.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const current_dir = if (app.prefs.dir().len > 0) app.prefs.dir() else app.out_dir;
+    const shown = std.fmt.bufPrint(&buf, "{s}", .{current_dir}) catch app.out_dir;
+    setText(settings_win.dir_box, shown);
+    setText(settings_win.template_box, app.prefs.nameTemplate());
+
+    var port_buf: [16]u8 = undefined;
+    setText(settings_win.port_box, std.fmt.bufPrint(&port_buf, "{d}", .{app.prefs.port}) catch "15599");
+    _ = c.SendMessageW(settings_win.serve_box, c.BM_SETCHECK, if (app.prefs.serve_at_start) 1 else 0, 0);
+
+    for ([_]c.HWND{ settings_win.dir_box, settings_win.template_box, settings_win.port_box, settings_win.serve_box }) |h| applyFont(h);
+    var child = c.GetWindow(hwnd, c.GW_CHILD);
+    while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) applyFont(child);
+
+    _ = c.ShowWindow(hwnd, c.SW_SHOW);
+    _ = c.UpdateWindow(hwnd);
+}
+
+/// Полоса меню.
+///
+/// Меню, а не ещё один ряд кнопок: настроек и справки в окне немного,
+/// а кнопок на нём уже хватает. То, чем пользуются раз в месяц, не должно
+/// занимать место рядом с тем, чем пользуются каждый день.
+fn buildMenu(hwnd: c.HWND) void {
+    const bar = c.CreateMenu();
+    if (bar == null) return;
+
+    const file_menu = c.CreatePopupMenu();
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open_dir, wide("Папка с записями"));
+    _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_exit, wide("Выход"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(file_menu), wide("Файл"));
+
+    const tools_menu = c.CreatePopupMenu();
+    _ = c.AppendMenuW(tools_menu, c.MF_STRING, id_menu_settings, wide("Настройки…"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(tools_menu), wide("Настройки"));
+
+    const help_menu = c.CreatePopupMenu();
+    _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_about, wide("О программе"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(help_menu), wide("Справка"));
+
+    _ = c.SetMenu(hwnd, bar);
+}
+
+/// Показать папку с записями в проводнике.
+fn openOutputDir() void {
+    var wide_buf: [std.fs.max_path_bytes]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, app.out_dir) catch return;
+    wide_buf[n] = 0;
+    _ = c.ShellExecuteW(null, wide("open"), @ptrCast(&wide_buf), null, null, c.SW_SHOWNORMAL);
+}
+
+fn showAbout(hwnd: c.HWND) void {
+    var buf: [512]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf,
+        \\Zig-Rec Studio {s} ({s})
+        \\
+        \\Запись экрана в mp4, который открывается везде.
+        \\Один файл, без установки и без зависимостей.
+        \\
+        \\Исходники: github.com/j0k/ZigRec-Studio
+    , .{ version.VERSION, version.VERSION_DATE }) catch "Zig-Rec Studio";
+
+    var wide_buf: [1024]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch return;
+    wide_buf[n] = 0;
+    _ = c.MessageBoxW(hwnd, @ptrCast(&wide_buf), wide("О программе"), c.MB_OK | c.MB_ICONINFORMATION);
+}
+
 /// Открыть редактор отдельной программой.
 ///
 /// Отдельным процессом, а не вторым окном в этом: у записи свой цикл
@@ -812,7 +1091,7 @@ fn toggleServer(hwnd: c.HWND) void {
     if (app.server.isRunning()) {
         app.server.stop();
     } else {
-        app.server.start(hwnd, control.default_port) catch |err| {
+        app.server.start(hwnd, app.prefs.port) catch |err| {
             app.server.failure = err;
         };
         // Даём потоку сесть на порт, чтобы лампочка сразу сказала правду,
@@ -1145,6 +1424,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             setGainEnabled(false);
             for ([_]c_int{ id_area, id_full, id_area_rec }) |id| applyFont(c.GetDlgItem(hwnd, id));
 
+            buildMenu(hwnd);
             app.refresh_hz = screenRefresh();
             registerHotkeys(hwnd);
             addTray(hwnd);
@@ -1209,6 +1489,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 },
                 id_server => toggleServer(hwnd),
                 id_editor => openEditor(),
+                id_menu_open_dir => openOutputDir(),
+                id_menu_exit => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
+                id_menu_settings => showSettings(hwnd),
+                id_menu_about => showAbout(hwnd),
                 id_cursor => {
                     const checked = c.SendMessageW(app.chk_cursor, c.BM_GETCHECK, 0, 0) != 0;
                     app.settings.cursor = checked;
@@ -1486,6 +1770,14 @@ pub fn runFull(allocator: std.mem.Allocator, start_hidden: bool, serve_at_once: 
     app.out_dir = try defaultDir(allocator);
     defer allocator.free(app.out_dir);
 
+    // Настройки читаем до создания окна: от них зависит и папка, и порт,
+    // и то, поднимать ли сервер сразу.
+    {
+        var threaded: std.Io.Threaded = .init(allocator, .{});
+        defer threaded.deinit();
+        app.prefs = settings_mod.load(threaded.io(), allocator, app.out_dir);
+    }
+
     const hinst: c.HINSTANCE = @ptrCast(c.GetModuleHandleW(null));
     var wc = std.mem.zeroes(c.WNDCLASSEXW);
     wc.cbSize = @sizeOf(c.WNDCLASSEXW);
@@ -1521,7 +1813,9 @@ pub fn runFull(allocator: std.mem.Allocator, start_hidden: bool, serve_at_once: 
     ) orelse return error.WindowFailed;
     _ = c.ShowWindow(hwnd, if (start_hidden) c.SW_HIDE else c.SW_SHOW);
     _ = c.UpdateWindow(hwnd);
-    if (serve_at_once) toggleServer(hwnd);
+    // Сервер поднимается сам, только если человек это разрешил в настройках
+    // или попросил ключом. Молча открывать порт программа не должна.
+    if (serve_at_once or app.prefs.serve_at_start) toggleServer(hwnd);
     refreshServerRow(hwnd);
 
     var msg: c.MSG = undefined;
