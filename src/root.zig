@@ -28,6 +28,7 @@ pub const track = @import("track.zig");
 pub const probe = @import("probe.zig");
 pub const media = @import("media.zig");
 pub const timeline = @import("timeline.zig");
+pub const waveform = @import("waveform.zig");
 pub const editor_view = @import("editor_view.zig");
 pub const editor = @import("editor.zig");
 pub const edit = @import("edit.zig");

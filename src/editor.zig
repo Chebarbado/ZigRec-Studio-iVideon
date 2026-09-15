@@ -14,6 +14,7 @@ const c = win32.c;
 const timeline = @import("timeline.zig");
 const view_mod = @import("editor_view.zig");
 const media = @import("media.zig");
+const waveform = @import("waveform.zig");
 const ui = @import("ui.zig");
 
 const View = view_mod.View;
@@ -67,6 +68,10 @@ const Editor = struct {
     btn_undo: c.HWND = null,
     btn_redo: c.HWND = null,
 
+    /// Волна каждого открытого файла. По исходнику на ячейку, номера те же,
+    /// что у исходников проекта.
+    waves: [timeline.max_sources]waveform.Envelope = @splat(.{}),
+
     /// Последнее сообщение человеку.
     note: [256]u8 = @splat(0),
     note_len: usize = 0,
@@ -94,6 +99,7 @@ const col_video_edge: c.COLORREF = 0x00A87A3A;
 const col_audio: c.COLORREF = 0x006FB36F;
 const col_audio_edge: c.COLORREF = 0x004F934F;
 const col_selected: c.COLORREF = 0x002E2EE8;
+const col_wave: c.COLORREF = 0x00306B30;
 const col_playhead: c.COLORREF = 0x002020C0;
 const col_ruler: c.COLORREF = 0x00FAFAFA;
 const col_text: c.COLORREF = 0x00303030;
@@ -224,17 +230,68 @@ fn drawClips(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, wid
         line(dc, rect.left, rect.top, rect.left, rect.bottom, frame_color, frame_width);
         line(dc, rect.right - 1, rect.top, rect.right - 1, rect.bottom, frame_color, frame_width);
 
+        if (track.kind == .audio and !track.muted) drawWave(dc, clip, rect);
+
         // Подпись помещается — пишем. Не помещается — не пишем: обрезанное
         // слово читается хуже, чем его отсутствие.
         if (right - left > 60) {
             const src = ed.project.sourceList();
             const name = if (clip.source < src.len) src[clip.source].name() else "клип";
-            drawText(dc, left + 6, rect.top + 4, name, 0x00202020);
-
             var len_buf: [32]u8 = undefined;
-            drawText(dc, left + 6, rect.top + 22, view_mod.lengthLabel(&len_buf, clip.len_ns), 0x00404040);
+            const len_text = view_mod.lengthLabel(&len_buf, clip.len_ns);
+
+            // Под подписью — своя подложка: поверх волны буквы не читаются,
+            // а волна под буквами перестаёт быть волной.
+            const label_w = @min(@as(i32, @intCast(6 + @max(name.len, len_text.len) * 7)), right - left - 4);
+            solid(dc, .{
+                .left = left + 2,
+                .top = rect.top + 2,
+                .right = left + 2 + label_w,
+                .bottom = rect.top + 38,
+            }, if (track.muted) col_muted else body);
+
+            drawText(dc, left + 6, rect.top + 4, name, 0x00202020);
+            drawText(dc, left + 6, rect.top + 22, len_text, 0x00404040);
         }
     }
+}
+
+/// Волна внутри клипа.
+///
+/// Рисуем столбиками от средней линии вверх и вниз: так видно и громкость,
+/// и то, что это звук, а не заливка. Берём пик на отрезке, который
+/// приходится на столбик, а не значение в точке — иначе при мелком масштабе
+/// волна превращается в случайный узор из попавших под пиксель отсчётов.
+fn drawWave(dc: c.HDC, clip: timeline.Clip, rect: c.RECT) void {
+    if (clip.source >= ed.waves.len) return;
+    const env = &ed.waves[clip.source];
+    if (!env.ready or clip.len_ns == 0) return;
+
+    const width = rect.right - rect.left;
+    if (width < 4) return;
+    const middle = @divTrunc(rect.top + rect.bottom, 2);
+    const half = @divTrunc(rect.bottom - rect.top, 2) - 3;
+    if (half <= 0) return;
+
+    const pen = c.CreatePen(c.PS_SOLID, 1, col_wave);
+    defer _ = c.DeleteObject(@ptrCast(pen));
+    const old = c.SelectObject(dc, @ptrCast(pen));
+    defer _ = c.SelectObject(dc, old);
+
+    var x: i32 = 0;
+    while (x < width) : (x += 1) {
+        // Какой кусок исходника показывает этот столбик.
+        const from = clip.in_ns + @as(u64, @intCast(x)) * clip.len_ns / @as(u64, @intCast(width));
+        const to = clip.in_ns + @as(u64, @intCast(x + 1)) * clip.len_ns / @as(u64, @intCast(width));
+        const peak = env.relativeBetween(from, to);
+        const h: i32 = @intFromFloat(peak * @as(f32, @floatFromInt(half)));
+        if (h <= 0) continue;
+        _ = c.MoveToEx(dc, rect.left + x, middle - h, null);
+        _ = c.LineTo(dc, rect.left + x, middle + h);
+    }
+
+    // Средняя линия — чтобы тишина читалась как тишина, а не как пустое место.
+    line(dc, rect.left, middle, rect.right, middle, col_wave, 1);
 }
 
 fn drawPlayhead(dc: c.HDC, height: i32) void {
@@ -308,6 +365,12 @@ fn addFile(path: []const u8) void {
     };
 
     const source = ed.project.addSource(path, info.duration_ns) catch |err| return complain(err);
+
+    // Волна считается один раз, при открытии. Файл без звука — не беда:
+    // просто рисовать будет нечего.
+    if (source < ed.waves.len) {
+        ed.waves[source] = waveform.read(path) catch .{};
+    }
 
     var added: usize = 0;
     for (info.list()) |track| {
