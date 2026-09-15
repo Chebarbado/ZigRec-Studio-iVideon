@@ -552,12 +552,19 @@ fn drawRecordButton(item: *c.DRAWITEMSTRUCT) void {
     else
         rec_dot.recordLook(rec_state, enabled, app.pulse);
 
+    // У кнопки области значок шире: вокруг точки идёт пунктирная рамка,
+    // та самая, что побежит вокруг выбранного прямоугольника при записи.
+    const is_area = id == id_area_rec;
+    const frame = rec_dot.areaFrame(look.radius);
+
     // Значок слева, по центру высоты.
-    const cx = rc.left + 16;
+    const cx = rc.left + @as(i32, if (is_area) 18 else 16);
     const cy = @divTrunc(rc.top + rc.bottom, 2);
     const r: i32 = @intCast(look.radius);
     const brush = c.CreateSolidBrush(look.color);
     defer _ = c.DeleteObject(brush);
+
+    if (is_area) drawAreaFrame(dc, cx, cy, frame, look.color);
 
     switch (look.shape) {
         .circle => {
@@ -589,7 +596,8 @@ fn drawRecordButton(item: *c.DRAWITEMSTRUCT) void {
     var text: [256]u16 = undefined;
     const n = c.GetWindowTextW(item.hwndItem, &text, text.len);
     if (n > 0) {
-        var text_rc = c.RECT{ .left = rc.left + 30, .top = rc.top, .right = rc.right - 6, .bottom = rc.bottom };
+        const text_left = rc.left + if (is_area) 22 + frame.half_w else @as(i32, 30);
+        var text_rc = c.RECT{ .left = text_left, .top = rc.top, .right = rc.right - 6, .bottom = rc.bottom };
         _ = c.SetBkMode(dc, c.TRANSPARENT);
         _ = c.SetTextColor(dc, if (enabled) @as(c.COLORREF, 0x00202020) else @as(c.COLORREF, 0x00909090));
         const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
@@ -601,6 +609,41 @@ fn drawRecordButton(item: *c.DRAWITEMSTRUCT) void {
     if (item.itemState & c.ODS_FOCUS != 0) {
         var focus_rc = c.RECT{ .left = rc.left + 3, .top = rc.top + 3, .right = rc.right - 3, .bottom = rc.bottom - 3 };
         _ = c.DrawFocusRect(dc, &focus_rc);
+    }
+}
+
+/// Пунктирная рамка вокруг значка записи.
+///
+/// Рисуем штрихами вручную, а не пунктирным пером: перо Windows кладёт
+/// точки по своему шагу, и на короткой стороне их выходит две с половиной.
+/// Свой шаг даёт одинаковый пунктир на всех четырёх сторонах — тот же,
+/// что у рамки вокруг записываемой области.
+fn drawAreaFrame(dc: c.HDC, cx: i32, cy: i32, frame: rec_dot.AreaFrame, color: c.COLORREF) void {
+    const brush = c.CreateSolidBrush(color);
+    defer _ = c.DeleteObject(@ptrCast(brush));
+
+    const left = cx - frame.half_w;
+    const right = cx + frame.half_w;
+    const top = cy - frame.half_h;
+    const bottom = cy + frame.half_h;
+    const step = frame.dash * 2;
+
+    var x = left;
+    while (x < right) : (x += step) {
+        const end = @min(x + frame.dash, right);
+        var up = c.RECT{ .left = x, .top = top, .right = end, .bottom = top + 1 };
+        _ = c.FillRect(dc, &up, brush);
+        var down = c.RECT{ .left = x, .top = bottom, .right = end, .bottom = bottom + 1 };
+        _ = c.FillRect(dc, &down, brush);
+    }
+
+    var y = top;
+    while (y < bottom) : (y += step) {
+        const end = @min(y + frame.dash, bottom);
+        var l = c.RECT{ .left = left, .top = y, .right = left + 1, .bottom = end };
+        _ = c.FillRect(dc, &l, brush);
+        var r = c.RECT{ .left = right, .top = y, .right = right + 1, .bottom = end };
+        _ = c.FillRect(dc, &r, brush);
     }
 }
 

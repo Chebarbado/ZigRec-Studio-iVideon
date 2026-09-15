@@ -107,3 +107,60 @@ test "пульсация растянута на весь диапазон" {
     const mid = pulseFromAlpha(198);
     try std.testing.expect(mid > 100 and mid < 160);
 }
+
+/// Схематичная рамка области вокруг значка записи.
+///
+/// Кнопка «Записать область» отличается от «Записать экран» только словом,
+/// а слово читается медленнее значка. Пунктирная рамка вокруг точки говорит
+/// то же самое картинкой — и повторяет ту самую рамку, которая побежит
+/// вокруг выбранного прямоугольника во время записи.
+pub const AreaFrame = struct {
+    /// Половина ширины и высоты от центра значка.
+    half_w: i32,
+    half_h: i32,
+    /// Длина штриха и такого же промежутка.
+    dash: i32,
+
+    /// Насколько рамка отстоит от края точки. Меньше двух точек — и рамка
+    /// сливается со значком в кляксу.
+    pub fn gap(self: AreaFrame, radius: i32) i32 {
+        return @min(self.half_w - radius, self.half_h - radius);
+    }
+};
+
+/// Рамка под значок такого размера.
+///
+/// Шире, чем выше: так она читается как кусок экрана, а не как рамка вокруг
+/// буквы. Растёт вместе со значком, потому что значок дышит во время записи,
+/// и застывшая рамка рядом с дышащей точкой выглядит поломкой.
+pub fn areaFrame(radius: u32) AreaFrame {
+    const r: i32 = @intCast(radius);
+    return .{ .half_w = r + 7, .half_h = r + 4, .dash = 3 };
+}
+
+test "рамка области шире, чем выше — читается как кусок экрана" {
+    const f = areaFrame(base_radius);
+    try std.testing.expect(f.half_w > f.half_h);
+}
+
+test "точка не сливается с рамкой ни при каком размере" {
+    var r: u32 = 3;
+    while (r <= 12) : (r += 1) {
+        const f = areaFrame(r);
+        // Просвет не меньше двух точек с каждой стороны.
+        try std.testing.expect(f.gap(@intCast(r)) >= 2);
+    }
+}
+
+test "рамка растёт вместе со значком" {
+    const small = areaFrame(base_radius);
+    const big = areaFrame(base_radius + 2);
+    try std.testing.expect(big.half_w > small.half_w);
+    try std.testing.expect(big.half_h > small.half_h);
+}
+
+test "штрих не длиннее половины стороны: иначе это не пунктир" {
+    const f = areaFrame(base_radius);
+    try std.testing.expect(f.dash * 2 < f.half_h * 2);
+    try std.testing.expect(f.dash > 0);
+}
