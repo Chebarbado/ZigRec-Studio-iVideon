@@ -15,6 +15,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
+const gif_mod = @import("gif.zig");
 const c = win32.c;
 
 pub const Error = error{
@@ -37,6 +38,12 @@ pub const tolerance_ns: u64 = std.time.ns_per_ms * 16;
 pub const Player = struct {
     allocator: std.mem.Allocator,
     reader: ?*c.IMFSourceReader = null,
+    /// Разобранный GIF, если открыт GIF.
+    ///
+    /// У GIF свой путь: Media Foundation отдаёт его одной картинкой, теряя
+    /// и кадры, и выдержки. Кадры уже лежат в памяти, декодировать на ходу
+    /// нечего — показ сводится к тому, чтобы выбрать нужный.
+    gif: ?gif_mod.Image = null,
     width: u32 = 0,
     height: u32 = 0,
     duration_ns: u64 = 0,
@@ -66,6 +73,7 @@ pub const Player = struct {
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) Error!Player {
         if (builtin.os.tag != .windows) return Error.Unsupported;
+        if (openGif(allocator, path)) |from_gif| return from_gif else |_| {}
 
         _ = c.CoInitializeEx(null, c.COINIT_APARTMENTTHREADED | c.COINIT_DISABLE_OLE1DDE);
         if (win32.failed(c.MFStartup(c.MF_VERSION, c.MFSTARTUP_FULL))) return Error.StartupFailed;
@@ -139,6 +147,8 @@ pub const Player = struct {
     pub fn close(self: *Player) void {
         if (self.pixels.len > 0) self.allocator.free(self.pixels);
         self.pixels = &.{};
+        if (self.gif) |*img| img.deinit(self.allocator);
+        self.gif = null;
         if (self.reader) |r| {
             _ = r.lpVtbl.*.Release.?(@ptrCast(r));
             self.reader = null;
@@ -154,6 +164,16 @@ pub const Player = struct {
     /// прочитать несколько кадров подряд. Это и есть разница между плавным
     /// воспроизведением и рывками.
     pub fn showAt(self: *Player, when_ns: u64) Error!void {
+        if (self.gif) |img| {
+            // Кадры уже в памяти: остаётся выбрать нужный и переложить.
+            const index = img.frameAt(when_ns);
+            const frame = img.frames[index];
+            if (frame.pixels.len != self.pixels.len) return Error.NoVideo;
+            @memcpy(self.pixels, frame.pixels);
+            self.at_ns = when_ns;
+            self.ready = true;
+            return;
+        }
         const r = self.reader orelse return Error.NoVideo;
 
         const forward_close = self.ready and when_ns >= self.at_ns and
@@ -342,6 +362,45 @@ pub fn strideFor(width: u32, height: u32, length: usize) usize {
     // Ничего не подошло: пусть будет хотя бы ширина. Косые полосы лучше,
     // чем чтение за границей буфера.
     return row_bytes;
+}
+
+/// Открыть GIF своим разбором.
+///
+/// Читаем файл целиком и разбираем сразу: в GIF нет оглавления, и узнать,
+/// где какой кадр, можно только пройдя его до конца. Зато после этого показ
+/// любого кадра — просто копирование, без перемотки и без декодера.
+fn openGif(allocator: std.mem.Allocator, path: []const u8) !Player {
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+
+    const data = try std.Io.Dir.cwd().readFileAlloc(
+        threaded.io(),
+        path,
+        allocator,
+        .limited(1 << 28),
+    );
+    defer allocator.free(data);
+    if (!gif_mod.looksLikeGif(data)) return error.NotGif;
+
+    var img = try gif_mod.decode(allocator, data);
+    errdefer img.deinit(allocator);
+
+    const pixels = try allocator.alloc(u8, @as(usize, img.width) * img.height * 4);
+    @memset(pixels, 0);
+
+    return .{
+        .allocator = allocator,
+        .reader = null,
+        .gif = img,
+        .width = img.width,
+        .height = img.height,
+        .duration_ns = img.totalNs(),
+        .pixels = pixels,
+        .stride = @as(usize, img.width) * 4,
+        // Наш разбор укладывает строки сверху вниз — как и всё остальное
+        // после `copyRows`.
+        .bottom_up = false,
+    };
 }
 
 /// Куда вписать кадр, чтобы он не растянулся и не обрезался.

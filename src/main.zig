@@ -9,7 +9,8 @@ const usage =
     \\  zigrec --version                  версия и дата выпуска
     \\  zigrec --help                     эта справка
     \\
-    \\  zigrec record ФАЙЛ [ключи]        записать экран в mp4
+    \\  zigrec record ФАЙЛ [ключи]        записать экран в mp4 или GIF
+    \\        имя, кончающееся на .gif, даёт петлю вместо видео
     \\        --sec N          сколько секунд писать (по умолчанию 5)
     \\        --fps N          частота кадров (по умолчанию 30)
     \\        --monitor N      номер монитора (по умолчанию 0)
@@ -34,6 +35,8 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec hotkey-smoke [СОЧЕТАНИЕ]
     \\        самопроверка сочетания: Windows его принимает
+    \\  zigrec gif-write-smoke ФАЙЛ.gif [N]
+    \\        самопроверка записи GIF: N эталонных кадров в петлю
     \\  zigrec gif-smoke ФАЙЛ.gif [КАДР.png]
     \\        самопроверка чтения GIF: кадры, выдержки, первый кадр в png
     \\  zigrec recent-smoke ПАПКА
@@ -171,6 +174,13 @@ pub fn main(init: std.process.Init) !void {
         code = try uiSmoke(arena, w);
     } else if (eq(cmd, "hotkey-smoke")) {
         code = try hotkeySmoke(w, if (args.len > 2) args[2] else zigrec.hotkey.default_text);
+    } else if (eq(cmd, "gif-write-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к GIF\n");
+            code = 2;
+        } else {
+            code = try gifWriteSmoke(init.io, arena, w, args[2], argInt(args, 3, 12));
+        }
     } else if (eq(cmd, "gif-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к GIF\n");
@@ -264,7 +274,17 @@ fn captureSmoke(allocator: std.mem.Allocator, w: anytype, frames: u32, backend: 
     };
 
     try w.print("[smoke] экран {d}x{d}, путь {s}\n", .{ report.width, report.height, report.backend.label() });
-    try w.print("[smoke] показано {d}, снято {d}, совпало номеров {d}\n", .{ report.shown, report.captured, report.matched });
+    try w.print("[smoke] показано {d}, снято {d}, номер прочитан в {d}\n", .{
+        report.shown,
+        report.captured,
+        report.read,
+    });
+    // Совпадение с той же итерацией — свойство машины, а не захвата:
+    // печатаем, но не судим по нему.
+    try w.print("[smoke] экран отставал в среднем на {d:.1} кадра, совпало сразу {d}\n", .{
+        report.lag,
+        report.matched,
+    });
     try w.print("[smoke] потери {d}, повторы {d}, порядок сбит {d} раз\n", .{
         report.tally.dropped,
         report.tally.duplicated,
@@ -594,6 +614,35 @@ fn listWindows(w: anytype) !u8 {
     return 0;
 }
 
+/// Куда идут кадры: в видео или в петлю.
+///
+/// Два вида записи различаются только приёмником. Разводить ради этого
+/// два цикла захвата значило бы держать две копии одного и того же —
+/// и чинить их по очереди.
+const Sink = union(enum) {
+    mp4: zigrec.encode.Writer,
+    gif: zigrec.gif_write.Sink,
+
+    fn writeFrame(self: *Sink, pixels: []const u8, stride: u32, at_ns: u64) !void {
+        return switch (self.*) {
+            .mp4 => |*enc| enc.writeFrame(pixels, stride, at_ns),
+            .gif => |*sink| sink.writeFrame(pixels, stride, at_ns),
+        };
+    }
+
+    fn abort(self: *Sink) void {
+        switch (self.*) {
+            .mp4 => |*enc| enc.abort(),
+            .gif => |*sink| sink.deinit(),
+        }
+    }
+};
+
+/// Просят ли петлю вместо видео.
+fn wantsGif(path: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(path, ".gif");
+}
+
 fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, opt: RecordArgs) !u8 {
     try w.print("[rec] пишем в {s}: {d} с, до {d} кадров в секунду\n", .{ path, opt.seconds, opt.fps });
     try w.flush();
@@ -665,10 +714,19 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
         settings.bitrate(area.width, area.height),
         opt.gop,
     });
-    var enc = zigrec.encode.Writer.create(path, area.width, area.height, settings) catch |err| {
-        try w.print("[rec] ПРОВАЛ: кодировщик не создался.\n{s}\n", .{explain(err)});
-        return 1;
+    const to_gif = wantsGif(path);
+    var enc: Sink = if (to_gif) .{
+        .gif = zigrec.gif_write.Sink.create(allocator, area.width, area.height, opt.fps),
+    } else .{
+        .mp4 = zigrec.encode.Writer.create(path, area.width, area.height, settings) catch |err| {
+            try w.print("[rec] ПРОВАЛ: кодировщик не создался.\n{s}\n", .{explain(err)});
+            return 1;
+        },
     };
+    if (to_gif) {
+        try w.print("[rec] пишем петлю GIF, до {d} кадров в секунду\n", .{enc.gif.fps});
+        if (opt.sound) try w.writeAll("[rec] в GIF звука не бывает: он записан не будет\n");
+    }
 
     // Курсор дорисовываем сами: захват отдаёт рабочий стол без него. Для этого
     // нужен свой буфер — кадр захвата открыт только на чтение.
@@ -744,20 +802,42 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
         written += 1;
         cap.release();
 
-        sound.drain(&enc) catch |err| {
+        if (to_gif) continue;
+        sound.drain(&enc.mp4) catch |err| {
             try w.print("[rec] ПРОВАЛ на звуке: {s}\n", .{@errorName(err)});
             enc.abort();
             return 1;
         };
     }
 
-    sound.finish(&enc) catch |err| {
+    if (!to_gif) sound.finish(&enc.mp4) catch |err| {
         try w.print("[rec] ПРОВАЛ на хвосте звука: {s}\n", .{@errorName(err)});
         enc.abort();
         return 1;
     };
 
-    const summary = enc.finish() catch |err| {
+    // Петля собирается в конце: палитра считается по всем кадрам сразу,
+    // и пока не виден последний, неизвестно, какие цвета в неё войдут.
+    if (to_gif) {
+        defer enc.gif.deinit();
+        const loop = enc.gif.finish(io, path) catch |err| {
+            try w.print("[rec] ПРОВАЛ: петля не записалась: {s}\n", .{@errorName(err)});
+            return zigrec.errors.Outcome.failed.exitCode();
+        };
+        try w.print("[rec] петля: кадров {d}, пропущено {d}, {d:.2} с, {d} КБ\n", .{
+            loop.frames,
+            loop.skipped,
+            @as(f64, @floatFromInt(loop.total_ns)) / @as(f64, std.time.ns_per_s),
+            (loop.bytes + 1023) / 1024,
+        });
+        if (enc.gif.full) {
+            try w.writeAll("[rec] петля упёрлась в предел памяти: хвост записи в неё не вошёл\n");
+        }
+        try w.print("[rec] итог: {s}\n", .{zigrec.errors.Outcome.recorded.label()});
+        return zigrec.errors.Outcome.recorded.exitCode();
+    }
+
+    const summary = enc.mp4.finish() catch |err| {
         try w.print("[rec] ПРОВАЛ на закрытии файла: {s}\n", .{@errorName(err)});
         return 1;
     };
@@ -993,6 +1073,91 @@ fn hotkeySmoke(w: anytype, text: []const u8) !u8 {
     _ = c.UnregisterHotKey(null, id);
     try w.print("[hotkey] Windows приняла {s} и отпустила\n", .{text});
     try w.writeAll("[hotkey] СОЧЕТАНИЕ РАБОТАЕТ\n");
+    return 0;
+}
+
+/// Самопроверка записи GIF.
+///
+/// Кадры берём у стенда, а не с экрана: в них записан номер, и его можно
+/// прочитать обратно. Записываем петлю, читаем её своим разбором и сверяем
+/// числа — а в `check.cmd` ту же петлю распаковывает ffmpeg, и номера
+/// кадров достаёт `verify-raw`. Своим кодом проверять свою же запись
+/// значит не заметить ошибки, сделанной в обе стороны одинаково.
+fn gifWriteSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, frames: u32) !u8 {
+    const bench = zigrec.testbench;
+    const width: u32 = bench.min_width;
+    const height: u32 = 64;
+
+    const screen = bench.Screen.init(width, height, 20) catch {
+        try w.writeAll("[gifw] ПРОВАЛ: кадр меньше таймкода\n");
+        return 1;
+    };
+
+    const list = try allocator.alloc(zigrec.gif.Frame, frames);
+    defer {
+        for (list) |f| allocator.free(f.pixels);
+        allocator.free(list);
+    }
+    for (list, 0..) |*f, i| {
+        const px = try allocator.alloc(u8, screen.frameBytes());
+        try screen.render(px, @intCast(i + 1));
+        f.* = .{ .delay_ns = 50 * std.time.ns_per_ms, .pixels = px };
+    }
+
+    const bytes = zigrec.gif_write.encode(allocator, list, width, height, 0) catch |err| {
+        try w.print("[gifw] ПРОВАЛ: петля не собралась: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(bytes);
+
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
+        try w.print("[gifw] ПРОВАЛ: не записывается {s}: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+    try w.print("[gifw] {d} кадров {d}x{d} → {d} байт ({d} байт на кадр)\n", .{
+        frames,
+        width,
+        height,
+        bytes.len,
+        bytes.len / frames,
+    });
+
+    var back = zigrec.gif.decode(allocator, bytes) catch |err| {
+        try w.print("[gifw] ПРОВАЛ: своя же петля не читается: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer back.deinit(allocator);
+
+    if (back.frames.len != frames or back.width != width or back.height != height) {
+        try w.print("[gifw] ПРОВАЛ: вернулось {d} кадров {d}x{d}\n", .{
+            back.frames.len,
+            back.width,
+            back.height,
+        });
+        return 1;
+    }
+
+    // Главное: номер кадра должен пережить палитру и сжатие. Таймкод
+    // нарисован чёрным по белому, и если он не читается — палитра съела
+    // то, ради чего кадр и записывали.
+    var wrong: usize = 0;
+    for (back.frames, 0..) |f, i| {
+        const got = bench.readIndex(f.pixels, width, width * 4) catch {
+            wrong += 1;
+            continue;
+        };
+        if (got != i + 1) wrong += 1;
+    }
+    if (wrong > 0) {
+        try w.print("[gifw] ПРОВАЛ: номер не прочитался в {d} кадрах из {d}\n", .{ wrong, frames });
+        return 1;
+    }
+    try w.print("[gifw] номера всех {d} кадров целы\n", .{frames});
+    try w.print("[gifw] петля {d:.2} с, крутится бесконечно: {s}\n", .{
+        @as(f64, @floatFromInt(back.totalNs())) / @as(f64, std.time.ns_per_s),
+        if (back.loops == 0) "да" else "нет",
+    });
+    try w.writeAll("[gifw] ПЕТЛЯ ЗАПИСАНА\n");
     return 0;
 }
 

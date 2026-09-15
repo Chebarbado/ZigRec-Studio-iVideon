@@ -76,6 +76,22 @@ pub const Image = struct {
         return sum;
     }
 
+    /// Какой кадр показывать в этот момент.
+    ///
+    /// Время идёт от начала петли. За концом берём последний кадр,
+    /// а не заворачиваем: на таймлайне GIF лежит куском заданной длины,
+    /// и «после конца» там означает «дальше ничего», а не «сначала».
+    /// Кручением петли занимается тот, кто её крутит.
+    pub fn frameAt(self: Image, when_ns: u64) usize {
+        if (self.frames.len == 0) return 0;
+        var passed: u64 = 0;
+        for (self.frames, 0..) |f, i| {
+            passed += f.delay_ns;
+            if (when_ns < passed) return i;
+        }
+        return self.frames.len - 1;
+    }
+
     pub fn deinit(self: *Image, allocator: std.mem.Allocator) void {
         for (self.frames) |f| allocator.free(f.pixels);
         allocator.free(self.frames);
@@ -764,4 +780,30 @@ test "счёт кадров работает и на однокадровом" {
 
 test "счёт кадров отвергает не-GIF" {
     try testing.expectError(Error.NotGif, measure("вовсе не картинка"));
+}
+
+test "какой кадр в этот момент" {
+    const a = testing.allocator;
+    var img = try decode(a, &moving_gif);
+    defer img.deinit(a);
+
+    // Выдержки 30, 60 и 90 мс: границы на 30, 90 и 180.
+    try testing.expectEqual(@as(usize, 0), img.frameAt(0));
+    try testing.expectEqual(@as(usize, 0), img.frameAt(29 * std.time.ns_per_ms));
+    try testing.expectEqual(@as(usize, 1), img.frameAt(30 * std.time.ns_per_ms));
+    try testing.expectEqual(@as(usize, 1), img.frameAt(89 * std.time.ns_per_ms));
+    try testing.expectEqual(@as(usize, 2), img.frameAt(90 * std.time.ns_per_ms));
+
+    // За концом остаётся последний кадр, а не начинается сначала:
+    // на таймлайне «после конца» означает «дальше ничего».
+    try testing.expectEqual(@as(usize, 2), img.frameAt(180 * std.time.ns_per_ms));
+    try testing.expectEqual(@as(usize, 2), img.frameAt(10 * std.time.ns_per_s));
+}
+
+test "у однокадрового всегда первый кадр" {
+    const a = testing.allocator;
+    var img = try decode(a, &tiny_gif);
+    defer img.deinit(a);
+    try testing.expectEqual(@as(usize, 0), img.frameAt(0));
+    try testing.expectEqual(@as(usize, 0), img.frameAt(std.time.ns_per_s));
 }

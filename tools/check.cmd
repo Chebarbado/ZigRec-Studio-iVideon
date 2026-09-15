@@ -157,6 +157,29 @@ if defined FFMPEG (
   )
 )
 
+rem Запись GIF. Эталонные кадры с таймкодом складываем в петлю, читаем её
+rem своим разбором и сверяем номера — а потом ту же петлю распаковывает
+rem ffmpeg, и номера достаёт verify-raw. Палитра в GIF всего на 256 цветов,
+rem и «съела ли она то, ради чего кадр записывали» — вопрос не праздный.
+echo [check] самопроверка записи GIF
+"zig-out\bin\zigrec.exe" gif-write-smoke ".check\stand.gif" 12
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: петля GIF не записалась
+  exit /b 1
+)
+if defined FFMPEG (
+  "%FFMPEG%" -y -v error -i ".check\stand.gif" -pix_fmt bgra -f rawvideo ".check\stand.raw"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: чужой декодер не открыл нашу петлю
+    exit /b 1
+  )
+  "zig-out\bin\zigrec.exe" verify-raw ".check\stand.raw" 384 64
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: в петле не те кадры
+    exit /b 1
+  )
+)
+
 rem Файл проекта. Тесты проверяют запись и чтение в памяти; здесь добавляется
 rem диск: путь с русскими буквами, переводы строк, кодировка файла — всё то,
 rem что в памяти не проверишь.

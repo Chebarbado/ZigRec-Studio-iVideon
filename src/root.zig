@@ -47,6 +47,7 @@ pub const waveform = @import("file/waveform.zig");
 pub const player = @import("file/player.zig");
 pub const png = @import("file/png.zig");
 pub const gif = @import("file/gif.zig");
+pub const gif_write = @import("file/gif_write.zig");
 pub const editor_view = @import("edit/editor_view.zig");
 pub const editor = @import("edit/editor.zig");
 pub const edit = @import("edit/edit.zig");

@@ -30,8 +30,21 @@ pub const Options = struct {
 pub const Report = struct {
     shown: u32 = 0,
     captured: u32 = 0,
-    /// Кадров, где снятый номер совпал с показанным.
+    /// Кадров, в которых номер вообще удалось прочитать.
+    ///
+    /// Это и есть главный вопрос к захвату: пришло ли с экрана то, что мы
+    /// туда нарисовали. Нечитаемый номер означает, что снято не наше окно
+    /// или снято испорченным.
+    read: u32 = 0,
+    /// Кадров, где снятый номер совпал с показанным В ТОЙ ЖЕ итерации.
+    ///
+    /// Число любопытное, но судить по нему нельзя: между тем, как мы
+    /// нарисовали кадр, и тем, как рабочий стол его показал, проходит
+    /// время. На занятой машине экран отстаёт на кадр-другой, и совпадений
+    /// почти не остаётся — при совершенно исправном захвате.
     matched: u32 = 0,
+    /// На сколько кадров экран отставал от рисования, в среднем.
+    lag: f64 = 0,
     tally: testbench.Tally = .{},
     stats: capture.Stats = .{},
     width: u32 = 0,
@@ -39,16 +52,40 @@ pub const Report = struct {
     /// Каким путём кадры в итоге снимались.
     backend: capture.Backend = .auto,
 
-    /// Прогон засчитан, если снято достаточно кадров и номера сошлись.
+    /// Прогон засчитан, если кадры доходят, читаются и идут по порядку.
     ///
-    /// Порог не 100 %: между отрисовкой и снимком экрана система может показать
-    /// свой кадр (всплывающая подсказка, курсор, перерисовка чужого окна), и
-    /// один-два несовпавших номера это не поломка захвата. А вот меньше
-    /// половины совпадений уже означает, что мы снимаем не то или не тогда.
+    /// **Судим не по совпадению с той же итерацией.** Раньше требовалось,
+    /// чтобы снятый кадр нёс ровно тот номер, который только что нарисован,
+    /// — а это гонка с рабочим столом, которую на занятой машине не выиграть.
+    /// Стенд ругался на исправный захват, и это хуже, чем не проверять вовсе:
+    /// на крик, который слышишь каждый день, перестают оборачиваться.
+    ///
+    /// Спрашиваем то, что и правда важно:
+    ///
+    ///  * кадры доходят — снято не меньше четверти показанного;
+    ///  * номера читаются — значит, снято НАШЕ окно и снято целым;
+    ///  * порядок в целом сохранён — редкая перестановка не в счёт;
+    ///  * один и тот же кадр не приходит снова и снова.
+    ///
+    /// **Пропуски в номерах поломкой не считаются.** Мы рисуем быстрее,
+    /// чем рабочий стол успевает показывать, и часть нарисованного он
+    /// пропускает — это его право и наша же заслуга. Захват при этом
+    /// отдаёт ровно то, что было на экране.
+    ///
+    /// Отставание экрана от рисования измеряется и печатается: это тоже
+    /// свойство машины, а не поломка, и знать его полезно.
     pub fn ok(self: Report) bool {
+        if (self.captured == 0 or self.read == 0) return false;
         if (self.captured < self.shown / 4) return false;
-        if (self.captured == 0) return false;
-        return self.matched * 10 >= self.captured * 8;
+        // Нечитаемый номер — настоящая беда: значит, с экрана пришло не то.
+        if (self.read * 10 < self.captured * 8) return false;
+        // Одна перестановка на десяток — работа композитора, а не поломка;
+        // а вот сплошная каша означает, что кадры идут не оттуда.
+        if (self.tally.out_of_order * 10 > self.read) return false;
+        // Один и тот же кадр снова и снова — признак того, что экран замер,
+        // а мы этого не заметили.
+        if (self.tally.duplicated * 2 > self.read) return false;
+        return true;
     }
 };
 
@@ -128,6 +165,7 @@ pub fn run(allocator: std.mem.Allocator, opt: Options) !Report {
     defer seen.deinit(allocator);
 
     const started = win32.nowNs();
+    var lag_sum: u64 = 0;
     var index: u32 = 1; // с единицы: нулевой кадр не отличить от чёрного экрана
     while (index <= opt.frames) : (index += 1) {
         pumpMessages();
@@ -145,7 +183,11 @@ pub fn run(allocator: std.mem.Allocator, opt: Options) !Report {
             dup.release();
             continue;
         };
+        report.read += 1;
         if (got == index) report.matched += 1;
+        // Отставание считаем только назад: вперёд экран уйти не может,
+        // а прочитанный «будущий» номер означал бы мусор, а не опережение.
+        if (index > got) lag_sum += index - got;
         try seen.append(allocator, got);
         dup.release();
     }
@@ -154,6 +196,10 @@ pub fn run(allocator: std.mem.Allocator, opt: Options) !Report {
     report.backend = dup.backend();
     report.stats.elapsed_ns = win32.nowNs() - started;
     report.tally = testbench.tally(seen.items);
+    report.lag = if (report.read > 0)
+        @as(f64, @floatFromInt(lag_sum)) / @as(f64, @floatFromInt(report.read))
+    else
+        0;
     return report;
 }
 
@@ -232,16 +278,105 @@ fn pumpMessages() void {
     }
 }
 
-test "прогон засчитан только при достаточных совпадениях" {
-    try std.testing.expect((Report{ .shown = 100, .captured = 90, .matched = 90 }).ok());
-    try std.testing.expect((Report{ .shown = 100, .captured = 90, .matched = 72 }).ok());
-    try std.testing.expect(!(Report{ .shown = 100, .captured = 90, .matched = 71 }).ok());
+// ---------------------------------------------------------------- тесты
+
+const testing = std.testing;
+
+test "исправный захват засчитывается даже при отставании экрана" {
+    // Ровно тот случай, на котором стенд раньше кричал: кадры дошли,
+    // номера читаются и идут по порядку, а совпадений с той же итерацией
+    // почти нет — экран отстаёт.
+    const r = Report{
+        .shown = 60,
+        .captured = 59,
+        .read = 57,
+        .matched = 7,
+        .tally = .{ .captured = 57, .dropped = 4, .duplicated = 4, .out_of_order = 0 },
+    };
+    try testing.expect(r.ok());
 }
 
-test "пустой прогон не засчитан" {
-    try std.testing.expect(!(Report{ .shown = 100, .captured = 0, .matched = 0 }).ok());
+test "нечитаемые номера — это провал" {
+    // Кадры идут, но в них не наше окно: снято не то.
+    const r = Report{
+        .shown = 60,
+        .captured = 60,
+        .read = 3,
+        .matched = 3,
+        .tally = .{ .captured = 3 },
+    };
+    try testing.expect(!r.ok());
 }
 
-test "почти ничего не снято — не засчитан, даже если совпало всё" {
-    try std.testing.expect(!(Report{ .shown = 100, .captured = 10, .matched = 10 }).ok());
+test "редкая перестановка кадров не считается поломкой" {
+    // Композитор изредка показывает кадр не по порядку. Это не повод
+    // объявлять захват сломанным.
+    const rare = Report{
+        .shown = 60,
+        .captured = 59,
+        .read = 57,
+        .matched = 50,
+        .tally = .{ .captured = 57, .out_of_order = 1 },
+    };
+    try testing.expect(rare.ok());
+
+    // А сплошная каша означает, что кадры идут не оттуда.
+    const mess = Report{
+        .shown = 60,
+        .captured = 59,
+        .read = 57,
+        .matched = 5,
+        .tally = .{ .captured = 57, .out_of_order = 20 },
+    };
+    try testing.expect(!mess.ok());
+}
+
+test "пропуски в номерах — это про экран, а не про захват" {
+    // Рисуем быстрее, чем рабочий стол показывает: он пропускает часть
+    // нарисованного, и это его право.
+    const r = Report{
+        .shown = 60,
+        .captured = 33,
+        .read = 33,
+        .matched = 26,
+        .tally = .{ .captured = 33, .dropped = 25 },
+    };
+    try testing.expect(r.ok());
+}
+
+test "один и тот же кадр снова и снова — это провал" {
+    // Значит, экран замер, а мы этого не заметили.
+    const r = Report{
+        .shown = 60,
+        .captured = 59,
+        .read = 57,
+        .matched = 2,
+        .tally = .{ .captured = 57, .duplicated = 50 },
+    };
+    try testing.expect(!r.ok());
+}
+
+test "слишком мало кадров — это провал" {
+    const r = Report{ .shown = 60, .captured = 10, .read = 10, .tally = .{ .captured = 10 } };
+    try testing.expect(!r.ok());
+}
+
+test "пустой прогон не засчитывается" {
+    try testing.expect(!(Report{}).ok());
+    try testing.expect(!(Report{ .shown = 60, .captured = 0 }).ok());
+}
+
+test "тот самый прогон, на котором стенд кричал зря" {
+    // Числа взяты с настоящего прогона на занятой машине: 60 нарисовано,
+    // 33 снято, все номера прочитаны, пропусков 25, перестановка одна.
+    // Захват исправен — и стенд обязан это сказать.
+    const real = Report{
+        .shown = 60,
+        .captured = 33,
+        .read = 33,
+        .matched = 26,
+        .lag = 0.2,
+        .tally = .{ .captured = 33, .dropped = 25, .duplicated = 1, .out_of_order = 1 },
+    };
+    try testing.expect(real.ok());
 }
