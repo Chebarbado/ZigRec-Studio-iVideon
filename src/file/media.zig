@@ -13,6 +13,7 @@
 //! показать полосу дорожки, картинка не нужна.
 const std = @import("std");
 const probe = @import("probe.zig");
+const gif_mod = @import("gif.zig");
 const wav = @import("../sound/wav.zig");
 
 pub const Error = error{
@@ -33,6 +34,7 @@ pub const Format = enum {
     flac,
     ogg,
     midi,
+    gif,
 
     pub fn label(self: Format) []const u8 {
         return switch (self) {
@@ -44,6 +46,7 @@ pub const Format = enum {
             .flac => "FLAC",
             .ogg => "OGG",
             .midi => "MIDI",
+            .gif => "GIF",
         };
     }
 
@@ -51,7 +54,7 @@ pub const Format = enum {
     /// и таймлайну незачем искать в них видеодорожку.
     pub fn mayHaveVideo(self: Format) bool {
         return switch (self) {
-            .mp4, .mov, .avi => true,
+            .mp4, .mov, .avi, .gif => true,
             .wav, .mp3, .flac, .ogg, .midi => false,
         };
     }
@@ -112,6 +115,7 @@ pub fn detect(data: []const u8) Error!Format {
         if (std.mem.eql(u8, data[8..12], "AVI ")) return .avi;
         return Error.Unsupported;
     }
+    if (gif_mod.looksLikeGif(data)) return .gif;
     if (std.mem.eql(u8, data[0..4], "fLaC")) return .flac;
     if (std.mem.eql(u8, data[0..4], "OggS")) return .ogg;
     if (std.mem.eql(u8, data[0..4], "MThd")) return .midi;
@@ -448,7 +452,37 @@ pub fn parse(data: []const u8) Error!Info {
         .flac => readFlac(data),
         .ogg => readOgg(data),
         .midi => readMidi(data),
+        .gif => readGif(data),
     };
+}
+
+/// Что в GIF: размер холста, число кадров и общая длительность петли.
+///
+/// Разбираем целиком, а не заголовок: в GIF нет оглавления, и узнать,
+/// сколько в нём кадров и сколько это по времени, можно только пройдя
+/// его до конца. Зато после этого известно всё и точно.
+fn readGif(data: []const u8) Error!Info {
+    // Считаем без выделения памяти под кадры: здесь нужны только числа.
+    const counted = gif_mod.measure(data) catch |err| return switch (err) {
+        gif_mod.Error.NotGif => Error.Unknown,
+        gif_mod.Error.Truncated => Error.Truncated,
+        else => Error.Unsupported,
+    };
+
+    var out = Info{ .format = .gif };
+    out.add(.{
+        .kind = .video,
+        .codec = "GIF (LZW)",
+        .duration_ns = counted.total_ns,
+        .width = counted.width,
+        .height = counted.height,
+        .fps = if (counted.total_ns > 0)
+            @as(f64, @floatFromInt(counted.frames)) /
+                (@as(f64, @floatFromInt(counted.total_ns)) / @as(f64, std.time.ns_per_s))
+        else
+            0,
+    });
+    return out;
 }
 
 /// Прочитать файл с диска и разобрать.

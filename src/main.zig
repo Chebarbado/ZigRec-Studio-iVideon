@@ -30,6 +30,8 @@ const usage =
     \\        с --audio в файл идёт ещё и звуковая дорожка с известным рисунком
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
+    \\  zigrec gif-smoke ФАЙЛ.gif [КАДР.png]
+    \\        самопроверка чтения GIF: кадры, выдержки, первый кадр в png
     \\  zigrec recent-smoke ПАПКА
     \\        самопроверка списков недавних: запись, чтение, порядок
     \\  zigrec home-smoke
@@ -161,6 +163,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
+    } else if (eq(cmd, "gif-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к GIF\n");
+            code = 2;
+        } else {
+            code = try gifSmoke(init.io, arena, w, args[2], if (args.len > 3) args[3] else null);
+        }
     } else if (eq(cmd, "recent-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужна папка\n");
@@ -880,6 +889,89 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
         return 1;
     }
     try w.writeAll("[sync] ЗВУК НА МЕСТЕ\n");
+    return 0;
+}
+
+/// Самопроверка чтения GIF.
+///
+/// Файл делает чужая программа, читаем своим разбором, а первый кадр
+/// кладём в png — его снова читает чужая программа. Так замыкается круг:
+/// ошибка в нашем понимании формата не может пройти незамеченной, потому
+/// что на обоих концах стоит не наш код.
+fn gifSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, png_path: ?[]const u8) !u8 {
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 28)) catch |err| {
+        try w.print("[gif] ПРОВАЛ: не читается {s}: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+    defer allocator.free(data);
+
+    const counted = zigrec.gif.measure(data) catch |err| {
+        try w.print("[gif] ПРОВАЛ: не пересчитались кадры: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    try w.print("[gif] {s}: {d}x{d}, кадров {d}, петля {d:.2} с\n", .{
+        std.fs.path.basename(path),
+        counted.width,
+        counted.height,
+        counted.frames,
+        @as(f64, @floatFromInt(counted.total_ns)) / @as(f64, std.time.ns_per_s),
+    });
+
+    var img = zigrec.gif.decode(allocator, data) catch |err| {
+        try w.print("[gif] ПРОВАЛ: не разобрался: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer img.deinit(allocator);
+
+    // Быстрый пересчёт и полный разбор обязаны сойтись: иначе числа
+    // в окне будут не те, что на экране.
+    if (img.frames.len != counted.frames or img.totalNs() != counted.total_ns or
+        img.width != counted.width or img.height != counted.height)
+    {
+        try w.writeAll("[gif] ПРОВАЛ: быстрый пересчёт разошёлся с полным разбором\n");
+        return 1;
+    }
+    try w.writeAll("[gif] пересчёт сошёлся с разбором\n");
+
+    // Ни один кадр не должен быть пустым: чёрный холст означает, что
+    // распаковка отдала нули, а мы этого не заметили.
+    var empty: usize = 0;
+    for (img.frames) |f| {
+        var lit: usize = 0;
+        for (f.pixels) |b| {
+            if (b != 0) lit += 1;
+        }
+        if (lit * 20 < f.pixels.len) empty += 1;
+    }
+    if (empty > 0) {
+        try w.print("[gif] ПРОВАЛ: почти пустых кадров {d} из {d}\n", .{ empty, img.frames.len });
+        return 1;
+    }
+    try w.print("[gif] все {d} кадров с картинкой\n", .{img.frames.len});
+
+    if (png_path) |out_path| {
+        const bytes = zigrec.png.fromBgra(
+            allocator,
+            img.frames[0].pixels,
+            img.width,
+            img.height,
+            @as(usize, img.width) * 4,
+        ) catch |err| {
+            try w.print("[gif] ПРОВАЛ: кадр не лёг в png: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        defer allocator.free(bytes);
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = bytes }) catch |err| {
+            try w.print("[gif] ПРОВАЛ: не записывается {s}: {s}\n", .{ out_path, @errorName(err) });
+            return 1;
+        };
+        try w.print("[gif] первый кадр записан в {s} ({d} байт)\n", .{
+            std.fs.path.basename(out_path),
+            bytes.len,
+        });
+    }
+
+    try w.writeAll("[gif] GIF ПРОЧИТАН\n");
     return 0;
 }
 

@@ -160,13 +160,34 @@ if defined FFMPEG (
   "%FFMPEG%" -y -v error -i ".check\audio\tone_6.wav" -c:a libvorbis ".check\formats\t.ogg"
   "%FFMPEG%" -y -v error -i ".check\sound.mp4" -c copy ".check\formats\t.mov"
   "%FFMPEG%" -y -v error -i ".check\sound.mp4" -c:v mpeg4 -c:a mp3 ".check\formats\t.avi"
-  for %%f in (mp3 flac ogg mov avi) do (
+  rem GIF делаем из куска записи: свой разбор должен узнать кадры и их
+  rem выдержку в файле, который собрала чужая программа.
+  "%FFMPEG%" -y -v error -t 1 -i ".check\encode.mp4" -vf "fps=10,scale=160:-1" ".check\formats\t.gif"
+  for %%f in (mp3 flac ogg mov avi gif) do (
     "zig-out\bin\zigrec.exe" info ".check\formats\t.%%f"
     if errorlevel 1 (
       echo [check] ПРОВАЛ: не прочитан формат %%f
       exit /b 1
     )
   )
+  rem Свой разбор GIF сверяем с чужим декодером точка в точку. Ошибка
+  rem в словаре LZW не роняет чтение и не делает картинку пустой: первые
+  rem строки выходят верными, а дальше кадр тихо расползается. Заметить
+  rem это можно только сравнением с тем, кто читает формат правильно.
+  "zig-out\bin\zigrec.exe" gif-smoke ".check\formats\t.gif" ".check\gif_frame.png"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: GIF не прочитался
+    exit /b 1
+  )
+  "%FFMPEG%" -y -v error -i ".check\formats\t.gif" -vframes 1 -pix_fmt bgra -f rawvideo ".check\gif_from_ffmpeg.raw"
+  "%FFMPEG%" -y -v error -i ".check\gif_frame.png" -pix_fmt bgra -f rawvideo ".check\gif_from_us.raw"
+  fc /b ".check\gif_from_ffmpeg.raw" ".check\gif_from_us.raw" >nul
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: наш кадр GIF не совпал с чужим декодером
+    exit /b 1
+  )
+  echo [check] кадр GIF совпал с чужим декодером точка в точку
+
   "zig-out\bin\zigrec.exe" info ".check\audio\tone_6.wav"
   if errorlevel 1 (
     echo [check] ПРОВАЛ: не прочитан формат wav
