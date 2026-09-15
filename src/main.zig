@@ -18,6 +18,7 @@ const usage =
     \\        --sound          писать звук с микрофона в ту же дорожку
     \\  zigrec monitors                   какие есть мониторы
     \\  zigrec windows                    какие есть видимые окна
+    \\  zigrec edit [ФАЙЛ]                окно редактора: дорожки, резка, перестановка
     \\  zigrec info ФАЙЛ                  что внутри файла: формат, дорожки, кодеки
     \\        понимает mp4, mov, avi, wav, mp3, ogg, flac, midi
     \\  zigrec verify-mp4 ФАЙЛ            разобрать mp4: боксы, быстрый старт, данные
@@ -77,6 +78,12 @@ pub fn main(init: std.process.Init) !void {
             }
             code = try encodeSmoke(init.io, arena, w, args[2], argInt(args, 3, 120), with_audio);
         }
+    } else if (eq(cmd, "edit") or eq(cmd, "редактор")) {
+        const path: ?[]const u8 = if (args.len > 2) args[2] else null;
+        zigrec.editor.run(arena, path) catch |err| {
+            try w.print("редактор не открылся: {s}\n", .{@errorName(err)});
+            code = 1;
+        };
     } else if (eq(cmd, "info")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");

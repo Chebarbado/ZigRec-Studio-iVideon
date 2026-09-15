@@ -36,6 +36,8 @@ pub fn build(b: *std.Build) void {
     // shell32: значок в трее и открытие готового файла.
     core.linkSystemLibrary("shell32", .{});
     core.linkSystemLibrary("comctl32", .{});
+    // comdlg32: системный диалог «открыть файл» в редакторе.
+    core.linkSystemLibrary("comdlg32", .{});
     // Media Foundation: кодирование H.264 и контейнер mp4.
     core.linkSystemLibrary("mfplat", .{});
     core.linkSystemLibrary("mfreadwrite", .{});

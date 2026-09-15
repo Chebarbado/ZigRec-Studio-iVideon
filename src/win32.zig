@@ -28,6 +28,7 @@ pub const c = if (builtin.os.tag == .windows) @cImport({
     @cInclude("mmdeviceapi.h");
     @cInclude("commctrl.h");
     @cInclude("shellapi.h");
+    @cInclude("commdlg.h");
 }) else struct {};
 
 /// HRESULT как беззнаковое: так его печатают в документации и в отладчике.

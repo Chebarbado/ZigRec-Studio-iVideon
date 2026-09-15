@@ -40,6 +40,7 @@ const id_preset = 108;
 const id_area_rec = 109;
 const id_sound = 110;
 const id_server = 111;
+const id_editor = 112;
 
 const hotkey_record = 1;
 const hotkey_pause = 2;
@@ -110,7 +111,7 @@ const loadIconById = @extern(
 );
 
 /// Номера из заголовков Windows, не менялись с девяностых.
-const idc_arrow = 32512;
+pub const idc_arrow = 32512;
 const idc_cross = 32515;
 const idi_information = 32516;
 
@@ -124,12 +125,12 @@ const idi_app = 1;
 /// и выровнены они как попало. Любое приведение через `@alignCast` на них
 /// падает в безопасном режиме. Копируем биты как есть: это ровно то, что делает
 /// C, и единственный честный способ положить не-указатель в поле-указатель.
-fn putHandle(field: anytype, value: ?*anyopaque) void {
+pub fn putHandle(field: anytype, value: ?*anyopaque) void {
     const raw: usize = @intFromPtr(value);
     @memcpy(std.mem.asBytes(field), std.mem.asBytes(&raw));
 }
 
-fn setSystemCursor(field: anytype, id: usize) void {
+pub fn setSystemCursor(field: anytype, id: usize) void {
     putHandle(field, loadCursorById(null, id));
 }
 
@@ -139,7 +140,7 @@ fn setSystemIcon(field: anytype, id: usize) void {
 
 /// Наш значок из ресурсов exe. Если его вдруг нет — берём системный,
 /// чтобы окно всё равно открылось: значок не повод не запуститься.
-fn setAppIcon(field: anytype) void {
+pub fn setAppIcon(field: anytype) void {
     const module = c.GetModuleHandleW(null);
     const icon = loadIconById(@ptrCast(module), idi_app);
     if (icon) |got| {
@@ -149,7 +150,7 @@ fn setAppIcon(field: anytype) void {
     }
 }
 
-fn wide(comptime s: []const u8) [:0]const u16 {
+pub fn wide(comptime s: []const u8) [:0]const u16 {
     return std.unicode.utf8ToUtf16LeStringLiteral(s);
 }
 
@@ -160,7 +161,7 @@ fn wide(comptime s: []const u8) [:0]const u16 {
 /// в секунду. Безусловная запись превращала неподвижную строку состояния
 /// в мигающую: при удалённой работе каждая такая перерисовка ещё и уезжает
 /// по сети как изменение картинки.
-fn setText(hwnd: c.HWND, text: []const u8) void {
+pub fn setText(hwnd: c.HWND, text: []const u8) void {
     var buf: [512]u16 = undefined;
     const n = std.unicode.utf8ToUtf16Le(&buf, text) catch return;
     buf[n] = 0;
@@ -181,7 +182,7 @@ fn sameText(hwnd: c.HWND, want: []const u16) bool {
 /// Кнопка. Номер ставим отдельным вызовом, а не через параметр меню:
 /// туда Windows ждёт указатель, и малый номер вроде 101 — это невыровненный
 /// адрес, на котором Zig честно падает.
-fn button(parent: c.HWND, comptime text: []const u8, id: c_int, x: i32, y: i32, w: i32, h: i32, style: u32) c.HWND {
+pub fn button(parent: c.HWND, comptime text: []const u8, id: c_int, x: i32, y: i32, w: i32, h: i32, style: u32) c.HWND {
     const hwnd = c.CreateWindowExW(
         0,
         wide("BUTTON"),
@@ -292,7 +293,7 @@ fn addItem(combo_hwnd: c.HWND, text: []const u8) void {
     _ = c.SendMessageW(combo_hwnd, c.CB_ADDSTRING, 0, @bitCast(@intFromPtr(&buf)));
 }
 
-fn applyFont(hwnd: c.HWND) void {
+pub fn applyFont(hwnd: c.HWND) void {
     const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
     _ = c.SendMessageW(hwnd, c.WM_SETFONT, @intFromPtr(font), 1);
 }
@@ -664,6 +665,29 @@ fn refreshServerRow(hwnd: c.HWND) void {
     _ = c.InvalidateRect(hwnd, &lamp, 0);
 }
 
+/// Открыть редактор отдельной программой.
+///
+/// Отдельным процессом, а не вторым окном в этом: у записи свой цикл
+/// сообщений и свои горячие клавиши, и делить их с редактором — значит
+/// получить окно, которое подвисает во время записи.
+fn openEditor() void {
+    var exe: [std.fs.max_path_bytes]u16 = undefined;
+    const n = c.GetModuleFileNameW(null, &exe, exe.len);
+    if (n == 0) return;
+    exe[n] = 0;
+
+    const params = wide("edit");
+    var info = std.mem.zeroes(c.SHELLEXECUTEINFOW);
+    info.cbSize = @sizeOf(c.SHELLEXECUTEINFOW);
+    info.lpVerb = wide("open");
+    info.lpFile = @ptrCast(&exe);
+    info.lpParameters = params;
+    info.nShow = c.SW_SHOWNORMAL;
+    if (c.ShellExecuteExW(&info) == 0) {
+        setText(app.status, "редактор не открылся");
+    }
+}
+
 fn toggleServer(hwnd: c.HWND) void {
     if (app.server.isRunning()) {
         app.server.stop();
@@ -978,6 +1002,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             app.lbl_sound_note = label(hwnd, "с галочкой звук идёт и в индикатор, и в файл", 14, 362, 496, 20);
 
             app.btn_server = button(hwnd, "Сервер MCP", id_server, 14, 396, 140, 30, 0);
+            _ = button(hwnd, "Редактор дорожек…", id_editor, 14, 438, 190, 30, 0);
             app.lbl_server = label(hwnd, "", 194, 402, 300, 20);
 
             _ = label(hwnd, "Кадров/с", 14, 152, 90, 20);
@@ -1060,6 +1085,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                     _ = c.InvalidateRect(hwnd, null, 1);
                 },
                 id_server => toggleServer(hwnd),
+                id_editor => openEditor(),
                 id_cursor => {
                     const checked = c.SendMessageW(app.chk_cursor, c.BM_GETCHECK, 0, 0) != 0;
                     app.settings.cursor = checked;
@@ -1371,7 +1397,7 @@ pub fn runFull(allocator: std.mem.Allocator, start_hidden: bool, serve_at_once: 
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         540,
-        496,
+        540,
         null,
         null,
         hinst,
