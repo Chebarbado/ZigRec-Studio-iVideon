@@ -16,8 +16,47 @@ pub const ruler_h: i32 = 26;
 pub const lane_h: i32 = 56;
 /// Зазор между полосами.
 pub const lane_gap: i32 = 6;
+/// Высота строки с именем в левой колонке дорожки.
+///
+/// Верхняя строка — имя, всё, что ниже, — вид дорожки и выключатель звука.
+/// Две разные вещи в одной колонке должны и ткаться по-разному, иначе
+/// двойной щелчок по имени успевает заодно выключить дорожку.
+pub const name_line_h: i32 = 24;
 /// Насколько близко к краю клипа надо ткнуть, чтобы взяться за край.
 pub const edge_grab: i32 = 6;
+
+/// Толщина полосы между окном кадра и таймлайном. За неё тянут мышью.
+///
+/// Шесть точек: тоньше — не попасть, толще — полоса начинает выглядеть
+/// как часть окна, а не как граница.
+pub const splitter_h: i32 = 6;
+/// Ниже этого окно кадра не сворачивается.
+pub const min_preview_h: i32 = 120;
+/// Ниже этого не сворачивается таймлайн: в сотню точек влезает линейка
+/// и одна полоса дорожки — меньше уже нечего показывать.
+pub const min_timeline_h: i32 = 120;
+
+/// Новая высота окна кадра, когда границу тянут мышью в точку `y`.
+///
+/// `top` — где начинается окно кадра, `room` — сколько высоты у кадра,
+/// полосы-границы и таймлайна вместе.
+///
+/// Вынесено сюда и проверено тестами не от избытка усердия: ошибка здесь
+/// схлопывает одну из половин окна в ноль, а обратно её уже не за что
+/// ухватить — полосы-границы на экране не остаётся.
+pub fn previewHeightAt(y: i32, top: i32, room: i32) i32 {
+    const wanted = y - top;
+    // Когда окно слишком низкое, места на оба предела не хватает.
+    // Тогда кадру достаётся его минимум, а таймлайн уезжает вниз:
+    // лучше показать хоть что-то, чем показать ничего.
+    const most = @max(room - splitter_h - min_timeline_h, min_preview_h);
+    return std.math.clamp(wanted, min_preview_h, most);
+}
+
+/// Попала ли мышь на полосу-границу.
+pub fn onSplitter(y: i32, top: i32, preview_h: i32) bool {
+    return y >= top + preview_h and y < top + preview_h + splitter_h;
+}
 
 /// Что видно на экране: с какого времени и в каком масштабе.
 pub const View = struct {
@@ -125,7 +164,9 @@ pub const Target = enum {
     empty,
     /// Линейка времени: перенос указателя воспроизведения.
     ruler,
-    /// Левая колонка дорожки: имя, беззвучие.
+    /// Левая колонка дорожки, строка имени: выбор и переименование.
+    header_name,
+    /// Левая колонка дорожки ниже имени: включение и выключение звука.
     header,
     /// Тело клипа: перетаскивание.
     clip,
@@ -161,7 +202,11 @@ pub fn hitTest(project: *const timeline.Project, view: View, x: i32, y: i32) Hit
     }
     const track_index = view.trackAtY(y, project.track_count) orelse return .{};
     if (x < header_w) {
-        return .{ .target = .header, .track = track_index };
+        const within = y - view.laneTop(track_index);
+        return .{
+            .target = if (within < name_line_h) .header_name else .header,
+            .track = track_index,
+        };
     }
 
     const when = view.xToTime(x);
@@ -312,7 +357,9 @@ test "попадание: линейка, колонка имён, тело кл
     const v = View{ .at_ns = 0, .ns_per_px = 20 * std.time.ns_per_ms };
 
     try std.testing.expectEqual(Target.ruler, hitTest(p, v, 300, 5).target);
-    try std.testing.expectEqual(Target.header, hitTest(p, v, 40, ruler_h + 10).target);
+    // Колонка имён делится надвое: сверху имя, ниже выключатель звука.
+    try std.testing.expectEqual(Target.header_name, hitTest(p, v, 40, ruler_h + 10).target);
+    try std.testing.expectEqual(Target.header, hitTest(p, v, 40, ruler_h + name_line_h + 4).target);
 
     // Середина клипа — тело.
     const middle = v.timeToX(5 * sec);
@@ -374,4 +421,63 @@ test "длительность клипа подписывается по-раз
     try std.testing.expectEqualStrings("3.50 с", lengthLabel(&buf, 3500 * std.time.ns_per_ms));
     try std.testing.expectEqualStrings("42.0 с", lengthLabel(&buf, 42 * sec));
     try std.testing.expectEqualStrings("2:05", lengthLabel(&buf, 125 * sec));
+}
+
+test "граница двигается вслед за мышью" {
+    // Окно высотой 800, кадр начинается на 82.
+    try std.testing.expectEqual(@as(i32, 200), previewHeightAt(282, 82, 700));
+    try std.testing.expectEqual(@as(i32, 400), previewHeightAt(482, 82, 700));
+}
+
+test "ни кадр, ни таймлайн не схлопываются в ноль" {
+    // Тянем к самому верху: кадру остаётся его минимум.
+    try std.testing.expectEqual(min_preview_h, previewHeightAt(0, 82, 700));
+    try std.testing.expectEqual(min_preview_h, previewHeightAt(-500, 82, 700));
+
+    // Тянем к самому низу: таймлайну остаётся его минимум.
+    const most = 700 - splitter_h - min_timeline_h;
+    try std.testing.expectEqual(most, previewHeightAt(10_000, 82, 700));
+    // И на этой высоте таймлайну действительно хватает места.
+    try std.testing.expect(700 - most - splitter_h >= min_timeline_h);
+}
+
+test "в низком окне кадр получает свой минимум, а не отрицательную высоту" {
+    // Места мало: предел снизу важнее предела сверху.
+    const h = previewHeightAt(500, 82, 150);
+    try std.testing.expectEqual(min_preview_h, h);
+    try std.testing.expect(h > 0);
+}
+
+test "полоса-граница ловится ровно там, где нарисована" {
+    // Кадр от 82 высотой 260: полоса занимает 342..348.
+    try std.testing.expect(!onSplitter(341, 82, 260));
+    try std.testing.expect(onSplitter(342, 82, 260));
+    try std.testing.expect(onSplitter(347, 82, 260));
+    try std.testing.expect(!onSplitter(348, 82, 260));
+}
+
+test "имя дорожки и выключатель звука — разные цели" {
+    const p = try testProject();
+    defer std.testing.allocator.destroy(p);
+    const v = View{};
+
+    // Верхняя строка первой полосы — имя.
+    const top = v.laneTop(0);
+    try std.testing.expectEqual(Target.header_name, hitTest(p, v, 20, top + 2).target);
+    try std.testing.expectEqual(Target.header_name, hitTest(p, v, 20, top + name_line_h - 1).target);
+
+    // Ниже — вид дорожки и выключатель.
+    try std.testing.expectEqual(Target.header, hitTest(p, v, 20, top + name_line_h).target);
+    try std.testing.expectEqual(Target.header, hitTest(p, v, 20, top + lane_h - 2).target);
+
+    // Обе цели говорят про ту же дорожку.
+    try std.testing.expectEqual(@as(usize, 1), hitTest(p, v, 20, v.laneTop(1) + 2).track);
+}
+
+test "за левой колонкой имени нет" {
+    const p = try testProject();
+    defer std.testing.allocator.destroy(p);
+    const v = View{};
+    const got = hitTest(p, v, header_w + 5, v.laneTop(0) + 2);
+    try std.testing.expect(got.target != .header_name and got.target != .header);
 }

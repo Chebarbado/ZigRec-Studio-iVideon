@@ -65,6 +65,19 @@ pub const max_history = 24;
 /// дорожку невидимым мусором.
 pub const min_len_ns: u64 = std.time.ns_per_s / 100;
 
+/// Сколько байт имени влезает в отведённое место, не разрубив букву.
+///
+/// Русская буква занимает два байта. Обрезка ровно по границе места
+/// оставила бы половину буквы, и вместо имени вышел бы вопросительный знак
+/// в ромбе — а заметно это стало бы только на длинном имени.
+pub fn fitName(text: []const u8, room: usize) usize {
+    if (text.len <= room) return text.len;
+    var n = room;
+    // Продолжение буквы в UTF-8 начинается с битов 10.
+    while (n > 0 and (text[n] & 0xC0) == 0x80) n -= 1;
+    return n;
+}
+
 pub const Track = struct {
     kind: TrackKind = .video,
     /// Имя для полосы в окне.
@@ -80,7 +93,7 @@ pub const Track = struct {
     }
 
     pub fn setTitle(self: *Track, text: []const u8) void {
-        const n = @min(text.len, self.name.len);
+        const n = fitName(text, self.name.len);
         @memcpy(self.name[0..n], text[0..n]);
         self.name_len = n;
     }
@@ -472,6 +485,20 @@ pub const Project = struct {
         self.tracks[b] = tmp;
     }
 
+    /// Переименовать дорожку.
+    ///
+    /// Через отмену наравне с резкой: переименовал не ту — отменил.
+    /// Пустое имя не берём: полоса без подписи хуже полосы с «Звук 2».
+    pub fn renameTrack(self: *Project, track_index: usize, name: []const u8) Error!void {
+        const t = try self.track(track_index);
+        const clean = std.mem.trim(u8, name, " ");
+        if (clean.len == 0) return;
+        if (std.mem.eql(u8, t.title(), clean)) return;
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.setTitle(clean);
+    }
+
     pub fn setMuted(self: *Project, track_index: usize, muted: bool) Error!void {
         const t = try self.track(track_index);
         if (t.muted == muted) return;
@@ -792,4 +819,57 @@ test "отмена и возврат на три шага: лента не пу�
     try std.testing.expect(p.redo());
     try std.testing.expectEqual(@as(usize, 3), p.trackList()[0].list().len);
     try std.testing.expect(!p.canRedo());
+}
+
+test "переименование дорожки отменяется наравне с резкой" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+
+    try p.renameTrack(1, "Микрофон ведущего");
+    try std.testing.expectEqualStrings("Микрофон ведущего", p.tracks[1].title());
+
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqualStrings("Микрофон", p.tracks[1].title());
+    try std.testing.expect(p.redo());
+    try std.testing.expectEqualStrings("Микрофон ведущего", p.tracks[1].title());
+}
+
+test "пустое имя не принимается и не тратит шаг отмены" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+
+    try p.renameTrack(0, "   ");
+    try std.testing.expectEqualStrings("Видео", p.tracks[0].title());
+    // Отменять нечего: шага в истории не появилось.
+    try std.testing.expect(!p.undo());
+
+    // Пробелы по краям срезаются, а имя внутри остаётся как есть.
+    try p.renameTrack(0, "  Экран целиком  ");
+    try std.testing.expectEqualStrings("Экран целиком", p.tracks[0].title());
+}
+
+test "то же имя не считается изменением" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.renameTrack(0, "Видео");
+    try std.testing.expect(!p.undo());
+}
+
+test "чужой номер дорожки — отказ, а не порча соседней" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try std.testing.expectError(Error.NoSuchThing, p.renameTrack(9, "Никакая"));
+}
+
+test "длинное имя обрезается по букве, а не по байту" {
+    // Сорок восемь байт — это двадцать четыре русские буквы.
+    var t = Track{};
+    t.setTitle("ааааааааааааааааааааааааааааааа");
+    try std.testing.expectEqual(@as(usize, 48), t.name_len);
+    // Обрезанное имя должно остаться годным текстом.
+    try std.testing.expect(std.unicode.utf8ValidateSlice(t.title()));
+
+    // Латиница влезает целиком до самого предела.
+    t.setTitle("abcdefghijklmnopqrstuvwxyz");
+    try std.testing.expectEqualStrings("abcdefghijklmnopqrstuvwxyz", t.title());
 }

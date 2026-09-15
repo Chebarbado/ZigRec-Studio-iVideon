@@ -338,7 +338,7 @@ pub fn applyFont(hwnd: c.HWND) void {
 }
 
 /// Куда писать по умолчанию: `Видео\ZigRecStudio` в профиле пользователя.
-fn defaultDir(allocator: std.mem.Allocator) ![]const u8 {
+pub fn defaultDir(allocator: std.mem.Allocator) ![]const u8 {
     var wide_home: [512]u16 = undefined;
     const n = c.GetEnvironmentVariableW(wide("USERPROFILE"), &wide_home, wide_home.len);
     if (n == 0 or n >= wide_home.len) return try allocator.dupe(u8, ".");
@@ -806,7 +806,7 @@ const SettingsWindow = struct {
 
 var settings_win: SettingsWindow = .{};
 
-fn editBox(parent: c.HWND, id: c_int, x: i32, y: i32, w: i32, h: i32) c.HWND {
+pub fn editBox(parent: c.HWND, id: c_int, x: i32, y: i32, w: i32, h: i32) c.HWND {
     const hwnd = c.CreateWindowExW(
         c.WS_EX_CLIENTEDGE,
         wide("EDIT"),
@@ -826,7 +826,7 @@ fn editBox(parent: c.HWND, id: c_int, x: i32, y: i32, w: i32, h: i32) c.HWND {
     return hwnd;
 }
 
-fn boxText(hwnd: c.HWND, buf: []u8) []const u8 {
+pub fn boxText(hwnd: c.HWND, buf: []u8) []const u8 {
     var wide_buf: [512]u16 = undefined;
     const n = c.GetWindowTextW(hwnd, &wide_buf, wide_buf.len);
     if (n <= 0) return "";

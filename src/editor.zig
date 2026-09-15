@@ -17,6 +17,8 @@ const media = @import("media.zig");
 const waveform = @import("waveform.zig");
 const project_file = @import("project_file.zig");
 const player_mod = @import("player.zig");
+const settings_mod = @import("settings.zig");
+const png = @import("png.zig");
 const ui = @import("ui.zig");
 
 const View = view_mod.View;
@@ -33,6 +35,8 @@ const id_save = 208;
 const id_add_video = 209;
 const id_add_audio = 210;
 const id_play = 211;
+const id_shot = 212;
+const id_rename_box = 213;
 
 /// Высота панели кнопок. Таймлайн начинается под ней.
 /// Два ряда: сверху файл и дорожки, снизу правка.
@@ -40,7 +44,10 @@ const toolbar_h: i32 = 82;
 /// Высота строки сообщения снизу.
 const status_h: i32 = 22;
 /// Высота окна предпросмотра над таймлайном.
-const preview_h: i32 = 260;
+///
+/// Не постоянная величина: границу тянут мышью, и подогнанная высота
+/// переживает перезапуск — лежит в настройках.
+var preview_h: i32 = 260;
 /// Такт воспроизведения. Тридцать раз в секунду: чаще человек не заметит,
 /// реже — заметит рывки.
 const timer_play = 1;
@@ -70,11 +77,23 @@ const dragFinish = @extern(
     .{ .name = "DragFinish" },
 );
 
+/// Та же ловушка, седьмая встреча: прежний обработчик поля ввода
+/// приходит числом, и превращать его в типизированный указатель Zig
+/// незачем — держим числом и числом же отдаём обратно.
+const callWindowProcW = @extern(
+    *const fn (usize, c.HWND, c.UINT, c.WPARAM, c.LPARAM) callconv(.winapi) c.LRESULT,
+    .{ .name = "CallWindowProcW" },
+);
+
 /// Сообщение о брошенных файлах.
 const wm_dropfiles = 0x0233;
 
+/// Окно должно получать двойные щелчки: без этого признака Windows
+/// присылает два одиночных, и переименование не начинается никогда.
+const cs_dblclks: c.UINT = 0x0008;
+
 /// Что человек тянет мышью прямо сейчас.
-const Drag = enum { none, playhead, clip, trim_left, trim_right };
+const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter };
 
 const Editor = struct {
     allocator: std.mem.Allocator,
@@ -111,6 +130,14 @@ const Editor = struct {
     /// Когда был предыдущий такт — чтобы время шло по часам, а не по тактам.
     last_tick_ns: u64 = 0,
     btn_play: c.HWND = null,
+
+    /// Дорожка, с которой работают: её переименовывает F2.
+    cur_track: usize = 0,
+    /// Поле ввода имени, открытое поверх полосы дорожки.
+    name_box: c.HWND = null,
+    /// Чьё имя правим и какой обработчик у поля был до нас.
+    name_track: usize = 0,
+    name_prev_proc: usize = 0,
 
     /// Последнее сообщение человеку.
     note: [256]u8 = @splat(0),
@@ -187,12 +214,13 @@ fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
     drawText(dc, 10, height - status_h + 3, ed.message(), col_text);
 
     drawPreview(dc, width);
+    drawSplitter(dc, width);
 
     // Ниже — таймлайн со своим началом координат. Так арифметика вида
     // остаётся той, что проверена тестами, и считает от нуля.
-    const lane_height = height - toolbar_h - preview_h - status_h;
+    const lane_height = height - toolbar_h - preview_h - view_mod.splitter_h - status_h;
     if (lane_height <= 0) return;
-    _ = c.SetViewportOrgEx(dc, 0, toolbar_h + preview_h, null);
+    _ = c.SetViewportOrgEx(dc, 0, toolbar_h + preview_h + view_mod.splitter_h, null);
     defer _ = c.SetViewportOrgEx(dc, 0, 0, null);
 
     drawRuler(dc, width);
@@ -259,6 +287,31 @@ fn drawPreview(dc: c.HDC, width: i32) void {
         c.DIB_RGB_COLORS,
         c.SRCCOPY,
     );
+}
+
+/// Полоса-граница между кадром и таймлайном.
+///
+/// Три чёрточки посередине — общепринятый знак «это тянется». Без него
+/// полосу принимают за рамку и не пробуют трогать.
+fn drawSplitter(dc: c.HDC, width: i32) void {
+    const top = toolbar_h + preview_h;
+    solid(dc, .{
+        .left = 0,
+        .top = top,
+        .right = width,
+        .bottom = top + view_mod.splitter_h,
+    }, 0x00E4E4E4);
+
+    const middle = @divTrunc(width, 2);
+    var shift: i32 = -14;
+    while (shift <= 14) : (shift += 14) {
+        solid(dc, .{
+            .left = middle + shift - 5,
+            .top = top + 2,
+            .right = middle + shift + 5,
+            .bottom = top + 4,
+        }, 0x00A6A6A6);
+    }
 }
 
 /// Строка посередине поля.
@@ -895,11 +948,21 @@ fn redoStep() void {
 /// Мышь приходит в координатах окна, а таймлайн живёт под панелью кнопок.
 /// Приводим в одном месте, чтобы сдвиг не расползся по обработчикам.
 fn toLane(y: i32) i32 {
-    return y - toolbar_h - preview_h;
+    return y - toolbar_h - preview_h - view_mod.splitter_h;
+}
+
+/// Верх таймлайна: под окном кадра и полосой-границей.
+fn laneAreaTop() i32 {
+    return toolbar_h + preview_h + view_mod.splitter_h;
 }
 
 fn onDown(x: i32, y: i32) void {
-    if (y < toolbar_h + preview_h) return;
+    if (view_mod.onSplitter(y, toolbar_h, preview_h)) {
+        ed.drag = .splitter;
+        _ = c.SetCapture(ed.hwnd);
+        return;
+    }
+    if (y < laneAreaTop()) return;
     const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
     switch (hit.target) {
         .ruler => {
@@ -911,6 +974,7 @@ fn onDown(x: i32, y: i32) void {
         .clip, .clip_left, .clip_right => {
             ed.has_selection = true;
             ed.sel_track = hit.track;
+            ed.cur_track = hit.track;
             ed.sel_clip = hit.clip;
             const clip = ed.project.tracks[hit.track].clips[hit.clip];
             ed.drag = switch (hit.target) {
@@ -924,11 +988,19 @@ fn onDown(x: i32, y: i32) void {
         },
         .lane => {
             ed.has_selection = false;
+            ed.cur_track = hit.track;
             ed.playhead_ns = hit.when_ns;
             showFrame();
         },
+        .header_name => {
+            // Строка имени только выбирает дорожку. Выключать звук отсюда
+            // нельзя: двойной щелчок по имени успевал бы заодно выключить
+            // дорожку, а человек просил всего лишь переименовать.
+            ed.cur_track = hit.track;
+        },
         .header => {
-            // Щелчок по имени дорожки выключает и включает её.
+            // Ниже имени — выключатель звука.
+            ed.cur_track = hit.track;
             ed.project.setMuted(hit.track, !ed.project.tracks[hit.track].muted) catch {};
         },
         .empty => {},
@@ -938,12 +1010,24 @@ fn onDown(x: i32, y: i32) void {
 
 fn onMove(x: i32, y: i32) void {
     if (ed.drag == .none) {
-        if (y < toolbar_h + preview_h) return;
+        if (view_mod.onSplitter(y, toolbar_h, preview_h)) {
+            // 32645 — курсор «тянуть вверх-вниз».
+            var cursor: ?*anyopaque = null;
+            ui.setSystemCursor(&cursor, 32645);
+            _ = setCursorRaw(cursor);
+            return;
+        }
+        if (y < laneAreaTop()) return;
         // Курсор подсказывает, что будет: у края — растяжение.
         const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
         var cursor: ?*anyopaque = null;
         ui.setSystemCursor(&cursor, if (hit.isEdge()) 32644 else ui.idc_arrow);
         _ = setCursorRaw(cursor);
+        return;
+    }
+
+    if (ed.drag == .splitter) {
+        moveSplitter(y);
         return;
     }
 
@@ -983,8 +1067,20 @@ fn onMove(x: i32, y: i32) void {
             ed.drag_started = true;
             refresh();
         },
-        .none => {},
+        .splitter, .none => {},
     }
+}
+
+/// Поставить границу туда, куда её тянут. Всё решение — в правиле вида,
+/// здесь только окно спрашивается о своей высоте.
+fn moveSplitter(y: i32) void {
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+    const room = rect.bottom - toolbar_h - status_h;
+    const want = view_mod.previewHeightAt(y, toolbar_h, room);
+    if (want == preview_h) return;
+    preview_h = want;
+    refresh();
 }
 
 fn onUp() void {
@@ -996,6 +1092,11 @@ fn onUp() void {
                 .trim_left, .trim_right => "клип обрезан",
                 else => "",
             });
+        }
+        if (ed.drag == .splitter) {
+            // Сохраняем не на каждом движении мыши, а когда её отпустили:
+            // иначе файл переписывался бы сотню раз за одно перетаскивание.
+            savePreviewHeight();
         }
         ed.drag = .none;
         ed.drag_started = false;
@@ -1013,7 +1114,7 @@ fn onDrop(drop: usize) void {
 
     var point = c.POINT{ .x = 0, .y = 0 };
     _ = dragQueryPoint(drop, &point);
-    const at_ns: u64 = if (point.x > view_mod.header_w and point.y > toolbar_h + preview_h)
+    const at_ns: u64 = if (point.x > view_mod.header_w and point.y > laneAreaTop())
         ed.view.xToTime(point.x)
     else
         0;
@@ -1056,6 +1157,202 @@ fn onWheel(delta: i16, screen_x: i32) void {
     refresh();
 }
 
+// ----------------------------------------------------------- снимок кадра
+
+/// Сохранить то, что сейчас в окне кадра, отдельной картинкой.
+///
+/// Кладём рядом с записями: снимок делают из той же работы, что и запись,
+/// и искать его человек пойдёт туда же. Имя — по времени кадра: два снимка
+/// подряд не затрут друг друга, а по имени видно, откуда кадр.
+fn saveFrame() void {
+    const p = &(ed.player orelse {
+        ed.say("снимать нечего: поставьте указатель на клип");
+        refresh();
+        return;
+    });
+    if (!p.ready) {
+        ed.say("снимать нечего: кадр не прочитался");
+        refresh();
+        return;
+    }
+
+    const dir = ui.defaultDir(ed.allocator) catch {
+        ed.say("не нашлась папка записей — снимок не сохранён");
+        refresh();
+        return;
+    };
+    defer ed.allocator.free(dir);
+
+    const ms = p.at_ns / std.time.ns_per_ms;
+    var name_buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "снимок-{d:0>2}-{d:0>2}-{d:0>3}.png", .{
+        ms / 60_000,
+        (ms / 1000) % 60,
+        ms % 1000,
+    }) catch "снимок.png";
+
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ dir, name }) catch {
+        ed.say("слишком длинный путь — снимок не сохранён");
+        refresh();
+        return;
+    };
+
+    // Строки в проигрывателе уже уложены сверху вниз и плотно: шаг равен
+    // ширине кадра. Это делает `copyRows`, и на этом же стоит рисование.
+    const bytes = png.fromBgra(ed.allocator, p.pixels, p.width, p.height, @as(usize, p.width) * 4) catch |err| {
+        var buf: [128]u8 = undefined;
+        ed.say(std.fmt.bufPrint(&buf, "снимок не собрался: {s}", .{@errorName(err)}) catch "снимок не собрался");
+        refresh();
+        return;
+    };
+    defer ed.allocator.free(bytes);
+
+    if (!writeWholeFile(path, bytes)) {
+        ed.say("снимок не записался: нет доступа к папке записей");
+        refresh();
+        return;
+    }
+
+    var buf: [320]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "снимок сохранён: {s} ({d} КБ)", .{
+        name,
+        (bytes.len + 1023) / 1024,
+    }) catch "снимок сохранён");
+    refresh();
+}
+
+/// Записать файл целиком. Через Windows напрямую: путь бывает с русскими
+/// буквами, и он должен дойти до диска тем же, каким мы его собрали.
+fn writeWholeFile(path: []const u8, bytes: []const u8) bool {
+    var wide_path: [std.fs.max_path_bytes]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_path, path) catch return false;
+    wide_path[n] = 0;
+
+    const handle = c.CreateFileW(
+        @ptrCast(&wide_path),
+        c.GENERIC_WRITE,
+        0,
+        null,
+        c.CREATE_ALWAYS,
+        c.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (handle == c.INVALID_HANDLE_VALUE) return false;
+    defer _ = c.CloseHandle(handle);
+
+    var at: usize = 0;
+    while (at < bytes.len) {
+        var written: c.DWORD = 0;
+        const piece: c.DWORD = @intCast(@min(bytes.len - at, 1 << 20));
+        if (c.WriteFile(handle, bytes.ptr + at, piece, &written, null) == 0) return false;
+        if (written == 0) return false;
+        at += written;
+    }
+    return true;
+}
+
+// ------------------------------------------------- переименование дорожки
+
+/// Двойной щелчок по имени дорожки открывает поле ввода прямо на месте имени.
+fn onDoubleClick(x: i32, y: i32) void {
+    if (y < laneAreaTop()) return;
+    const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
+    if (hit.target != .header_name) return;
+    startRename(hit.track);
+}
+
+/// Открыть поле ввода поверх имени дорожки.
+fn startRename(track_index: usize) void {
+    if (ed.name_box != null) return;
+    if (track_index >= ed.project.track_count) {
+        ed.say("нечего переименовывать: сначала добавьте дорожку");
+        refresh();
+        return;
+    }
+
+    const top = laneAreaTop() + ed.view.laneTop(track_index) + 3;
+    const box = ui.editBox(ed.hwnd, id_rename_box, 6, top, view_mod.header_w - 14, view_mod.name_line_h - 2);
+    if (box == null) return;
+
+    ed.name_box = box;
+    ed.name_track = track_index;
+
+    // Поле ввода само не отдаёт Enter и Esc: перехватываем их, подменив
+    // его обработчик. Прежний держим числом — типизированный указатель
+    // на чужой обработчик Zig проверяет на выравнивание и падает.
+    ed.name_prev_proc = @bitCast(c.SetWindowLongPtrW(box, gwlp_wndproc, @bitCast(@intFromPtr(&renameProc))));
+
+    ui.setText(box, ed.project.tracks[track_index].title());
+    // Всё имя выделено: чаще имя меняют целиком, чем правят в середине.
+    _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
+    _ = c.SetFocus(box);
+
+    ed.say("новое имя, затем Enter; Esc — оставить как было");
+    refresh();
+}
+
+/// GWLP_WNDPROC: обработчик окна.
+const gwlp_wndproc: c_int = -4;
+
+fn renameProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
+    switch (msg) {
+        c.WM_KEYDOWN => switch (wp) {
+            c.VK_RETURN => {
+                finishRename(true);
+                return 0;
+            },
+            c.VK_ESCAPE => {
+                finishRename(false);
+                return 0;
+            },
+            else => {},
+        },
+        // Однострочное поле встречает Enter и Esc звонком. Глотаем их здесь,
+        // иначе каждое переименование заканчивалось бы писком.
+        c.WM_CHAR => switch (wp) {
+            '\r', 27 => return 0,
+            else => {},
+        },
+        // Ушли мышью в другое место — считаем это согласием: так ведут себя
+        // все списки с переименованием, и терять набранное обидно.
+        c.WM_KILLFOCUS => {
+            finishRename(true);
+            return 0;
+        },
+        else => {},
+    }
+    return callWindowProcW(ed.name_prev_proc, hwnd, msg, wp, lp);
+}
+
+/// Закрыть поле ввода. `accept` — принять набранное.
+fn finishRename(accept: bool) void {
+    const box = ed.name_box orelse return;
+    // Обнуляем заранее: закрытие поля само пришлёт WM_KILLFOCUS, и без
+    // этого мы зашли бы сюда второй раз уже с закрытым полем.
+    ed.name_box = null;
+
+    var buf: [256]u8 = undefined;
+    const typed = if (accept) ui.boxText(box, &buf) else "";
+
+    _ = c.SetWindowLongPtrW(box, gwlp_wndproc, @bitCast(ed.name_prev_proc));
+    _ = c.DestroyWindow(box);
+    ed.name_prev_proc = 0;
+    _ = c.SetFocus(ed.hwnd);
+
+    if (accept and typed.len > 0) {
+        ed.project.renameTrack(ed.name_track, typed) catch {
+            ed.say("имя не принято");
+            refresh();
+            return;
+        };
+        ed.say("дорожка переименована");
+    } else {
+        ed.say("имя оставлено прежним");
+    }
+    refresh();
+}
+
 // ------------------------------------------------------------------- окно
 
 fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
@@ -1071,6 +1368,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             _ = ui.button(hwnd, "➕ Видеодорожка", id_add_video, 294, 8, 168, 28, 0);
             _ = ui.button(hwnd, "➕ Звуковая дорожка", id_add_audio, 470, 8, 196, 28, 0);
             ed.btn_play = ui.button(hwnd, "▶ Играть", id_play, 674, 8, 110, 28, 0);
+            _ = ui.button(hwnd, "📷 Снимок", id_shot, 792, 8, 112, 28, 0);
 
             // Нижний ряд: правка того, что уже лежит на дорожках.
             _ = ui.button(hwnd, "✂ Разрезать", id_split, 10, 46, 120, 28, 0);
@@ -1107,6 +1405,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_add_video => addEmptyTrack(.video),
                 id_add_audio => addEmptyTrack(.audio),
                 id_play => togglePlay(),
+                id_shot => saveFrame(),
                 else => {},
             }
             return 0;
@@ -1130,6 +1429,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
         },
         wm_dropfiles => {
             onDrop(@bitCast(wp));
+            return 0;
+        },
+        c.WM_LBUTTONDBLCLK => {
+            onDoubleClick(loWord(lp), hiWord(lp));
             return 0;
         },
         c.WM_MOUSEMOVE => {
@@ -1159,6 +1462,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                     refresh();
                 },
                 c.VK_SPACE => togglePlay(),
+                c.VK_F2 => startRename(ed.cur_track),
+                c.VK_F12 => saveFrame(),
                 else => {},
             }
             return 0;
@@ -1172,6 +1477,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             return 0;
         },
         c.WM_DESTROY => {
+            if (ed.name_box != null) finishRename(false);
             if (ed.player) |*p| p.close();
             ed.player = null;
             c.PostQuitMessage(0);
@@ -1210,6 +1516,38 @@ fn paintBuffered(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
     _ = c.BitBlt(dc, 0, 0, width, height, mem, 0, 0, c.SRCCOPY);
 }
 
+/// Папка, где лежат настройки. Редактор — отдельная программа, и путь
+/// к ним он вычисляет сам, тем же способом, что и окно записи.
+fn settingsDir(allocator: std.mem.Allocator) ?[]const u8 {
+    return ui.defaultDir(allocator) catch null;
+}
+
+/// Прочитать высоту кадра, подогнанную в прошлый раз.
+fn loadPreviewHeight(allocator: std.mem.Allocator) void {
+    const dir = settingsDir(allocator) orelse return;
+    defer allocator.free(dir);
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const prefs = settings_mod.load(threaded.io(), allocator, dir);
+    preview_h = prefs.preview_h;
+}
+
+/// Запомнить высоту кадра. Читаем весь файл заново и меняем одну строку:
+/// рядом может работать окно записи со своими настройками, и затирать
+/// их нашими умолчаниями нельзя.
+fn savePreviewHeight() void {
+    const allocator = ed.allocator;
+    const dir = settingsDir(allocator) orelse return;
+    defer allocator.free(dir);
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    var prefs = settings_mod.load(threaded.io(), allocator, dir);
+    if (prefs.preview_h == preview_h) return;
+    prefs.preview_h = preview_h;
+    _ = settings_mod.save(&prefs, dir);
+}
+
 /// Открыть окно редактора. `path` — файл, который положить сразу.
 pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
     if (builtin.os.tag != .windows) return error.Unsupported;
@@ -1224,10 +1562,13 @@ pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
     ed = .{ .allocator = allocator, .project = project };
     // Верх таймлайна опускаем под панель кнопок.
     ed.view = .{};
+    // Высота окна кадра — та, на которой её оставили в прошлый раз.
+    loadPreviewHeight(allocator);
 
     const hinst: c.HINSTANCE = @ptrCast(c.GetModuleHandleW(null));
     var wc = std.mem.zeroes(c.WNDCLASSEXW);
     wc.cbSize = @sizeOf(c.WNDCLASSEXW);
+    wc.style = cs_dblclks;
     wc.lpfnWndProc = wndProc;
     wc.hInstance = hinst;
     wc.lpszClassName = ui.wide("ZigRecEdit");

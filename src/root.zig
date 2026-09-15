@@ -32,6 +32,7 @@ pub const timeline = @import("timeline.zig");
 pub const project_file = @import("project_file.zig");
 pub const waveform = @import("waveform.zig");
 pub const player = @import("player.zig");
+pub const png = @import("png.zig");
 pub const editor_view = @import("editor_view.zig");
 pub const editor = @import("editor.zig");
 pub const edit = @import("edit.zig");

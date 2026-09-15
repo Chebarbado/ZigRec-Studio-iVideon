@@ -98,6 +98,30 @@ if not defined FFMPEG (
   )
 )
 
+rem Снимок кадра. Записываем эталонный кадр картинкой, а читает её ЧУЖАЯ
+rem программа: ffmpeg распаковывает наш png обратно в пиксели, а verify-raw
+rem достаёт из них номер кадра. Так проверяется весь путь целиком: заголовки,
+rem сжатие, порядок цветов и направление строк.
+echo [check] самопроверка снимка кадра
+if not exist ".check" mkdir ".check"
+"zig-out\bin\zigrec.exe" shot-smoke ".check\shot.png" 7
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: снимок не записался
+  exit /b 1
+)
+if defined FFMPEG (
+  "%FFMPEG%" -y -v error -i ".check\shot.png" -pix_fmt bgra -f rawvideo ".check\shot.raw"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: чужой декодер не открыл наш png
+    exit /b 1
+  )
+  "zig-out\bin\zigrec.exe" verify-raw ".check\shot.raw" 384 64
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: в снимке оказался не тот кадр
+    exit /b 1
+  )
+)
+
 rem Файл проекта. Тесты проверяют запись и чтение в памяти; здесь добавляется
 rem диск: путь с русскими буквами, переводы строк, кодировка файла — всё то,
 rem что в памяти не проверишь.

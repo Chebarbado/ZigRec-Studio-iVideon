@@ -35,12 +35,20 @@ pub const Settings = struct {
     template: [max_template]u8 = @splat(0),
     template_len: usize = 0,
 
+    /// Высота окна кадра в редакторе. Подогнал границу один раз —
+    /// и при следующем запуске она там же.
+    preview_h: i32 = 260,
+
     /// Порт, на котором слушает сервер для Claude Code.
     port: u16 = 15599,
     /// Поднимать сервер сразу при запуске окна.
     serve_at_start: bool = false,
 
     pub const default_template = "zigrec-%d-%t.mp4";
+    /// Пределы высоты кадра. Те же, что у правила в `editor_view.zig`,
+    /// но проверяются и здесь: файл настроек правят руками.
+    pub const min_preview_h: i32 = 120;
+    pub const max_preview_h: i32 = 4000;
 
     pub fn init() Settings {
         var s = Settings{};
@@ -71,6 +79,15 @@ pub const Settings = struct {
         self.template_len = n;
     }
 
+    /// Высота кадра из строки. Негодное число не берём: подправленный
+    /// руками файл не должен схлопнуть окно.
+    pub fn setPreviewH(self: *Settings, text: []const u8) bool {
+        const value = std.fmt.parseInt(i32, std.mem.trim(u8, text, " \t"), 10) catch return false;
+        if (value < min_preview_h or value > max_preview_h) return false;
+        self.preview_h = value;
+        return true;
+    }
+
     /// Порт из строки. Ноль и слишком малые числа не берём: порты ниже
     /// тысячи заняты системой и требуют прав.
     pub fn setPort(self: *Settings, text: []const u8) bool {
@@ -92,6 +109,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("{s} {d}\n", .{ magic, version });
     try w.print("dir {s}\n", .{s.dir()});
     try w.print("template {s}\n", .{s.nameTemplate()});
+    try w.print("preview {d}\n", .{s.preview_h});
     try w.print("port {d}\n", .{s.port});
     try w.print("serve {d}\n", .{@intFromBool(s.serve_at_start)});
 }
@@ -122,6 +140,8 @@ pub fn read(data: []const u8) Error!Settings {
             out.setDir(rest);
         } else if (std.mem.eql(u8, word, "template")) {
             out.setTemplate(rest);
+        } else if (std.mem.eql(u8, word, "preview")) {
+            _ = out.setPreviewH(rest);
         } else if (std.mem.eql(u8, word, "port")) {
             _ = out.setPort(rest);
         } else if (std.mem.eql(u8, word, "serve")) {
@@ -190,6 +210,7 @@ test "записанное читается обратно" {
     s.setDir("D:\\Мои записи");
     s.setTemplate("экран-%d-%n.mp4");
     s.port = 15600;
+    s.preview_h = 333;
     s.serve_at_start = true;
 
     var buf: [4096]u8 = undefined;
@@ -200,6 +221,7 @@ test "записанное читается обратно" {
     try std.testing.expectEqualStrings("D:\\Мои записи", back.dir());
     try std.testing.expectEqualStrings("экран-%d-%n.mp4", back.nameTemplate());
     try std.testing.expectEqual(@as(u16, 15600), back.port);
+    try std.testing.expectEqual(@as(i32, 333), back.preview_h);
     try std.testing.expect(back.serve_at_start);
 }
 
@@ -268,4 +290,17 @@ test "умолчания разумны сами по себе" {
     try std.testing.expect(!s.serve_at_start);
     // Пустая папка означает «как было»: первый запуск ничем не отличается.
     try std.testing.expectEqual(@as(usize, 0), s.dir().len);
+}
+
+test "высота кадра: негодное число не схлопывает окно" {
+    var s = Settings.init();
+    try std.testing.expect(s.setPreviewH("400"));
+    try std.testing.expectEqual(@as(i32, 400), s.preview_h);
+
+    // Правленый руками файл может содержать что угодно.
+    try std.testing.expect(!s.setPreviewH("0"));
+    try std.testing.expect(!s.setPreviewH("-100"));
+    try std.testing.expect(!s.setPreviewH("99999"));
+    try std.testing.expect(!s.setPreviewH("высоко"));
+    try std.testing.expectEqual(@as(i32, 400), s.preview_h);
 }

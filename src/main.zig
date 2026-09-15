@@ -30,6 +30,8 @@ const usage =
     \\        с --audio в файл идёт ещё и звуковая дорожка с известным рисунком
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
+    \\  zigrec shot-smoke ФАЙЛ.png [НОМЕР]
+    \\        самопроверка снимка: эталонный кадр записывается картинкой
     \\  zigrec frame-smoke ФАЙЛ [СЕКУНДЫ]
     \\        самопроверка кадра: размер, шаг строки, длина буфера
     \\  zigrec project-smoke ФАЙЛ.zrs
@@ -155,6 +157,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
+    } else if (eq(cmd, "shot-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к картинке\n");
+            code = 2;
+        } else {
+            code = try shotSmoke(init.io, arena, w, args[2], argInt(args, 3, 7));
+        }
     } else if (eq(cmd, "frame-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");
@@ -858,6 +867,52 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
         return 1;
     }
     try w.writeAll("[sync] ЗВУК НА МЕСТЕ\n");
+    return 0;
+}
+
+/// Самопроверка снимка кадра.
+///
+/// Рисуем эталонный кадр с таймкодом, записываем его картинкой и печатаем
+/// числа. Дальше в дело вступает чужая программа: `tools\\\\check.cmd` просит
+/// ffmpeg распаковать нашу картинку обратно в пиксели, а `verify-raw` читает
+/// из них номер кадра. Своим же кодом проверять свою запись — значит
+/// не заметить ошибки, сделанной в обе стороны одинаково.
+fn shotSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, index: u32) !u8 {
+    const screen = zigrec.testbench.Screen.init(384, 64, 60) catch {
+        try w.writeAll("[shot] ПРОВАЛ: кадр меньше таймкода\n");
+        return 1;
+    };
+
+    const frame = try allocator.alloc(u8, screen.frameBytes());
+    defer allocator.free(frame);
+    try screen.render(frame, index);
+
+    const stride = @as(usize, screen.width) * 4;
+    const bytes = zigrec.png.fromBgra(allocator, frame, screen.width, screen.height, stride) catch |err| {
+        try w.print("[shot] ПРОВАЛ: картинка не собралась: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(bytes);
+
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
+        try w.print("[shot] ПРОВАЛ: не записывается {s}: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+
+    try w.print("[shot] кадр {d}x{d}, номер {d}\n", .{ screen.width, screen.height, index });
+    try w.print("[shot] пикселей {d} байт, картинка {d} байт\n", .{ frame.len, bytes.len });
+
+    // Сжатие без пользы означало бы, что мы записали не то, что думали.
+    if (bytes.len >= frame.len) {
+        try w.writeAll("[shot] ПРОВАЛ: картинка не меньше кадра\n");
+        return 1;
+    }
+    // Восемь байт подписи узнают все: если их нет, это не PNG.
+    if (bytes.len < 8 or !std.mem.eql(u8, bytes[0..8], &zigrec.png.signature)) {
+        try w.writeAll("[shot] ПРОВАЛ: у файла не та подпись\n");
+        return 1;
+    }
+    try w.print("[shot] СНИМОК ЗАПИСАН: {s}\n", .{std.fs.path.basename(path)});
     return 0;
 }
 
