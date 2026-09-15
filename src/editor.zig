@@ -1214,6 +1214,8 @@ fn paintBuffered(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
 pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
     if (builtin.os.tag != .windows) return error.Unsupported;
     _ = c.SetProcessDPIAware();
+    // Консоль редактору не нужна: она висела пустым чёрным окном рядом.
+    ui.hideOwnConsole();
 
     const project = try allocator.create(timeline.Project);
     defer allocator.destroy(project);

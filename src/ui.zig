@@ -153,6 +153,24 @@ pub fn setAppIcon(field: anytype) void {
     }
 }
 
+/// Спрятать своё консольное окно.
+///
+/// Программа собрана как консольная, чтобы работали команды и коды возврата.
+/// Но у окон консоль лишняя: при запуске с ярлыка она мигает чёрным
+/// прямоугольником рядом, а при запуске редактора из окна записи просто
+/// висит пустая.
+///
+/// Прячем только свою: если нас запустили из чужого терминала, прятать его
+/// мы не имеем права.
+pub fn hideOwnConsole() void {
+    if (builtin.os.tag != .windows) return;
+    if (c.GetConsoleWindow()) |console| {
+        var console_pid: c.DWORD = 0;
+        _ = c.GetWindowThreadProcessId(console, &console_pid);
+        if (console_pid == c.GetCurrentProcessId()) _ = c.ShowWindow(console, c.SW_HIDE);
+    }
+}
+
 pub fn wide(comptime s: []const u8) [:0]const u16 {
     return std.unicode.utf8ToUtf16LeStringLiteral(s);
 }
@@ -751,16 +769,43 @@ fn openEditor() void {
     if (n == 0) return;
     exe[n] = 0;
 
-    const params = wide("edit");
-    var info = std.mem.zeroes(c.SHELLEXECUTEINFOW);
-    info.cbSize = @sizeOf(c.SHELLEXECUTEINFOW);
-    info.lpVerb = wide("open");
-    info.lpFile = @ptrCast(&exe);
-    info.lpParameters = params;
-    info.nShow = c.SW_SHOWNORMAL;
-    if (c.ShellExecuteExW(&info) == 0) {
+    // Командная строка: «путь» edit. Буфер изменяемый — CreateProcessW
+    // имеет право в него писать.
+    var line: [std.fs.max_path_bytes + 16]u16 = undefined;
+    var at: usize = 0;
+    line[at] = '"';
+    at += 1;
+    @memcpy(line[at .. at + n], exe[0..n]);
+    at += n;
+    const tail = wide("\" edit");
+    @memcpy(line[at .. at + tail.len], tail);
+    at += tail.len;
+    line[at] = 0;
+
+    // CREATE_NO_WINDOW: консоль не создаётся вовсе. Прятать её потом поздно —
+    // чёрный прямоугольник успевает мигнуть.
+    var si = std.mem.zeroes(c.STARTUPINFOW);
+    si.cb = @sizeOf(c.STARTUPINFOW);
+    var pi = std.mem.zeroes(c.PROCESS_INFORMATION);
+    const ok = c.CreateProcessW(
+        @ptrCast(&exe),
+        @ptrCast(&line),
+        null,
+        null,
+        0,
+        c.CREATE_NO_WINDOW,
+        null,
+        null,
+        &si,
+        &pi,
+    );
+    if (ok == 0) {
         setText(app.status, "редактор не открылся");
+        return;
     }
+    // Дескрипторы нам не нужны: редактор живёт сам по себе.
+    _ = c.CloseHandle(pi.hProcess);
+    _ = c.CloseHandle(pi.hThread);
 }
 
 fn toggleServer(hwnd: c.HWND) void {
@@ -1435,14 +1480,7 @@ pub fn runFull(allocator: std.mem.Allocator, start_hidden: bool, serve_at_once: 
     if (builtin.os.tag != .windows) return error.Unsupported;
     _ = c.SetProcessDPIAware();
 
-    // Программа собрана как консольная, чтобы работали команды и коды возврата.
-    // Но окну консоль не нужна: при запуске с ярлыка она мигала бы чёрным
-    // прямоугольником рядом. Прячем её, если она наша собственная.
-    if (c.GetConsoleWindow()) |console| {
-        var console_pid: c.DWORD = 0;
-        _ = c.GetWindowThreadProcessId(console, &console_pid);
-        if (console_pid == c.GetCurrentProcessId()) _ = c.ShowWindow(console, c.SW_HIDE);
-    }
+    hideOwnConsole();
 
     app = .{ .allocator = allocator, .rec = recorder.Recorder.init(allocator) };
     app.out_dir = try defaultDir(allocator);
