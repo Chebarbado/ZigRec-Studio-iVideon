@@ -87,6 +87,9 @@ const App = struct {
     server: control.Server = .{},
     /// Положение ползунка усиления. Растягивает картинку, уровень не трогает.
     gain_pos: u8 = 0,
+    /// Сколько раз в секунду обновляется экран, с которого пишем.
+    /// Это потолок для числа разных кадров.
+    refresh_hz: u32 = 0,
     sound_on: bool = false,
     microphone: mic.Capture = .{},
     tray_added: bool = false,
@@ -378,6 +381,32 @@ fn openLastFile() void {
     _ = c.ShellExecuteW(null, wide("open"), @ptrCast(&buf), null, null, c.SW_SHOWNORMAL);
 }
 
+/// Частота обновления того экрана, с которого пишем.
+///
+/// Нужна не для красоты: захват отдаёт кадр тогда, когда рабочий стол его
+/// показал. Просить больше кадров, чем экран показывает, можно — но взяться
+/// им неоткуда, и в файле окажутся повторы. Человек должен узнать об этом
+/// до записи, а не после.
+fn screenRefresh() u32 {
+    const list = source.listMonitors(app.allocator) catch return 0;
+    defer app.allocator.free(list);
+    for (list) |m| {
+        if (m.index == app.settings.monitor) return m.refresh_hz;
+    }
+    return if (list.len > 0) list[0].refresh_hz else 0;
+}
+
+/// Предупреждение, если просят больше кадров, чем экран умеет показать.
+/// Пустая строка — значит всё в порядке.
+fn fpsWarning(fps: u32, refresh_hz: u32, buf: []u8) []const u8 {
+    if (refresh_hz == 0 or fps <= refresh_hz) return "";
+    return std.fmt.bufPrint(
+        buf,
+        " · экран обновляется {d} раз(а) в секунду: разных кадров будет {d}, остальные повторы",
+        .{ refresh_hz, refresh_hz },
+    ) catch "";
+}
+
 fn updateStatus() void {
     const p = app.rec.snapshot();
     var buf: [512]u8 = undefined;
@@ -396,9 +425,12 @@ fn updateStatus() void {
                 source_text,
             }) catch "готов";
         }
-        break :blk std.fmt.bufPrint(&buf, "готов · {s}\r\nисточник: {s}", .{
+        var warn_buf: [160]u8 = undefined;
+        break :blk std.fmt.bufPrint(&buf, "готов · {s}\r\nисточник: {s}, {d} кадр/с{s}", .{
             hotkey_note,
             source_text,
+            app.settings.fps,
+            fpsWarning(app.settings.fps, app.refresh_hz, &warn_buf),
         }) catch "готов";
     } else std.fmt.bufPrint(&buf, "{s}  {d:0>2}:{d:0>2}\r\nкадров {d}, потерь {d}, путь {s}, кадр {d}x{d}", .{
         p.state.label(),
@@ -1007,7 +1039,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
 
             _ = label(hwnd, "Кадров/с", 14, 152, 90, 20);
             app.cb_fps = combo(hwnd, id_fps, 104, 148, 84, 200);
-            for ([_][]const u8{ "15", "24", "30", "60" }) |item| addItem(app.cb_fps, item);
+            for ([_][]const u8{ "15", "24", "30", "60", "120" }) |item| addItem(app.cb_fps, item);
             _ = c.SendMessageW(app.cb_fps, c.CB_SETCURSEL, 2, 0);
 
             _ = label(hwnd, "Качество", 206, 152, 90, 20);
@@ -1025,6 +1057,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             setGainEnabled(false);
             for ([_]c_int{ id_area, id_full, id_area_rec }) |id| applyFont(c.GetDlgItem(hwnd, id));
 
+            app.refresh_hz = screenRefresh();
             registerHotkeys(hwnd);
             addTray(hwnd);
             _ = c.SetTimer(hwnd, timer_tick, 200, null);
@@ -1061,8 +1094,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                         0 => 15,
                         1 => 24,
                         3 => 60,
+                        4 => 120,
                         else => 30,
                     };
+                    updateStatus();
                 },
                 id_preset => {
                     const sel = c.SendMessageW(app.cb_preset, c.CB_GETCURSEL, 0, 0);

@@ -29,9 +29,12 @@ const id_compact = 205;
 const id_undo = 206;
 const id_redo = 207;
 const id_save = 208;
+const id_add_video = 209;
+const id_add_audio = 210;
 
 /// Высота панели кнопок. Таймлайн начинается под ней.
-const toolbar_h: i32 = 44;
+/// Два ряда: сверху файл и дорожки, снизу правка.
+const toolbar_h: i32 = 82;
 /// Высота строки сообщения снизу.
 const status_h: i32 = 22;
 
@@ -157,8 +160,30 @@ fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
 
     drawRuler(dc, width);
     drawTracks(dc, width, lane_height);
+    drawEmptyHint(dc, width, lane_height);
     drawPlayhead(dc, lane_height);
     _ = hwnd;
+}
+
+/// Подсказка на пустом таймлайне.
+///
+/// Пустое окно ничего не говорит о себе. Одна строка посередине говорит
+/// ровно то, что человеку нужно знать первым.
+fn drawEmptyHint(dc: c.HDC, width: i32, height: i32) void {
+    if (ed.project.track_count > 0) return;
+    const hint = "Откройте файл или добавьте дорожку кнопкой сверху";
+    // Считаем ширину строки, чтобы поставить её посередине, а не «примерно».
+    var wide_buf: [128]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, hint) catch return;
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(dc, &wide_buf, @intCast(n), &size) == 0) return;
+    drawText(
+        dc,
+        @divTrunc(width + view_mod.header_w - size.cx, 2),
+        @divTrunc(height, 2) - 8,
+        hint,
+        0x00909090,
+    );
 }
 
 fn drawRuler(dc: c.HDC, width: i32) void {
@@ -434,6 +459,30 @@ fn loadProject(path: []const u8) void {
 }
 
 /// Сохранить проект: спросить имя и записать текстом.
+/// Завести пустую дорожку.
+///
+/// Дорожка нужна раньше того, что на неё ляжет: на неё перетаскивают клипы
+/// с других дорожек, на неё пишут озвучку. Пустая дорожка — это не мусор,
+/// а место, которое человек приготовил себе заранее.
+fn addEmptyTrack(kind: timeline.TrackKind) void {
+    var name_buf: [48]u8 = undefined;
+    // Считаем дорожки своего вида: «Звук 2» понятнее, чем «Дорожка 5».
+    var same: usize = 0;
+    for (ed.project.trackList()) |t| {
+        if (t.kind == kind) same += 1;
+    }
+    const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{
+        if (kind == .video) "Видео" else "Звук",
+        same + 1,
+    }) catch "Дорожка";
+
+    _ = ed.project.addTrack(kind, name) catch |err| return complain(err);
+
+    var buf: [128]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "добавлена дорожка «{s}»", .{name}) catch "дорожка добавлена");
+    refresh();
+}
+
 fn saveProject() void {
     if (ed.project.track_count == 0) {
         ed.say("сохранять нечего: в проекте нет дорожек");
@@ -762,19 +811,24 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             ed.status = ui.button(hwnd, "", 0, 0, 0, 0, 0, 0);
             _ = c.ShowWindow(ed.status, c.SW_HIDE);
 
-            _ = ui.button(hwnd, "Открыть…", id_open, 10, 8, 110, 28, 0);
-            _ = ui.button(hwnd, "Разрезать", id_split, 128, 8, 100, 28, 0);
-            _ = ui.button(hwnd, "Удалить", id_delete, 236, 8, 92, 28, 0);
-            _ = ui.button(hwnd, "Вырезать", id_ripple, 336, 8, 100, 28, 0);
-            _ = ui.button(hwnd, "Встык", id_compact, 444, 8, 84, 28, 0);
-            ed.btn_undo = ui.button(hwnd, "Отменить", id_undo, 544, 8, 100, 28, 0);
-            ed.btn_redo = ui.button(hwnd, "Вернуть", id_redo, 652, 8, 92, 28, 0);
-            _ = ui.button(hwnd, "Сохранить", id_save, 752, 8, 110, 28, 0);
+            // Верхний ряд: что делаем с файлом и с дорожками.
+            _ = ui.button(hwnd, "📂 Открыть…", id_open, 10, 8, 128, 28, 0);
+            _ = ui.button(hwnd, "💾 Сохранить", id_save, 146, 8, 132, 28, 0);
+            _ = ui.button(hwnd, "➕ Видеодорожка", id_add_video, 294, 8, 168, 28, 0);
+            _ = ui.button(hwnd, "➕ Звуковая дорожка", id_add_audio, 470, 8, 196, 28, 0);
+
+            // Нижний ряд: правка того, что уже лежит на дорожках.
+            _ = ui.button(hwnd, "✂ Разрезать", id_split, 10, 46, 120, 28, 0);
+            _ = ui.button(hwnd, "🗑 Удалить", id_delete, 138, 46, 114, 28, 0);
+            _ = ui.button(hwnd, "⌦ Вырезать", id_ripple, 260, 46, 120, 28, 0);
+            _ = ui.button(hwnd, "⇥ Встык", id_compact, 388, 46, 102, 28, 0);
+            ed.btn_undo = ui.button(hwnd, "↶ Отменить", id_undo, 498, 46, 120, 28, 0);
+            ed.btn_redo = ui.button(hwnd, "↷ Вернуть", id_redo, 626, 46, 114, 28, 0);
 
             var child = c.GetWindow(hwnd, c.GW_CHILD);
             while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) ui.applyFont(child);
 
-            ed.say("откройте файл: mp4, mov, avi, mp3, wav, ogg, flac или midi");
+            ed.say("откройте файл (mp4, mov, avi, mp3, wav, ogg, flac, midi) или добавьте дорожку");
             refresh();
             return 0;
         },
@@ -788,6 +842,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_undo => undoStep(),
                 id_redo => redoStep(),
                 id_save => saveProject(),
+                id_add_video => addEmptyTrack(.video),
+                id_add_audio => addEmptyTrack(.audio),
                 else => {},
             }
             return 0;
@@ -916,8 +972,8 @@ pub fn run(allocator: std.mem.Allocator, path: ?[]const u8) !void {
         c.WS_OVERLAPPEDWINDOW,
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
-        980,
-        560,
+        1000,
+        620,
         null,
         null,
         hinst,

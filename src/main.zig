@@ -507,12 +507,13 @@ fn listMonitors(allocator: std.mem.Allocator, w: anytype) !u8 {
     };
     defer allocator.free(list);
     for (list) |m| {
-        try w.print("монитор {d}: {d}x{d} в точке ({d},{d}){s}\n", .{
+        try w.print("монитор {d}: {d}x{d} в точке ({d},{d}), {d} Гц{s}\n", .{
             m.index,
             m.area.width,
             m.area.height,
             m.area.x,
             m.area.y,
+            m.refresh_hz,
             if (m.primary) " — основной" else "",
         });
     }
@@ -583,6 +584,7 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
         return 1;
     };
     try w.print("[rec] экран {d}x{d}, путь {s}\n", .{ screen.width, screen.height, cap.backend().label() });
+    try warnAboutFps(allocator, w, opt.monitor, opt.fps);
     try w.print("[rec] снимаем {d}x{d} в точке ({d},{d})\n", .{ area.width, area.height, area.x, area.y });
 
     // Звук поднимаем до создания файла: писатель принимает новые потоки
@@ -929,6 +931,29 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
     try w.print("[project] прочитано обратно: дорожек {d}, пути и имена целы\n", .{back.track_count});
     try w.writeAll("[project] ПРОЕКТ СОШЁЛСЯ\n");
     return 0;
+}
+
+/// Сказать, если просят больше кадров, чем экран показывает.
+///
+/// Захват отдаёт кадр тогда, когда рабочий стол его показал. Больше разных
+/// кадров, чем обновлений экрана, взяться неоткуда; кодировщик добьёт файл
+/// до постоянной частоты повторами. Файл будет правильным и заиграет везде,
+/// но человек должен знать, за что платит битрейтом.
+fn warnAboutFps(allocator: std.mem.Allocator, w: anytype, monitor: u32, fps: u32) !void {
+    const list = zigrec.source.listMonitors(allocator) catch return;
+    defer allocator.free(list);
+
+    var hz: u32 = 0;
+    for (list) |m| {
+        if (m.index == monitor) hz = m.refresh_hz;
+    }
+    if (hz == 0 or fps <= hz) return;
+
+    try w.print(
+        "[rec] экран обновляется {d} раз(а) в секунду: разных кадров больше {d} в секунду\n",
+        .{ hz, hz },
+    );
+    try w.writeAll("[rec] взяться неоткуда, и кодировщик добьёт файл повторами\n");
 }
 
 /// Что внутри файла: дорожки, длительность, кодеки.

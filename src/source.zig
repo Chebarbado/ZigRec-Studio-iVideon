@@ -43,6 +43,12 @@ pub const Monitor = struct {
     index: u32,
     area: Rect,
     primary: bool,
+    /// Сколько раз в секунду экран обновляется.
+    ///
+    /// Это потолок для числа **разных** кадров: захват отдаёт кадр тогда,
+    /// когда рабочий стол его показал. Просить больше можно, но взяться
+    /// им неоткуда — в файле окажутся повторы.
+    refresh_hz: u32 = 0,
 };
 
 /// Разобрать `x,y,ш,в`. Отдельная функция, потому что ошибиться тут легко,
@@ -90,6 +96,7 @@ fn monitorProc(h: c.HMONITOR, dc: c.HDC, r: [*c]c.RECT, l: c.LPARAM) callconv(.w
     info.cbSize = @sizeOf(c.MONITORINFO);
     _ = c.GetMonitorInfoA(h, &info);
     const list = monitor_list orelse return 1;
+    const hz = refreshOf(h);
     const index: u32 = @intCast(list.items.len);
     list.append(monitor_alloc, .{
         .index = index,
@@ -100,8 +107,26 @@ fn monitorProc(h: c.HMONITOR, dc: c.HDC, r: [*c]c.RECT, l: c.LPARAM) callconv(.w
             .height = @intCast(r.*.bottom - r.*.top),
         },
         .primary = (info.dwFlags & c.MONITORINFOF_PRIMARY) != 0,
+        .refresh_hz = hz,
     }) catch {};
     return 1;
+}
+
+/// Частота обновления монитора.
+///
+/// Спрашиваем у самого устройства, а не у первого попавшегося: у двух
+/// мониторов частоты бывают разные, и брать чужую — значит обещать
+/// не то число.
+fn refreshOf(h: c.HMONITOR) u32 {
+    var info = std.mem.zeroes(c.MONITORINFOEXW);
+    info.unnamed_0.cbSize = @sizeOf(c.MONITORINFOEXW);
+    if (c.GetMonitorInfoW(h, @ptrCast(&info)) == 0) return 0;
+
+    var mode = std.mem.zeroes(c.DEVMODEW);
+    mode.dmSize = @sizeOf(c.DEVMODEW);
+    // ENUM_CURRENT_SETTINGS = -1: то, что стоит сейчас, а не из списка.
+    if (c.EnumDisplaySettingsW(@ptrCast(&info.szDevice), @bitCast(@as(i32, -1)), &mode) == 0) return 0;
+    return mode.dmDisplayFrequency;
 }
 
 /// Перечислить мониторы. Порядок тот же, что у `EnumDisplayMonitors`, и он
