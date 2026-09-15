@@ -8,8 +8,13 @@
 //! и какой кусок этого файла показывает. Обрезать — значит подвинуть границы
 //! куска, а не переписать байты. Открытый файл читается и никогда не пишется.
 //!
-//! Видео и звук живут на разных дорожках и правятся порознь: звук можно
-//! подвинуть относительно картинки, укоротить или выбросить, не трогая видео.
+//! Видео и звук живут на разных дорожках, но по умолчанию ходят вместе:
+//! куски одного файла связаны, и то, что сделано с картинкой, происходит
+//! и со звуком. Иначе звук разъезжается с изображением на первом же
+//! перетаскивании, и человек замечает это через полчаса работы.
+//!
+//! Связку можно снять — и тогда звук двигается, режется и выбрасывается
+//! сам по себе. Так делают, когда звук нарочно кладут под другую картинку.
 const std = @import("std");
 
 pub const TrackKind = enum {
@@ -34,6 +39,12 @@ pub const Clip = struct {
     len_ns: u64 = 0,
     /// Где он стоит на дорожке.
     at_ns: u64 = 0,
+    /// Номер связки: клипы с одним номером ходят вместе. Ноль — сам по себе.
+    ///
+    /// Номер, а не ссылка на соседа: соседей бывает больше двух (видео
+    /// и две звуковые дорожки), а список внутри клипа пришлось бы чинить
+    /// после каждого удаления.
+    link: u16 = 0,
 
     pub fn endsAt(self: Clip) u64 {
         return self.at_ns + self.len_ns;
@@ -130,6 +141,22 @@ pub const Track = struct {
         return true;
     }
 
+    /// Переставить клипы по времени.
+    ///
+    /// Нужна после сдвига связки: клип мог перепрыгнуть соседа, а весь
+    /// остальной код ждёт их по порядку — и рисование, и поиск попадания.
+    fn sort(self: *Track) void {
+        var i: usize = 1;
+        while (i < self.count) : (i += 1) {
+            const cur = self.clips[i];
+            var j = i;
+            while (j > 0 and self.clips[j - 1].at_ns > cur.at_ns) : (j -= 1) {
+                self.clips[j] = self.clips[j - 1];
+            }
+            self.clips[j] = cur;
+        }
+    }
+
     fn remove(self: *Track, index: usize) void {
         if (index >= self.count) return;
         var i = index;
@@ -154,6 +181,60 @@ pub const Source = struct {
         return std.fs.path.basename(self.fullPath());
     }
 };
+
+/// Насколько на самом деле сдвинется связка, если её тянут на `delta_ns`.
+///
+/// Влево — только до начала дорожки: за нулём времени нет. Упирается связка
+/// тем клипом, который стоит раньше всех, и тогда останавливается вся
+/// целиком. Если бы каждый упирался сам за себя, связка расползлась бы
+/// у начала дорожки, а звук уехал бы относительно картинки — ровно то,
+/// ради чего связка и заведена.
+pub fn allowedShift(earliest_at_ns: u64, delta_ns: i64) i64 {
+    if (delta_ns >= 0) return delta_ns;
+    const room = -@as(i64, @intCast(earliest_at_ns));
+    return @max(delta_ns, room);
+}
+
+/// Каким станет клип, если подтянуть его край.
+///
+/// Обрезка двигает границы куска внутри исходника, а не переписывает файл.
+/// Слева при этом едет и начало внутри файла: иначе кадр под краем сменился
+/// бы на другой.
+///
+/// Вынесено отдельной чистой функцией, потому что связку надо посчитать
+/// целиком ДО того, как что-то менять: подрезанная наполовину связка хуже,
+/// чем несостоявшееся движение мыши.
+pub fn trimmed(clip: Clip, from_left: bool, delta_ns: i64) Error!Clip {
+    var out = clip;
+    if (from_left) {
+        const new_len = @as(i64, @intCast(clip.len_ns)) - delta_ns;
+        const new_in = @as(i64, @intCast(clip.in_ns)) + delta_ns;
+        const new_at = @as(i64, @intCast(clip.at_ns)) + delta_ns;
+        if (new_len < @as(i64, @intCast(min_len_ns)) or new_in < 0 or new_at < 0) return Error.TooShort;
+        out.len_ns = @intCast(new_len);
+        out.in_ns = @intCast(new_in);
+        out.at_ns = @intCast(new_at);
+    } else {
+        const new_len = @as(i64, @intCast(clip.len_ns)) + delta_ns;
+        if (new_len < @as(i64, @intCast(min_len_ns))) return Error.TooShort;
+        out.len_ns = @intCast(new_len);
+    }
+    return out;
+}
+
+/// Влезет ли рез в точке: обе половины должны остаться различимыми.
+fn splitFits(clip: Clip, when_ns: u64, count: usize) Error!void {
+    if (!clip.covers(when_ns)) return Error.NothingThere;
+    const left_len = when_ns - clip.at_ns;
+    if (left_len < min_len_ns or clip.len_ns - left_len < min_len_ns) return Error.TooShort;
+    if (count >= max_clips) return Error.TooManyClips;
+}
+
+/// Сдвинуть точку на дорожке, не уходя за ноль.
+fn shifted(at_ns: u64, delta_ns: i64) u64 {
+    const out = @as(i64, @intCast(at_ns)) + delta_ns;
+    return if (out < 0) 0 else @intCast(out);
+}
 
 pub const Error = error{
     /// Дорожек больше не помещается.
@@ -192,6 +273,21 @@ pub const Project = struct {
     source_count: usize = 0,
     tracks: [max_tracks]Track = @splat(.{}),
     track_count: usize = 0,
+
+    /// Откуда берутся номера связок. Ноль означает «ещё ни одной»:
+    /// первый же вызов `newLink` выдаст единицу.
+    ///
+    /// Номера не переиспользуются: выданный заново номер склеил бы два
+    /// разных файла в одну связку, и они поехали бы вместе без всякой
+    /// на то причины.
+    ///
+    /// **Умолчание здесь обязано быть нулевым.** Проект весит восемьсот
+    /// килобайт, и пока все его поля нулевые, он лежит в обнуляемой
+    /// области и в файле программы места не занимает. Стоило поставить
+    /// здесь единицу — и весь этот восьмисоткилобайтный ноль лёг в .exe
+    /// готовыми байтами: 1318 КБ превратились в 2145 КБ из-за одного
+    /// двухбайтного поля.
+    next_link: u16 = 0,
 
     history: [max_history]Snapshot = @splat(.{}),
     /// Сколько снимков лежит позади.
@@ -309,75 +405,275 @@ pub const Project = struct {
 
     /// Положить весь исходник на дорожку в указанное место.
     pub fn place(self: *Project, track_index: usize, source: u16, at_ns: u64, len_ns: u64) Error!void {
-        const t = try self.track(track_index);
+        return self.placeLinked(track_index, source, at_ns, len_ns, 0);
+    }
+
+    /// То же, но клип сразу входит в связку с номером `link`.
+    ///
+    /// Так кладут дорожки одного файла: видео и звук должны ходить вместе
+    /// с первой же секунды, а не после того, как человек об этом попросит.
+    pub fn placeLinked(
+        self: *Project,
+        track_index: usize,
+        source: u16,
+        at_ns: u64,
+        len_ns: u64,
+        link: u16,
+    ) Error!void {
+        _ = try self.track(track_index);
         if (len_ns < min_len_ns) return Error.TooShort;
         self.remember();
         const tr = try self.track(track_index);
-        if (!tr.insert(.{ .source = source, .in_ns = 0, .len_ns = len_ns, .at_ns = at_ns })) {
+        if (!tr.insert(.{
+            .source = source,
+            .in_ns = 0,
+            .len_ns = len_ns,
+            .at_ns = at_ns,
+            .link = link,
+        })) {
             _ = self.undo();
             return Error.TooManyClips;
         }
-        _ = t;
     }
 
-    /// Разрезать клип в точке. На месте одного получаются два подряд.
+    // ------------------------------------------------------------- связки
+
+    /// Выдать новый номер связки.
+    pub fn newLink(self: *Project) u16 {
+        if (self.next_link == 0) self.next_link = 1;
+        const out = self.next_link;
+        // У самого края перестаём считать: шестьдесят пять тысяч файлов
+        // в одном проекте — это уже не монтаж, но и падать тут незачем.
+        if (self.next_link < std.math.maxInt(u16)) self.next_link += 1;
+        return out;
+    }
+
+    /// Сколько клипов в связке.
+    pub fn linkSize(self: *const Project, link: u16) usize {
+        if (link == 0) return 0;
+        var n: usize = 0;
+        for (self.trackList()) |t| {
+            for (t.list()) |cl| {
+                if (cl.link == link) n += 1;
+            }
+        }
+        return n;
+    }
+
+    /// Где стоит самый ранний клип связки.
+    ///
+    /// `anchor` считается всегда: он и сам часть связки, а когда связки
+    /// нет — он единственный, кто упирается в начало дорожки.
+    fn earliestOf(self: *const Project, link: u16, anchor: Clip) u64 {
+        var first = anchor.at_ns;
+        if (link == 0) return first;
+        for (self.trackList()) |t| {
+            for (t.list()) |cl| {
+                if (cl.link == link) first = @min(first, cl.at_ns);
+            }
+        }
+        return first;
+    }
+
+    /// Сдвинуть по времени все клипы связки.
+    fn shiftLinked(self: *Project, link: u16, delta_ns: i64) void {
+        if (link == 0 or delta_ns == 0) return;
+        for (self.tracks[0..self.track_count]) |*t| {
+            var changed = false;
+            for (t.clips[0..t.count]) |*cl| {
+                if (cl.link != link) continue;
+                cl.at_ns = shifted(cl.at_ns, delta_ns);
+                changed = true;
+            }
+            // Сдвинутый клип мог перепрыгнуть соседа по своей дорожке.
+            if (changed) t.sort();
+        }
+    }
+
+    /// Развязать связку: клипы останутся на местах, но ходить вместе
+    /// перестанут.
+    ///
+    /// Развязываем всю связку, а не один клип: «половина связки» — это
+    /// состояние, которое человеку нечем увидеть и незачем иметь.
+    pub fn unlink(self: *Project, track_index: usize, index: usize) Error!void {
+        const t = try self.track(track_index);
+        if (index >= t.count) return Error.NoSuchThing;
+        const link = t.clips[index].link;
+        if (link == 0) return;
+        self.remember();
+        for (self.tracks[0..self.track_count]) |*tr| {
+            for (tr.clips[0..tr.count]) |*cl| {
+                if (cl.link == link) cl.link = 0;
+            }
+        }
+    }
+
+    /// Связать всё, что стоит под указателем. Возвращает, сколько связалось.
+    ///
+    /// Связывать выбранное мышью было бы точнее, но выбирать несколько
+    /// клипов в окне пока нечем, а «всё, что под указателем» — это ровно
+    /// то, что человек и видит в одной вертикали.
+    pub fn linkUnder(self: *Project, when_ns: u64) Error!usize {
+        var found: usize = 0;
+        for (self.trackList()) |t| {
+            if (t.clipAt(when_ns) != null) found += 1;
+        }
+        // Связывать один клип не с чем.
+        if (found < 2) return Error.NothingThere;
+
+        self.remember();
+        const link = self.newLink();
+        for (self.tracks[0..self.track_count]) |*t| {
+            if (t.clipAt(when_ns)) |i| t.clips[i].link = link;
+        }
+        return found;
+    }
+
+    /// Разрезать связку в точке. На месте одного клипа получаются два подряд.
     pub fn split(self: *Project, track_index: usize, when_ns: u64) Error!void {
+        return self.splitImpl(track_index, when_ns, false);
+    }
+
+    /// Разрезать только этот клип, не трогая связку.
+    pub fn splitOne(self: *Project, track_index: usize, when_ns: u64) Error!void {
+        return self.splitImpl(track_index, when_ns, true);
+    }
+
+    fn splitImpl(self: *Project, track_index: usize, when_ns: u64, alone: bool) Error!void {
         const t = try self.track(track_index);
         const index = t.clipAt(when_ns) orelse return Error.NothingThere;
         const clip = t.clips[index];
+        const link = if (alone) 0 else clip.link;
 
-        const left_len = when_ns - clip.at_ns;
-        const right_len = clip.len_ns - left_len;
-        if (left_len < min_len_ns or right_len < min_len_ns) return Error.TooShort;
-        if (t.count >= max_clips) return Error.TooManyClips;
-
-        self.remember();
-        const tr = try self.track(track_index);
-        tr.clips[index].len_ns = left_len;
-        // Правая половина показывает следующий кусок исходника: точка реза
-        // сдвигает и начало внутри файла, иначе вторая половина повторила бы
-        // первую.
-        _ = tr.insert(.{
-            .source = clip.source,
-            .in_ns = clip.in_ns + left_len,
-            .len_ns = right_len,
-            .at_ns = when_ns,
-        });
-    }
-
-    /// Подтянуть край клипа. `from_left` — какой именно край.
-    ///
-    /// Обрезка двигает границы куска внутри исходника, а не переписывает
-    /// файл. Слева при этом едет и начало внутри файла: иначе кадр под краем
-    /// сменился бы на другой.
-    pub fn trim(self: *Project, track_index: usize, index: usize, from_left: bool, delta_ns: i64) Error!void {
-        const t = try self.track(track_index);
-        if (index >= t.count) return Error.NoSuchThing;
-        const clip = t.clips[index];
-
-        var updated = clip;
-        if (from_left) {
-            const shift = delta_ns;
-            const new_len = @as(i64, @intCast(clip.len_ns)) - shift;
-            const new_in = @as(i64, @intCast(clip.in_ns)) + shift;
-            const new_at = @as(i64, @intCast(clip.at_ns)) + shift;
-            if (new_len < @as(i64, @intCast(min_len_ns)) or new_in < 0 or new_at < 0) return Error.TooShort;
-            updated.len_ns = @intCast(new_len);
-            updated.in_ns = @intCast(new_in);
-            updated.at_ns = @intCast(new_at);
+        // Считаем всю связку до правки: разрезанная наполовину связка хуже,
+        // чем отказ резать.
+        if (link == 0) {
+            try splitFits(clip, when_ns, t.count);
         } else {
-            const new_len = @as(i64, @intCast(clip.len_ns)) + delta_ns;
-            if (new_len < @as(i64, @intCast(min_len_ns))) return Error.TooShort;
-            updated.len_ns = @intCast(new_len);
+            for (self.trackList()) |tr| {
+                for (tr.list()) |cl| {
+                    if (cl.link != link or !cl.covers(when_ns)) continue;
+                    try splitFits(cl, when_ns, tr.count);
+                }
+            }
         }
 
         self.remember();
-        const tr = try self.track(track_index);
-        tr.clips[index] = updated;
+        // Правые половины получают свой номер: иначе после реза вся четвёрка
+        // ходила бы вместе, и резать было бы незачем.
+        const right_link: u16 = if (link == 0) 0 else self.newLink();
+
+        // Сначала укорачиваем левые половины, потом вставляем правые:
+        // вставка меняет номера клипов, и делать её внутри обхода — значит
+        // обойти один клип дважды или не обойти вовсе.
+        var pending: [max_tracks]?Clip = @splat(null);
+        for (self.tracks[0..self.track_count], 0..) |*tr, ti| {
+            var ci: usize = 0;
+            while (ci < tr.count) : (ci += 1) {
+                const cl = tr.clips[ci];
+                const mine = if (link == 0)
+                    (ti == track_index and ci == index)
+                else
+                    (cl.link == link and cl.covers(when_ns));
+                if (!mine) continue;
+
+                const left_len = when_ns - cl.at_ns;
+                tr.clips[ci].len_ns = left_len;
+                // Правая половина показывает следующий кусок исходника:
+                // точка реза сдвигает и начало внутри файла, иначе вторая
+                // половина повторила бы первую.
+                pending[ti] = .{
+                    .source = cl.source,
+                    .in_ns = cl.in_ns + left_len,
+                    .len_ns = cl.len_ns - left_len,
+                    .at_ns = when_ns,
+                    .link = right_link,
+                };
+                break;
+            }
+        }
+        for (self.tracks[0..self.track_count], 0..) |*tr, ti| {
+            if (pending[ti]) |right| _ = tr.insert(right);
+        }
     }
 
-    /// Передвинуть клип по времени и, если надо, на другую дорожку.
+    /// Подтянуть край связки. `from_left` — какой именно край.
+    pub fn trim(self: *Project, track_index: usize, index: usize, from_left: bool, delta_ns: i64) Error!void {
+        return self.trimImpl(track_index, index, from_left, delta_ns, false);
+    }
+
+    /// Подтянуть край только этого клипа, не трогая связку.
+    pub fn trimOne(self: *Project, track_index: usize, index: usize, from_left: bool, delta_ns: i64) Error!void {
+        return self.trimImpl(track_index, index, from_left, delta_ns, true);
+    }
+
+    fn trimImpl(
+        self: *Project,
+        track_index: usize,
+        index: usize,
+        from_left: bool,
+        delta_ns: i64,
+        alone: bool,
+    ) Error!void {
+        const t = try self.track(track_index);
+        if (index >= t.count) return Error.NoSuchThing;
+        const clip = t.clips[index];
+        const link = if (alone) 0 else clip.link;
+
+        if (link == 0) {
+            const updated = try trimmed(clip, from_left, delta_ns);
+            self.remember();
+            const tr = try self.track(track_index);
+            tr.clips[index] = updated;
+            if (from_left) tr.sort();
+            return;
+        }
+
+        // Связку обрезают целиком или не обрезают вовсе: если хоть один
+        // кусок стал бы короче различимого, отказываемся до правки.
+        for (self.trackList()) |tr| {
+            for (tr.list()) |cl| {
+                if (cl.link != link) continue;
+                _ = try trimmed(cl, from_left, delta_ns);
+            }
+        }
+
+        self.remember();
+        for (self.tracks[0..self.track_count]) |*tr| {
+            var changed = false;
+            for (tr.clips[0..tr.count]) |*cl| {
+                if (cl.link != link) continue;
+                cl.* = trimmed(cl.*, from_left, delta_ns) catch unreachable;
+                changed = true;
+            }
+            // Левый край двигает и начало клипа: порядок мог измениться.
+            if (changed and from_left) tr.sort();
+        }
+    }
+
+    /// Передвинуть связку по времени и, если надо, на другую дорожку.
+    ///
+    /// На другую дорожку переезжает только тот клип, за который тянут:
+    /// остальные остаются у себя и лишь сдвигаются во времени. Иначе
+    /// перетаскивание видео на соседнюю дорожку утащило бы туда и звук,
+    /// которому на видеодорожке не место.
     pub fn move(self: *Project, from_track: usize, index: usize, to_track: usize, at_ns: u64) Error!void {
+        return self.moveImpl(from_track, index, to_track, at_ns, false);
+    }
+
+    /// Передвинуть только этот клип, оставив связку на месте.
+    pub fn moveOne(self: *Project, from_track: usize, index: usize, to_track: usize, at_ns: u64) Error!void {
+        return self.moveImpl(from_track, index, to_track, at_ns, true);
+    }
+
+    fn moveImpl(
+        self: *Project,
+        from_track: usize,
+        index: usize,
+        to_track: usize,
+        at_ns: u64,
+        alone: bool,
+    ) Error!void {
         const src = try self.track(from_track);
         if (index >= src.count) return Error.NoSuchThing;
         if (to_track >= self.track_count) return Error.NoSuchThing;
@@ -387,10 +683,18 @@ pub const Project = struct {
         // говорит, что на ней лежит, и смешивать — значит врать глазу.
         if (self.tracks[from_track].kind != self.tracks[to_track].kind) return Error.NoSuchThing;
 
+        const link = if (alone) 0 else clip.link;
+        const wanted = @as(i64, @intCast(at_ns)) - @as(i64, @intCast(clip.at_ns));
+        const delta = allowedShift(self.earliestOf(link, clip), wanted);
+
         self.remember();
+        // Сначала вынимаем клип, потом двигаем связку: сортировка после
+        // сдвига меняет номера клипов, и вынимать стало бы нечего.
         const from = try self.track(from_track);
         from.remove(index);
-        clip.at_ns = at_ns;
+        self.shiftLinked(link, delta);
+
+        clip.at_ns = shifted(clip.at_ns, delta);
         const to = try self.track(to_track);
         if (!to.insert(clip)) {
             _ = self.undo();
@@ -398,13 +702,33 @@ pub const Project = struct {
         }
     }
 
-    /// Убрать клип.
+    /// Убрать связку целиком.
     pub fn removeClip(self: *Project, track_index: usize, index: usize) Error!void {
+        return self.removeImpl(track_index, index, false);
+    }
+
+    /// Убрать только этот клип, оставив связку.
+    pub fn removeClipOne(self: *Project, track_index: usize, index: usize) Error!void {
+        return self.removeImpl(track_index, index, true);
+    }
+
+    fn removeImpl(self: *Project, track_index: usize, index: usize, alone: bool) Error!void {
         const t = try self.track(track_index);
         if (index >= t.count) return Error.NoSuchThing;
+        const link = if (alone) 0 else t.clips[index].link;
+
         self.remember();
-        const tr = try self.track(track_index);
-        tr.remove(index);
+        if (link == 0) {
+            const tr = try self.track(track_index);
+            tr.remove(index);
+            return;
+        }
+        for (self.tracks[0..self.track_count]) |*tr| {
+            var i: usize = 0;
+            while (i < tr.count) {
+                if (tr.clips[i].link == link) tr.remove(i) else i += 1;
+            }
+        }
     }
 
     /// Вырезать участок на дорожке и сдвинуть остальное влево.
@@ -872,4 +1196,287 @@ test "длинное имя обрезается по букве, а не по �
     // Латиница влезает целиком до самого предела.
     t.setTitle("abcdefghijklmnopqrstuvwxyz");
     try std.testing.expectEqualStrings("abcdefghijklmnopqrstuvwxyz", t.title());
+}
+
+// ------------------------------------------------------- связка видео и звука
+
+/// Проект с одним файлом, разложенным на видео и звук одной связкой.
+/// Это то, что получается при открытии обычного mp4.
+fn linked() !*Project {
+    const p = try std.testing.allocator.create(Project);
+    p.* = .{};
+    const src = try p.addSource("D:\\видео\\запись.mp4", 60 * sec);
+    _ = try p.addTrack(.video, "Видео");
+    _ = try p.addTrack(.audio, "Звук");
+    const link = p.newLink();
+    try p.placeLinked(0, src, 2 * sec, 10 * sec, link);
+    try p.placeLinked(1, src, 2 * sec, 10 * sec, link);
+    return p;
+}
+
+test "связка едет целиком: сдвинули видео — звук пошёл следом" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+
+    try p.move(0, 0, 0, 5 * sec);
+    try std.testing.expectEqual(@as(u64, 5 * sec), p.tracks[0].clips[0].at_ns);
+    // Звук сдвинулся ровно на столько же, а не встал в ту же точку случайно.
+    try std.testing.expectEqual(@as(u64, 5 * sec), p.tracks[1].clips[0].at_ns);
+
+    // И обратно — тоже вместе.
+    try p.move(1, 0, 1, 0);
+    try std.testing.expectEqual(@as(u64, 0), p.tracks[0].clips[0].at_ns);
+    try std.testing.expectEqual(@as(u64, 0), p.tracks[1].clips[0].at_ns);
+}
+
+test "связка не расползается у начала дорожки" {
+    // Звук стоит раньше видео. Тянем видео далеко влево: упереться должна
+    // вся связка разом, сохранив расстояние между кусками. Если бы каждый
+    // упирался сам за себя, звук уехал бы относительно картинки.
+    const p = try std.testing.allocator.create(Project);
+    defer std.testing.allocator.destroy(p);
+    p.* = .{};
+    const src = try p.addSource("файл.mp4", 60 * sec);
+    _ = try p.addTrack(.video, "Видео");
+    _ = try p.addTrack(.audio, "Звук");
+    const link = p.newLink();
+    try p.placeLinked(0, src, 5 * sec, 10 * sec, link);
+    try p.placeLinked(1, src, 3 * sec, 10 * sec, link);
+
+    try p.move(0, 0, 0, 0);
+    // Звук стоял на две секунды раньше видео — так и остался.
+    try std.testing.expectEqual(@as(u64, 2 * sec), p.tracks[0].clips[0].at_ns);
+    try std.testing.expectEqual(@as(u64, 0), p.tracks[1].clips[0].at_ns);
+}
+
+test "насколько сдвинется связка: правило считается отдельно" {
+    // Вправо — на сколько просят.
+    try std.testing.expectEqual(@as(i64, 5 * sec), allowedShift(0, 5 * sec));
+    try std.testing.expectEqual(@as(i64, 5 * sec), allowedShift(3 * sec, 5 * sec));
+    // Влево — до начала дорожки и ни шагом дальше.
+    try std.testing.expectEqual(@as(i64, -3 * sec), allowedShift(3 * sec, -10 * sec));
+    try std.testing.expectEqual(@as(i64, -2 * sec), allowedShift(3 * sec, -2 * sec));
+    // Стоящему в нуле влево двигаться некуда.
+    try std.testing.expectEqual(@as(i64, 0), allowedShift(0, -10 * sec));
+}
+
+test "связка переезжает на другую дорожку одна: звук остаётся у себя" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addTrack(.video, "Видео 2");
+
+    try p.move(0, 0, 2, 4 * sec);
+    // Видео переехало на третью полосу.
+    try std.testing.expectEqual(@as(usize, 0), p.tracks[0].count);
+    try std.testing.expectEqual(@as(u64, 4 * sec), p.tracks[2].clips[0].at_ns);
+    // Звук остался на своей, но сдвинулся во времени на те же две секунды.
+    try std.testing.expectEqual(@as(usize, 1), p.tracks[1].count);
+    try std.testing.expectEqual(@as(u64, 4 * sec), p.tracks[1].clips[0].at_ns);
+}
+
+test "врозь: один клип двигается, связка стоит" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+
+    try p.moveOne(1, 0, 1, 6 * sec);
+    try std.testing.expectEqual(@as(u64, 2 * sec), p.tracks[0].clips[0].at_ns);
+    try std.testing.expectEqual(@as(u64, 6 * sec), p.tracks[1].clips[0].at_ns);
+    // Связка при этом никуда не делась: следующее обычное движение
+    // снова тянет обоих.
+    try p.move(0, 0, 0, 3 * sec);
+    try std.testing.expectEqual(@as(u64, 7 * sec), p.tracks[1].clips[0].at_ns);
+}
+
+test "развязали — и звук пошёл сам по себе" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+
+    try p.unlink(0, 0);
+    try std.testing.expectEqual(@as(u16, 0), p.tracks[0].clips[0].link);
+    try std.testing.expectEqual(@as(u16, 0), p.tracks[1].clips[0].link);
+
+    try p.move(0, 0, 0, 9 * sec);
+    try std.testing.expectEqual(@as(u64, 9 * sec), p.tracks[0].clips[0].at_ns);
+    try std.testing.expectEqual(@as(u64, 2 * sec), p.tracks[1].clips[0].at_ns);
+
+    // Развязывание отменяется наравне с резкой.
+    try std.testing.expect(p.undo());
+    try std.testing.expect(p.undo());
+    try std.testing.expect(p.tracks[0].clips[0].link != 0);
+}
+
+test "связать то, что стоит под указателем" {
+    const p = try std.testing.allocator.create(Project);
+    defer std.testing.allocator.destroy(p);
+    p.* = .{};
+    const a = try p.addSource("картинка.mp4", 60 * sec);
+    const b = try p.addSource("голос.wav", 60 * sec);
+    _ = try p.addTrack(.video, "Видео");
+    _ = try p.addTrack(.audio, "Звук");
+    try p.place(0, a, 0, 10 * sec);
+    try p.place(1, b, 1 * sec, 10 * sec);
+
+    try std.testing.expectEqual(@as(usize, 2), try p.linkUnder(5 * sec));
+    const link = p.tracks[0].clips[0].link;
+    try std.testing.expect(link != 0);
+    try std.testing.expectEqual(link, p.tracks[1].clips[0].link);
+
+    // Теперь два разных файла ходят вместе — так кладут голос под картинку.
+    try p.move(0, 0, 0, 4 * sec);
+    try std.testing.expectEqual(@as(u64, 5 * sec), p.tracks[1].clips[0].at_ns);
+}
+
+test "связывать нечего, когда под указателем один клип или пусто" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+    try std.testing.expectError(Error.NothingThere, p.linkUnder(30 * sec));
+
+    try p.removeClipOne(1, 0);
+    try std.testing.expectError(Error.NothingThere, p.linkUnder(5 * sec));
+}
+
+test "рез делит связку надвое, а не в четыре стороны" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+
+    try p.split(0, 6 * sec);
+    try std.testing.expectEqual(@as(usize, 2), p.tracks[0].count);
+    try std.testing.expectEqual(@as(usize, 2), p.tracks[1].count);
+
+    // Левые половины в одной связке, правые — в другой.
+    const left = p.tracks[0].clips[0].link;
+    const right = p.tracks[0].clips[1].link;
+    try std.testing.expect(left != 0 and right != 0 and left != right);
+    try std.testing.expectEqual(left, p.tracks[1].clips[0].link);
+    try std.testing.expectEqual(right, p.tracks[1].clips[1].link);
+
+    // И половины ходят порознь: подвинули правую — левая на месте.
+    try p.move(0, 1, 0, 9 * sec);
+    try std.testing.expectEqual(@as(u64, 9 * sec), p.tracks[1].clips[1].at_ns);
+    try std.testing.expectEqual(@as(u64, 2 * sec), p.tracks[1].clips[0].at_ns);
+}
+
+test "рез правой половины берёт правильный кусок исходника у обоих" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+    try p.split(0, 6 * sec);
+    // Клип стоял с двух секунд: рез на шестой — это четвёртая секунда файла.
+    try std.testing.expectEqual(@as(u64, 4 * sec), p.tracks[0].clips[1].in_ns);
+    try std.testing.expectEqual(@as(u64, 4 * sec), p.tracks[1].clips[1].in_ns);
+    try std.testing.expectEqual(@as(u64, 4 * sec), p.tracks[0].clips[0].len_ns);
+    try std.testing.expectEqual(@as(u64, 4 * sec), p.tracks[1].clips[0].len_ns);
+}
+
+test "обрезали край видео — звук обрезался так же" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+
+    try p.trim(0, 0, false, -3 * sec);
+    try std.testing.expectEqual(@as(u64, 7 * sec), p.tracks[0].clips[0].len_ns);
+    try std.testing.expectEqual(@as(u64, 7 * sec), p.tracks[1].clips[0].len_ns);
+
+    try p.trim(0, 0, true, 1 * sec);
+    try std.testing.expectEqual(@as(u64, 3 * sec), p.tracks[1].clips[0].at_ns);
+    try std.testing.expectEqual(@as(u64, 1 * sec), p.tracks[1].clips[0].in_ns);
+}
+
+test "связку обрезают целиком или не обрезают вовсе" {
+    // У звука кусок короче. Обрезка, от которой он стал бы неразличимым,
+    // не должна подрезать видео и оставить связку разной длины.
+    const p = try std.testing.allocator.create(Project);
+    defer std.testing.allocator.destroy(p);
+    p.* = .{};
+    const src = try p.addSource("файл.mp4", 60 * sec);
+    _ = try p.addTrack(.video, "Видео");
+    _ = try p.addTrack(.audio, "Звук");
+    const link = p.newLink();
+    try p.placeLinked(0, src, 0, 10 * sec, link);
+    try p.placeLinked(1, src, 0, 1 * sec, link);
+
+    const steps_before = p.past;
+    try std.testing.expectError(Error.TooShort, p.trim(0, 0, false, -2 * sec));
+    try std.testing.expectEqual(@as(u64, 10 * sec), p.tracks[0].clips[0].len_ns);
+    try std.testing.expectEqual(@as(u64, 1 * sec), p.tracks[1].clips[0].len_ns);
+    // И шага отмены на неудавшуюся обрезку не потрачено: иначе человек
+    // нажал бы «Отменить» и откатил не то, что думал.
+    try std.testing.expectEqual(steps_before, p.past);
+}
+
+test "удаление уносит всю связку, а врозь — только один клип" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+
+    try p.removeClip(0, 0);
+    try std.testing.expectEqual(@as(usize, 0), p.tracks[0].count);
+    try std.testing.expectEqual(@as(usize, 0), p.tracks[1].count);
+
+    try std.testing.expect(p.undo());
+    try p.removeClipOne(0, 0);
+    try std.testing.expectEqual(@as(usize, 0), p.tracks[0].count);
+    try std.testing.expectEqual(@as(usize, 1), p.tracks[1].count);
+}
+
+test "связка переживает отмену и возврат" {
+    const p = try linked();
+    defer std.testing.allocator.destroy(p);
+    const link = p.tracks[0].clips[0].link;
+
+    try p.move(0, 0, 0, 8 * sec);
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(@as(u64, 2 * sec), p.tracks[1].clips[0].at_ns);
+    try std.testing.expectEqual(link, p.tracks[1].clips[0].link);
+
+    try std.testing.expect(p.redo());
+    try std.testing.expectEqual(@as(u64, 8 * sec), p.tracks[1].clips[0].at_ns);
+}
+
+test "номера связок не выдаются дважды" {
+    const p = try std.testing.allocator.create(Project);
+    defer std.testing.allocator.destroy(p);
+    p.* = .{};
+    const first = p.newLink();
+    const second = p.newLink();
+    try std.testing.expect(first != 0 and second != 0 and first != second);
+    // Переиспользованный номер склеил бы два разных файла в одну связку.
+    try std.testing.expect(second > first);
+}
+
+test "порядок клипов на дорожке не сбивается после сдвига связки" {
+    // На звуковой дорожке два куска. Сдвигаем первый так, чтобы он
+    // перепрыгнул второй: весь остальной код ждёт клипы по порядку.
+    const p = try std.testing.allocator.create(Project);
+    defer std.testing.allocator.destroy(p);
+    p.* = .{};
+    const src = try p.addSource("файл.mp4", 60 * sec);
+    _ = try p.addTrack(.video, "Видео");
+    _ = try p.addTrack(.audio, "Звук");
+    const link = p.newLink();
+    try p.placeLinked(0, src, 0, 5 * sec, link);
+    try p.placeLinked(1, src, 0, 5 * sec, link);
+    try p.place(1, src, 10 * sec, 5 * sec);
+
+    try p.move(0, 0, 0, 20 * sec);
+    var last: u64 = 0;
+    for (p.tracks[1].list()) |cl| {
+        try std.testing.expect(cl.at_ns >= last);
+        last = cl.at_ns;
+    }
+    try std.testing.expectEqual(@as(usize, 2), p.linkSize(link));
+}
+
+test "у пустого проекта нет ненулевых умолчаний" {
+    // Проект весит восемьсот килобайт. Пока все его поля нулевые, он лежит
+    // в обнуляемой области и в файле программы места не занимает. Стоило
+    // поставить одному двухбайтному полю умолчание 1 — и весь этот
+    // восьмисоткилобайтный ноль лёг в .exe готовыми байтами: 1318 КБ стали
+    // 2145 КБ. Ошибка ничем себя не проявляет, кроме размера файла, —
+    // поэтому и проверяется тестом, а не глазами.
+    const plain = try std.testing.allocator.create(Project);
+    defer std.testing.allocator.destroy(plain);
+    const zeroed = try std.testing.allocator.create(Project);
+    defer std.testing.allocator.destroy(zeroed);
+
+    plain.* = .{};
+    zeroed.* = std.mem.zeroes(Project);
+    try std.testing.expect(std.meta.eql(plain.*, zeroed.*));
 }

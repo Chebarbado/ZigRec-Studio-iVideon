@@ -37,6 +37,7 @@ const id_add_audio = 210;
 const id_play = 211;
 const id_shot = 212;
 const id_rename_box = 213;
+const id_link = 214;
 
 /// Высота панели кнопок. Таймлайн начинается под ней.
 /// Два ряда: сверху файл и дорожки, снизу правка.
@@ -88,6 +89,15 @@ const callWindowProcW = @extern(
 /// Сообщение о брошенных файлах.
 const wm_dropfiles = 0x0233;
 
+/// Держат ли Alt — «сделать врозь, не трогая связку».
+///
+/// Alt, а не кнопка на панели: решение принимается в тот момент, когда
+/// клип уже взят мышью, и тянуться в этот момент к панели неудобно.
+/// Так же это делают и в других монтажных программах.
+fn apart() bool {
+    return c.GetKeyState(c.VK_MENU) < 0;
+}
+
 /// Окно должно получать двойные щелчки: без этого признака Windows
 /// присылает два одиночных, и переименование не начинается никогда.
 const cs_dblclks: c.UINT = 0x0008;
@@ -113,10 +123,15 @@ const Editor = struct {
     /// под курсор своим левым краем.
     drag_grab_ns: u64 = 0,
     drag_started: bool = false,
+    /// Тянут ли врозь. Решается один раз, когда клип взят мышью: если
+    /// спрашивать клавиатуру на каждом движении, половина перетаскивания
+    /// пройдёт со связкой, а половина без, и результат не объяснить.
+    drag_apart: bool = false,
 
     status: c.HWND = null,
     btn_undo: c.HWND = null,
     btn_redo: c.HWND = null,
+    btn_link: c.HWND = null,
 
     /// Волна каждого открытого файла. По исходнику на ячейку, номера те же,
     /// что у исходников проекта.
@@ -416,6 +431,7 @@ fn drawClips(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, wid
         line(dc, rect.right - 1, rect.top, rect.right - 1, rect.bottom, frame_color, frame_width);
 
         if (track.kind == .audio and !track.muted) drawWave(dc, clip, rect);
+        if (clip.link != 0) drawLinkMark(dc, rect);
 
         // Подпись помещается — пишем. Не помещается — не пишем: обрезанное
         // слово читается хуже, чем его отсутствие.
@@ -439,6 +455,27 @@ fn drawClips(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, wid
             drawText(dc, left + 6, rect.top + 22, len_text, 0x00404040);
         }
     }
+}
+
+/// Значок связки: два звена цепи в правом верхнем углу клипа.
+///
+/// Без значка связку нечем увидеть: человек тянет видео, звук едет следом,
+/// и почему — непонятно. Рисуем справа, потому что слева стоит подпись.
+fn drawLinkMark(dc: c.HDC, rect: c.RECT) void {
+    const x = rect.right - 26;
+    const y = rect.top + 5;
+    // Не влезает — не рисуем: обрезанный значок хуже, чем его отсутствие.
+    if (x < rect.left + 4) return;
+    ring(dc, x, y);
+    ring(dc, x + 8, y);
+}
+
+fn ring(dc: c.HDC, x: i32, y: i32) void {
+    const col: c.COLORREF = 0x00404040;
+    line(dc, x, y, x + 11, y, col, 1);
+    line(dc, x, y + 8, x + 11, y + 8, col, 1);
+    line(dc, x, y, x, y + 8, col, 1);
+    line(dc, x + 10, y, x + 10, y + 8, col, 1);
 }
 
 /// Волна внутри клипа.
@@ -590,6 +627,40 @@ fn refresh() void {
     _ = c.InvalidateRect(ed.hwnd, null, 0);
     _ = c.EnableWindow(ed.btn_undo, if (ed.project.canUndo()) 1 else 0);
     _ = c.EnableWindow(ed.btn_redo, if (ed.project.canRedo()) 1 else 0);
+    // Одна кнопка вместо двух: развязать можно только связанное, связать —
+    // только развязанное, и держать рядом две кнопки, из которых одна
+    // всегда бесполезна, значит занимать место ничем.
+    ui.setText(ed.btn_link, if (selectedLink() != 0) "⛓ Развязать" else "🔗 Связать");
+}
+
+/// Номер связки у выбранного клипа. Ноль — клип сам по себе или не выбран.
+fn selectedLink() u16 {
+    if (!ed.has_selection) return 0;
+    if (ed.sel_track >= ed.project.track_count) return 0;
+    const t = &ed.project.tracks[ed.sel_track];
+    if (ed.sel_clip >= t.count) return 0;
+    return t.clips[ed.sel_clip].link;
+}
+
+/// Связать то, что стоит под указателем, или развязать выбранное.
+fn toggleLink() void {
+    if (selectedLink() != 0) {
+        ed.project.unlink(ed.sel_track, ed.sel_clip) catch |err| return complain(err);
+        ed.say("связка снята: теперь звук и картинка двигаются порознь");
+        refresh();
+        return;
+    }
+    const n = ed.project.linkUnder(ed.playhead_ns) catch |err| {
+        if (err == timeline.Error.NothingThere) {
+            ed.say("связывать нечего: под указателем должно быть хотя бы два клипа");
+            refresh();
+            return;
+        }
+        return complain(err);
+    };
+    var buf: [128]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "связано клипов: {d} — теперь они ходят вместе", .{n}) catch "связано");
+    refresh();
 }
 
 /// Сказать, что не вышло, словами — а не проглотить ошибку.
@@ -824,6 +895,11 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
         ed.waves[source] = waveform.read(path) catch .{};
     }
 
+    // Дорожки одного файла связываем сразу: звук должен ходить за
+    // картинкой с первой секунды, а не после того, как человек об этом
+    // попросит. Одна дорожка — связывать не с чем.
+    const link: u16 = if (info.list().len > 1) ed.project.newLink() else 0;
+
     var added: usize = 0;
     for (info.list()) |track| {
         const kind: timeline.TrackKind = if (track.kind == .video) .video else .audio;
@@ -836,16 +912,17 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
         const index = ed.project.addTrack(kind, name) catch |err| return complain(err);
         const len = if (track.duration_ns > 0) track.duration_ns else info.duration_ns;
         if (len < timeline.min_len_ns) continue;
-        ed.project.place(index, source, at_ns, len) catch |err| return complain(err);
+        ed.project.placeLinked(index, source, at_ns, len, link) catch |err| return complain(err);
         added += 1;
     }
 
     var buf: [320]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "{s}: {s}, дорожек {d}, {d:.2} с", .{
+    ed.say(std.fmt.bufPrint(&buf, "{s}: {s}, дорожек {d}, {d:.2} с{s}", .{
         std.fs.path.basename(path),
         info.format.label(),
         added,
         info.seconds(),
+        if (link != 0) " — связаны, Alt тянет врозь" else "",
     }) catch "файл открыт");
 
     // Показываем целиком: иначе человек открыл файл и не увидел ничего.
@@ -874,8 +951,13 @@ fn splitAtPlayhead() void {
         refresh();
         return;
     }
-    ed.project.split(ed.sel_track, ed.playhead_ns) catch |err| return complain(err);
-    ed.say("разрезано");
+    const alone = apart();
+    const cut = if (alone)
+        ed.project.splitOne(ed.sel_track, ed.playhead_ns)
+    else
+        ed.project.split(ed.sel_track, ed.playhead_ns);
+    cut catch |err| return complain(err);
+    ed.say(if (alone) "разрезан один клип" else "разрезано вместе со связкой");
     refresh();
 }
 
@@ -885,9 +967,15 @@ fn deleteSelected() void {
         refresh();
         return;
     }
-    ed.project.removeClip(ed.sel_track, ed.sel_clip) catch |err| return complain(err);
+    const alone = apart();
+    const linked = selectedLink() != 0 and !alone;
+    const gone = if (alone)
+        ed.project.removeClipOne(ed.sel_track, ed.sel_clip)
+    else
+        ed.project.removeClip(ed.sel_track, ed.sel_clip);
+    gone catch |err| return complain(err);
     ed.has_selection = false;
-    ed.say("клип убран");
+    ed.say(if (linked) "связка убрана целиком" else "клип убран");
     refresh();
 }
 
@@ -984,6 +1072,7 @@ fn onDown(x: i32, y: i32) void {
             };
             ed.drag_grab_ns = hit.when_ns -| clip.at_ns;
             ed.drag_started = false;
+            ed.drag_apart = apart();
             _ = c.SetCapture(ed.hwnd);
         },
         .lane => {
@@ -1042,7 +1131,11 @@ fn onMove(x: i32, y: i32) void {
             if (!ed.has_selection) return;
             const target_track = ed.view.trackAtY(toLane(y), ed.project.track_count) orelse ed.sel_track;
             const at = when -| ed.drag_grab_ns;
-            ed.project.move(ed.sel_track, ed.sel_clip, target_track, at) catch {
+            const moved = if (ed.drag_apart)
+                ed.project.moveOne(ed.sel_track, ed.sel_clip, target_track, at)
+            else
+                ed.project.move(ed.sel_track, ed.sel_clip, target_track, at);
+            moved catch {
                 // На чужой вид дорожки не пускаем — молча, потому что это
                 // происходит на каждом движении мыши, и ругаться тут значит
                 // мигать сообщением.
@@ -1063,7 +1156,11 @@ fn onMove(x: i32, y: i32) void {
             const edge_now = if (from_left) clip.at_ns else clip.endsAt();
             const delta = @as(i64, @intCast(when)) - @as(i64, @intCast(edge_now));
             if (delta == 0) return;
-            ed.project.trim(ed.sel_track, ed.sel_clip, from_left, delta) catch return;
+            const cut = if (ed.drag_apart)
+                ed.project.trimOne(ed.sel_track, ed.sel_clip, from_left, delta)
+            else
+                ed.project.trim(ed.sel_track, ed.sel_clip, from_left, delta);
+            cut catch return;
             ed.drag_started = true;
             refresh();
         },
@@ -1087,9 +1184,10 @@ fn onUp() void {
     if (ed.drag != .none) {
         _ = c.ReleaseCapture();
         if (ed.drag_started) {
+            const alone = ed.drag_apart;
             ed.say(switch (ed.drag) {
-                .clip => "клип переставлен",
-                .trim_left, .trim_right => "клип обрезан",
+                .clip => if (alone) "клип переставлен отдельно от связки" else "клип переставлен",
+                .trim_left, .trim_right => if (alone) "клип обрезан отдельно от связки" else "клип обрезан",
                 else => "",
             });
         }
@@ -1377,6 +1475,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             _ = ui.button(hwnd, "⇥ Встык", id_compact, 388, 46, 102, 28, 0);
             ed.btn_undo = ui.button(hwnd, "↶ Отменить", id_undo, 498, 46, 120, 28, 0);
             ed.btn_redo = ui.button(hwnd, "↷ Вернуть", id_redo, 626, 46, 114, 28, 0);
+            ed.btn_link = ui.button(hwnd, "⛓ Развязать", id_link, 748, 46, 140, 28, 0);
 
             var child = c.GetWindow(hwnd, c.GW_CHILD);
             while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) ui.applyFont(child);
@@ -1406,6 +1505,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_add_audio => addEmptyTrack(.audio),
                 id_play => togglePlay(),
                 id_shot => saveFrame(),
+                id_link => toggleLink(),
                 else => {},
             }
             return 0;

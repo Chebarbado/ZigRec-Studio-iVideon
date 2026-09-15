@@ -997,9 +997,12 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
     const src = try made.addSource("D:\\видео\\моя запись 2026.mp4", 60 * std.time.ns_per_s);
     _ = try made.addTrack(.video, "Видео");
     _ = try made.addTrack(.audio, "Микрофон ведущего");
-    try made.place(0, src, 0, 10 * std.time.ns_per_s);
+    // Видео и звук кладём одной связкой — так их кладёт и редактор,
+    // когда открывают обычный mp4.
+    const link = made.newLink();
+    try made.placeLinked(0, src, 0, 10 * std.time.ns_per_s, link);
+    try made.placeLinked(1, src, 0, 10 * std.time.ns_per_s, link);
     try made.split(0, 4 * std.time.ns_per_s);
-    try made.place(1, src, 2 * std.time.ns_per_s, 8 * std.time.ns_per_s);
     try made.setMuted(1, true);
 
     try w.print("[project] собран проект: дорожек {d}, клипов {d}\n", .{
@@ -1054,10 +1057,43 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
                 try w.writeAll("[project] ПРОВАЛ: клип изменился\n");
                 return 1;
             }
+            if (x.link != y.link) {
+                try w.writeAll("[project] ПРОВАЛ: связка не пережила запись\n");
+                return 1;
+            }
         }
     }
 
     try w.print("[project] прочитано обратно: дорожек {d}, пути и имена целы\n", .{back.track_count});
+
+    // Связка должна не просто сохраниться числом, а работать после чтения:
+    // двигаем видео и смотрим, пошёл ли за ним звук. Совпадение номеров
+    // ничего не стоит, если по ним никто не ходит.
+    const left_link = back.tracks[0].clips[0].link;
+    if (left_link == 0) {
+        try w.writeAll("[project] ПРОВАЛ: после чтения клипы оказались сами по себе\n");
+        return 1;
+    }
+    const sound_was = back.tracks[1].clips[0].at_ns;
+    try back.move(0, 0, 0, 3 * std.time.ns_per_s);
+    const sound_now = back.tracks[1].clips[0].at_ns;
+    if (sound_now != sound_was + 3 * std.time.ns_per_s) {
+        try w.print("[project] ПРОВАЛ: звук не пошёл за картинкой: было {d}, стало {d}\n", .{
+            sound_was,
+            sound_now,
+        });
+        return 1;
+    }
+    try w.print("[project] связка цела: сдвинули видео на 3 с — звук ушёл на 3 с\n", .{});
+
+    // И развязанное должно оставаться развязанным.
+    try back.unlink(0, 0);
+    try back.move(0, 0, 0, 0);
+    if (back.tracks[1].clips[0].at_ns != sound_now) {
+        try w.writeAll("[project] ПРОВАЛ: развязанный звук всё равно поехал\n");
+        return 1;
+    }
+    try w.writeAll("[project] развязанный звук остался на месте\n");
     try w.writeAll("[project] ПРОЕКТ СОШЁЛСЯ\n");
     return 0;
 }

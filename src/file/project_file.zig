@@ -50,11 +50,15 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
             track.title(),
         });
         for (track.list()) |clip| {
-            try w.print("clip {d} {d} {d} {d}\n", .{
+            // Пятое число — номер связки. Дописано в конец строки нарочно:
+            // прежнее поколение читает первые четыре и просто не заметит
+            // пятого. Связка потеряется, проект — нет.
+            try w.print("clip {d} {d} {d} {d} {d}\n", .{
                 clip.source,
                 clip.in_ns,
                 clip.len_ns,
                 clip.at_ns,
+                clip.link,
             });
         }
     }
@@ -115,12 +119,19 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             const in_ns = parseU64(parts.next()) orelse return Error.Malformed;
             const len_ns = parseU64(parts.next()) orelse return Error.Malformed;
             const at_ns = parseU64(parts.next()) orelse return Error.Malformed;
+            // Номера связки может не быть: файл от прежнего поколения.
+            // Тогда клип сам по себе — это честнее, чем придумать ему связь.
+            const link = parseU64(parts.next()) orelse 0;
             project.tracks[track].clips[project.tracks[track].count] = .{
                 .source = @intCast(source),
                 .in_ns = in_ns,
                 .len_ns = len_ns,
                 .at_ns = at_ns,
+                .link = @truncate(link),
             };
+            // Счётчик связок должен обгонять всё, что прочитано: иначе
+            // следующая связка получила бы уже занятый номер.
+            if (link >= project.next_link) project.next_link = @truncate(link + 1);
             project.tracks[track].count += 1;
             if (project.tracks[track].count >= timeline.max_clips) return Error.TooBig;
             continue;
@@ -317,4 +328,45 @@ test "ошибки объясняются словами" {
     for ([_]anyerror{ Error.NotProject, Error.TooNew, Error.Malformed, Error.TooBig }) |e| {
         try std.testing.expect(explain(e).len > 20);
     }
+}
+
+test "связка переживает запись и чтение" {
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+    const src = try p.addSource("D:\\видео\\запись.mp4", 60 * std.time.ns_per_s);
+    _ = try p.addTrack(.video, "Видео");
+    _ = try p.addTrack(.audio, "Звук");
+    const link = p.newLink();
+    try p.placeLinked(0, src, 0, 10 * std.time.ns_per_s, link);
+    try p.placeLinked(1, src, 0, 10 * std.time.ns_per_s, link);
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+
+    const back = try makeProject();
+    defer std.testing.allocator.destroy(back);
+    try read(back, w.buffered());
+
+    const got = back.tracks[0].clips[0].link;
+    try std.testing.expect(got != 0);
+    try std.testing.expectEqual(got, back.tracks[1].clips[0].link);
+    // Следующая связка не должна получить уже занятый номер.
+    try std.testing.expect(back.newLink() > got);
+}
+
+test "файл прежнего поколения без номера связки читается" {
+    // Пятое число дописано в конец строки нарочно: старый файл его просто
+    // не содержит, и клип оказывается сам по себе. Это честнее, чем
+    // придумать ему связь, которой в файле не было.
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+    try read(p,
+        \\zigrec-project 1
+        \\source 60000000000 а.mp4
+        \\track video 0 Видео
+        \\clip 0 0 1000000000 0
+        \\
+    );
+    try std.testing.expectEqual(@as(u16, 0), p.tracks[0].clips[0].link);
 }
