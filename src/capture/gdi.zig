@@ -31,6 +31,8 @@ pub const Grabber = struct {
     old_obj: c.HGDIOBJ = undefined,
     bits: [*]const u8 = undefined,
     area: Rect,
+    /// Весь стол — то, относительно чего задана область.
+    screen: Rect,
     stats: Stats = .{},
     /// Пиксели предыдущего кадра: GDI отдаёт снимок всегда, даже если на экране
     /// ничего не изменилось, и без этой проверки кодировщик получал бы поток
@@ -92,8 +94,28 @@ pub const Grabber = struct {
             .old_obj = old_obj,
             .bits = @ptrCast(bits.?),
             .area = area,
+            .screen = full,
             .prev = prev,
         };
+    }
+
+    /// Снимать только этот прямоугольник стола (#30). Сдвиг при том же
+    /// размере — бесплатно, меняется лишь откуда брать; новый размер —
+    /// новая поверхность. Снимок всего 4K-стола ради области 1080p стоил
+    /// вчетверо дороже самой области и держал запись на 17 кадрах в секунду.
+    pub fn focus(self: *Grabber, want: Rect) Error!void {
+        if (builtin.os.tag != .windows) return Error.Unsupported;
+        const area = want.clampTo(self.screen.width, self.screen.height).evenSized();
+        if (area.isEmpty()) return Error.NoOutput;
+        if (area.width == self.area.width and area.height == self.area.height) {
+            self.area = area;
+            return;
+        }
+        var fresh = try init(self.allocator, area);
+        fresh.always = self.always;
+        fresh.stats = self.stats;
+        self.deinit();
+        self.* = fresh;
     }
 
     pub fn deinit(self: *Grabber) void {

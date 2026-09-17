@@ -17,6 +17,8 @@ const usage =
     \\        --area x,y,ш,в   прямоугольник рабочего стола
     \\        --window ТЕКСТ   окно, найденное по части заголовка; область едет за окном
     \\        --follow         область едет за курсором (только с --area)
+    \\        --backend auto|dxgi|gdi  путь захвата; авто — DXGI, а если он молчит
+    \\                         полторы секунды, GDI
     \\        --sound          писать звук с микрофона в ту же дорожку
     \\        --system         писать и то, что идёт в колонки (сводится с микрофоном)
     \\        --separate       микрофон и колонки — двумя дорожками, а не одной
@@ -55,6 +57,14 @@ const usage =
     \\  zigrec pixel-check ФАЙЛ.bgra Ш В X Y
     \\        есть ли в 5x5 вокруг точки цвета курсора (белый и чёрный) — для кадра от ffmpeg
     \\  zigrec pixel-color ФАЙЛ.bgra Ш В X Y R G B
+    \\        того ли цвета точка кадра от ffmpeg (с допуском на сжатие)
+    \\  zigrec bench-run [СЕК] [FPS] [ФАЙЛ.mp4] [ШИРИНА ВЫСОТА]
+    \\        замер себя для сравнения с CamStudio и OBS: процессор, потери,
+    \\        размер, резкость; строка таблицы рядом с файлом (.md)
+    \\  zigrec capture-rate [СЕК] [dxgi|gdi]
+    \\        чистая частота захвата без кодирования при движении на экране
+    \\  zigrec stimulus [СЕК]
+    \\        окно с бегущей полосой: под ним меряют чужие программы записи
     \\        того ли цвета точка кадра от ffmpeg (с допуском на сжатие)
     \\        есть ли в 5x5 вокруг точки цвета курсора (белый и чёрный) — для кадра от ffmpeg
     \\  zigrec keyframes-smoke ФАЙЛ.mp4 СПИСОК.txt
@@ -343,6 +353,24 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "stimulus")) {
+        // Раздражитель сам по себе — под ним меряют чужие программы записи.
+        const seconds = argInt(args, 2, 30);
+        var stim = zigrec.stimulus.Stimulus{};
+        if (stim.start(.{})) |_| {
+            try w.print("[stimulus] окно с бегущей полосой на {d} с — пора запускать запись в другой программе\n", .{seconds});
+            try w.flush();
+            zigrec.win32.c.Sleep(seconds * 1000);
+            stim.stop();
+            try w.print("[stimulus] перерисовок {d}\n", .{stim.repaints()});
+        } else |err| {
+            try w.print("[stimulus] не поднялся: {s}\n", .{@errorName(err)});
+            code = 1;
+        }
+    } else if (eq(cmd, "capture-rate")) {
+        code = try captureRate(w, argInt(args, 2, 3), if (args.len > 3 and eq(args[3], "gdi")) .gdi else .dxgi);
+    } else if (eq(cmd, "bench-run")) {
+        code = try benchRun(init.io, arena, w, argInt(args, 2, 10), argInt(args, 3, 60), if (args.len > 4) args[4] else ".check\\bench.mp4", argInt(args, 5, 1920), argInt(args, 6, 1080));
     } else if (eq(cmd, "pixel-color")) {
         if (args.len < 10) {
             try w.writeAll("нужны: файл BGRA, ширина, высота, x, y, R, G, B\n");
@@ -641,6 +669,8 @@ const RecordArgs = struct {
     clicks: bool = true,
     /// Область едет за курсором (#29).
     follow: bool = false,
+    /// Путь захвата: авто (DXGI, при молчании — GDI), либо явно.
+    backend: zigrec.capture.Backend = .auto,
     preset: zigrec.encode.Preset = .text_ui,
     bitrate_kbps: ?u32 = null,
     gop: u32 = 60,
@@ -703,6 +733,10 @@ fn parseRecordArgs(args: []const []const u8) ArgError!RecordArgs {
             out.separate = true;
         } else if (eq(key, "--follow")) {
             out.follow = true;
+        } else if (eq(key, "--backend")) {
+            if (!has_value) return ArgError.MissingValue;
+            i += 1;
+            out.backend = if (eq(args[i], "dxgi")) .dxgi else if (eq(args[i], "gdi")) .gdi else if (eq(args[i], "auto")) .auto else return ArgError.BadValue;
         } else if (eq(key, "--no-cursor")) {
             out.cursor = false;
         } else if (eq(key, "--no-clicks")) {
@@ -810,6 +844,18 @@ fn wantsGif(path: []const u8) bool {
     return std.ascii.endsWithIgnoreCase(path, ".gif");
 }
 
+/// Итог последней записи: кадры, потери, простои, секунды.
+const RecordOutcome = struct {
+    written: u64 = 0,
+    dropped: u64 = 0,
+    idle: u64 = 0,
+    seconds: f64 = 0,
+    /// Сколько всего просидели в захвате и в кодировщике — раскладка кадра.
+    capture_ns: u64 = 0,
+    encode_ns: u64 = 0,
+};
+var last_record: RecordOutcome = .{};
+
 fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, opt: RecordArgs) !u8 {
     try w.print("[rec] пишем в {s}: {d} с, до {d} кадров в секунду\n", .{ path, opt.seconds, opt.fps });
     try w.flush();
@@ -835,7 +881,7 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
 
     // Автопанорама — через GDI: DXGI отдаёт кадр только когда стол
     // меняется, а область едет и при неподвижном столе — кадр нужен всегда.
-    var cap = zigrec.capture.Capturer.open(allocator, .{ .output = opt.monitor, .backend = if (opt.follow) .gdi else .auto, .always_frames = opt.follow }) catch |err| {
+    var cap = zigrec.capture.Capturer.open(allocator, .{ .output = opt.monitor, .backend = if (opt.follow) .gdi else opt.backend, .always_frames = opt.follow }) catch |err| {
         try w.print("[rec] ПРОВАЛ: захват не открылся.\n{s}\n", .{explain(err)});
         return 1;
     };
@@ -947,12 +993,20 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
     var layer_fw = if (layer_file) |*f| f.writer(io, &layer_buf) else null;
     var layer = if (layer_fw) |*fw| (zigrec.events.Writer.init(&fw.interface) catch null) else null;
     var tap = zigrec.event_tap.Tap{};
+    // GDI снимает только область (#30). Просим до `next`, а не после: кадр
+    // живёт в поверхности GDI, и пересоздавать её под живым кадром нельзя.
+    var focused = false;
+    var capture_ns: u64 = 0;
+    var encode_ns: u64 = 0;
     while (zigrec.win32.nowNs() < until) {
+        focused = cap.focus(current);
+        const before_next = zigrec.win32.nowNs();
         const frame = cap.next(200) catch |err| {
             try w.print("[rec] ПРОВАЛ на захвате: {s}\n", .{@errorName(err)});
             enc.abort();
             return 1;
         } orelse continue;
+        capture_ns += zigrec.win32.nowNs() - before_next;
 
         // Окно могли подвинуть: берём его положение заново, а размер держим
         // прежний — иначе кадр перестанет соответствовать заголовку файла.
@@ -992,7 +1046,10 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
             }
         }
 
-        const view = zigrec.capture_types.cropView(frame.pixels, frame.stride, current);
+        // GDI снял только область (#30) — кадр берём с нуля; DXGI отдал весь
+        // стол — режем. Если область сдвинулась после снимка, кадр отстаёт
+        // на один — как и раньше при переносе окна.
+        const view = zigrec.capture_types.cropView(frame.pixels, frame.stride, if (focused) current.atOrigin() else current);
 
         var pixels = view;
         var pixels_stride = frame.stride;
@@ -1019,12 +1076,14 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
 
         // Время от начала записи, а не показания часов: с двумя дорожками
         // начало отсчёта должно быть одно на обе.
+        const before_encode = zigrec.win32.nowNs();
         enc.writeFrame(pixels, pixels_stride, frame.timestamp_ns -| started) catch |err| {
             try w.print("[rec] ПРОВАЛ на кодировании: {s}\n", .{@errorName(err)});
             cap.release();
             enc.abort();
             return 1;
         };
+        encode_ns += zigrec.win32.nowNs() - before_encode;
         written += 1;
         cap.release();
 
@@ -1076,6 +1135,9 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
     }
     const stats = cap.stats();
     const secs = @as(f64, @floatFromInt(zigrec.win32.nowNs() - started)) / @as(f64, std.time.ns_per_s);
+    // Итог последней записи — для стенда сравнения (#30): он зовёт `record`
+    // как есть и потом читает числа отсюда.
+    last_record = .{ .written = written, .dropped = stats.dropped, .idle = stats.idle, .seconds = secs, .capture_ns = capture_ns, .encode_ns = encode_ns };
     try w.print("[rec] кадров записано {d} за {d:.1} с ({d:.1} в секунду), простоев {d}, потерь {d}\n", .{
         summary.frames,
         secs,
@@ -3616,6 +3678,208 @@ fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, o
         return 1;
     }
     try w.print("[export] ЭКСПОРТ {s} ПРОХОДИТ\n", .{if (annot) "С АННОТАЦИЕЙ" else if (burn) "С КУРСОРОМ ИЗ СЛОЯ" else if (off_key) "С ПЕРЕКОДИРОВАНИЕМ" else "БЕЗ ПЕРЕКОДИРОВАНИЯ"});
+    return 0;
+}
+
+/// Резкость кадра — средний модуль лапласиана по яркости: у мыла он мал,
+/// у чёткого текста велик. Это не «читаемость» словами, а её числовой
+/// заменитель: две записи одного экрана сравнимы по нему, а разные — нет.
+fn sharpness(pixels: []const u8, stride: usize, width: u32, height: u32) f64 {
+    if (width < 3 or height < 3) return 0;
+    var sum: f64 = 0;
+    var n: u64 = 0;
+    var y: usize = 1;
+    while (y + 1 < height) : (y += 1) {
+        var x: usize = 1;
+        while (x + 1 < width) : (x += 1) {
+            const c0 = luma(pixels, stride, x, y);
+            const l = luma(pixels, stride, x - 1, y) + luma(pixels, stride, x + 1, y) + luma(pixels, stride, x, y - 1) + luma(pixels, stride, x, y + 1) - 4 * c0;
+            sum += @abs(l);
+            n += 1;
+        }
+    }
+    return if (n == 0) 0 else sum / @as(f64, @floatFromInt(n));
+}
+
+fn luma(pixels: []const u8, stride: usize, x: usize, y: usize) f64 {
+    const at = y * stride + x * 4;
+    const b: f64 = @floatFromInt(pixels[at]);
+    const g: f64 = @floatFromInt(pixels[at + 1]);
+    const r: f64 = @floatFromInt(pixels[at + 2]);
+    return 0.114 * b + 0.587 * g + 0.299 * r;
+}
+
+/// Чистая частота кадров захвата без кодирования (#30): раздражитель
+/// перерисовывается 60 раз в секунду, цикл только зовёт `next` и считает.
+/// Разница с частотой записи — цена кодирования; разница с 60 — цена
+/// самого захвата на этой машине.
+fn captureRate(w: anytype, seconds: u32, backend: zigrec.capture.Backend) !u8 {
+    var stim = zigrec.stimulus.Stimulus{};
+    stim.start(.{}) catch |err| try w.print("[rate] раздражитель не поднялся: {s}\n", .{@errorName(err)});
+    defer stim.stop();
+    var cap = zigrec.capture.Capturer.open(std.heap.page_allocator, .{
+        .backend = backend,
+        .area = if (backend == .gdi) zigrec.capture_types.Rect{ .x = 0, .y = 0, .width = 1920, .height = 1080 } else null,
+        .always_frames = false,
+    }) catch |err| {
+        try w.print("[rate] ПРОВАЛ: захват не открылся: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer cap.deinit();
+    switch (cap.which) {
+        .dxgi => |*d| try w.print("[rate] адаптер «{s}», выход {s}, {d}x{d}\n", .{ d.adapterName(), d.outputName(), d.width, d.height }),
+        .gdi => {},
+    }
+    const started = zigrec.win32.nowNs();
+    const until = started + @as(u64, seconds) * std.time.ns_per_s;
+    var got: u64 = 0;
+    var calls: u64 = 0;
+    var in_next_ns: u64 = 0;
+    var accumulated: u64 = 0;
+    while (zigrec.win32.nowNs() < until) {
+        const t0 = zigrec.win32.nowNs();
+        const frame = cap.next(200) catch |err| {
+            try w.print("[rate] ПРОВАЛ на захвате: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        in_next_ns += zigrec.win32.nowNs() - t0;
+        calls += 1;
+        if (frame) |f| {
+            got += 1;
+            accumulated += f.accumulated;
+        }
+    }
+    const secs = @as(f64, @floatFromInt(zigrec.win32.nowNs() - started)) / @as(f64, std.time.ns_per_s);
+    const st = cap.stats();
+    try w.print("[rate] {s}: кадров {d} за {d:.1} с — {d:.1} в секунду; вызовов {d}, в next {d:.1} мс в среднем; простоев {d}, накоплено системой {d}; раздражитель {d} перерисовок\n", .{
+        cap.backend().label(), got, secs, @as(f64, @floatFromInt(got)) / secs, calls, @as(f64, @floatFromInt(in_next_ns)) / @as(f64, @floatFromInt(@max(calls, 1))) / 1e6, st.idle, accumulated, stim.repaints(),
+    });
+    return 0;
+}
+
+/// Жив ли DXGI на этой машине: ждём от него кадр до секунды. Desktop
+/// Duplication молчит после сеанса RDP или на некоторых связках двух видеокарт
+/// — тогда честный путь GDI. Чужая проверка того же: `ffmpeg -f lavfi -i ddagrab`.
+fn probeBackend(w: anytype) !zigrec.capture.Backend {
+    var cap = zigrec.capture.Capturer.open(std.heap.page_allocator, .{ .backend = .dxgi }) catch |err| {
+        try w.print("[bench] DXGI не открылся ({s}) — GDI\n", .{@errorName(err)});
+        return .gdi;
+    };
+    defer cap.deinit();
+    var waited: u32 = 0;
+    while (waited < 5) : (waited += 1) {
+        if (cap.next(200) catch null) |_| return .dxgi;
+    }
+    try w.writeAll("[bench] DXGI за секунду не отдал ни кадра при движении на экране — GDI\n");
+    return .gdi;
+}
+
+/// Время процессора нашего процесса в секундах (ядро + пользователь).
+fn processCpuSeconds() f64 {
+    const c = zigrec.win32.c;
+    var created: c.FILETIME = undefined;
+    var exited: c.FILETIME = undefined;
+    var kernel: c.FILETIME = undefined;
+    var user: c.FILETIME = undefined;
+    if (c.GetProcessTimes(c.GetCurrentProcess(), &created, &exited, &kernel, &user) == 0) return 0;
+    const k: u64 = (@as(u64, kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime;
+    const u: u64 = (@as(u64, user.dwHighDateTime) << 32) | user.dwLowDateTime;
+    return @as(f64, @floatFromInt(k + u)) / 10_000_000.0;
+}
+
+/// Наша сторона сравнения с CamStudio и OBS (#30): пишем 1920x1080 столько-то
+/// секунд с такой-то частотой, меряем себя тем же, чем меряют чужих
+/// (`tools/bench_process.py`): время процессора, потери кадров, размер
+/// файла, резкость кадра. Строка таблицы — в файл рядом с записью.
+fn benchRun(io: std.Io, allocator: std.mem.Allocator, w: anytype, seconds: u32, fps: u32, out_path: []const u8, width: u32, height: u32) !u8 {
+    var opt = RecordArgs{
+        .seconds = seconds,
+        .fps = fps,
+        .area = .{ .x = 0, .y = 0, .width = width, .height = height },
+        .preset = .text_ui,
+    };
+    try w.print("[bench] пишем {d}x{d} при {d} к/с {d} с: {s}\n", .{ width, height, fps, seconds, out_path });
+    // Раздражитель: без движения на экране DXGI отдаёт один кадр, и замер
+    // ничего не меряет. Своё время процессора он тоже тратит — оно входит в
+    // наш итог, и у OBS с CamStudio при том же раздражителе входит так же.
+    var stim = zigrec.stimulus.Stimulus{};
+    stim.start(.{}) catch |err| try w.print("[bench] раздражитель не поднялся: {s} — экран будет неподвижным\n", .{@errorName(err)});
+    // Путь захвата выбираем до записи, а не в ней: «авто» ждёт DXGI полторы
+    // секунды и только потом берёт GDI — эти полторы секунды испортили бы
+    // замер. Пробуем DXGI при работающем раздражителе; молчит — GDI.
+    opt.backend = probeBackend(w) catch .gdi;
+    try w.print("[bench] путь захвата: {s}\n", .{opt.backend.label()});
+    const cpu0 = processCpuSeconds();
+    const t0 = zigrec.win32.nowNs();
+    const code = try record(io, allocator, w, out_path, opt);
+    const wall = @as(f64, @floatFromInt(zigrec.win32.nowNs() - t0)) / @as(f64, std.time.ns_per_s);
+    const cpu = processCpuSeconds() - cpu0;
+    stim.stop();
+    try w.print("[bench] раздражитель перерисовался {d} раз\n", .{stim.repaints()});
+    if (code == 1 or code == 2) {
+        try w.writeAll("[bench] ПРОВАЛ: запись не удалась\n");
+        return 1;
+    }
+
+    const size = blk: {
+        const f = std.Io.Dir.cwd().openFile(io, out_path, .{}) catch break :blk @as(u64, 0);
+        defer f.close(io);
+        break :blk f.length(io) catch 0;
+    };
+    // Резкость — по кадру из середины записи, раскодированному нашим плеером.
+    var sharp: f64 = 0;
+    if (zigrec.player.Player.openScaled(allocator, out_path, 0, 0)) |opened| {
+        var p = opened;
+        defer p.close();
+        p.showAt(@as(u64, seconds) * std.time.ns_per_s / 2) catch {};
+        sharp = sharpness(p.pixels, p.stride, p.width, p.height);
+    } else |_| {}
+
+    const cores: f64 = @floatFromInt(std.Thread.getCpuCount() catch 1);
+    const one_core = cpu / @max(wall, 0.001) * 100.0;
+    const kbit = if (last_record.seconds > 0) @as(f64, @floatFromInt(size)) * 8.0 / 1000.0 / last_record.seconds else 0;
+    try w.print("[bench] процессор: {d:.1} с за {d:.1} с стены — {d:.1}% одного ядра, {d:.1}% машины ({d:.0} ядер)\n", .{ cpu, wall, one_core, one_core / cores, cores });
+    try w.print("[bench] кадров {d}, потерь {d}, простоев {d}; файл {d} КБ, {d:.0} кбит/с; резкость {d:.2}\n", .{
+        last_record.written, last_record.dropped, last_record.idle, size / 1024, kbit, sharp,
+    });
+    const per_frame = @as(f64, @floatFromInt(@max(last_record.written, 1)));
+    try w.print("[bench] на кадр: захват {d:.1} мс, кодирование {d:.1} мс, всего {d:.1} мс\n", .{
+        @as(f64, @floatFromInt(last_record.capture_ns)) / per_frame / 1e6,
+        @as(f64, @floatFromInt(last_record.encode_ns)) / per_frame / 1e6,
+        last_record.seconds * 1000.0 / per_frame,
+    });
+
+    // Строка таблицы — рядом с записью; README и вики берут её отсюда.
+    var md_buf: [1024]u8 = undefined;
+    const md_path = zigrec.events.sidecarPath(&md_buf, out_path);
+    var md_full: [1024]u8 = undefined;
+    const md = std.fmt.bufPrint(&md_full, "{s}.md", .{md_path[0 .. md_path.len - zigrec.events.extension.len]}) catch out_path;
+    if (std.Io.Dir.cwd().createFile(io, md, .{})) |*file| {
+        defer file.close(io);
+        var fbuf: [2048]u8 = undefined;
+        var fw = file.writer(io, &fbuf);
+        fw.interface.print("| Zig-Rec Studio {s} ({s}) | {d}x{d} @ {d} | {d:.1} % одного ядра ({d:.1} % машины) | {d} из {d} | {d} КБ ({d:.0} кбит/с) | {d:.2} |\n", .{
+            zigrec.version.VERSION, opt.backend.label(), width, height, fps, one_core, one_core / cores, last_record.dropped, last_record.written + last_record.dropped, size / 1024, kbit, sharp,
+        }) catch {};
+        fw.interface.flush() catch {};
+        try w.print("[bench] строка таблицы: {s}\n", .{md});
+    } else |_| {}
+    // Стенд сам себя проверяет: движение было, кадры пошли, потерь не
+    // больше десятой части — иначе замер ни о чём не говорит.
+    const total = last_record.written + last_record.dropped;
+    if (stim.repaints() < @as(u64, seconds) * 10) {
+        try w.print("[bench] ПРОВАЛ: раздражитель перерисовался лишь {d} раз за {d} с\n", .{ stim.repaints(), seconds });
+        return 1;
+    }
+    if (last_record.written < @as(u64, seconds) * 10) {
+        try w.print("[bench] ПРОВАЛ: записано лишь {d} кадров за {d} с — захват не видел движения\n", .{ last_record.written, seconds });
+        return 1;
+    }
+    if (last_record.dropped * 10 > total) {
+        try w.print("[bench] ПРОВАЛ: потерь {d} из {d} — больше десятой части\n", .{ last_record.dropped, total });
+        return 1;
+    }
+    try w.writeAll("[bench] ЗАМЕР ГОТОВ\n");
     return 0;
 }
 

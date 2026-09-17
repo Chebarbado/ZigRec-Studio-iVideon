@@ -365,6 +365,9 @@ pub const Recorder = struct {
         var current = area;
         var follower = pan.Follower.init(area);
         var last_pan_ns = origin_ns;
+        // GDI снимает только область (#30); просим до `next`: кадр живёт в
+        // поверхности GDI, пересоздавать её под живым кадром нельзя.
+        var focused = false;
 
         // Слой событий (#89) — рядом с записью; см. `record` в main.zig.
         var layer_threaded: std.Io.Threaded = .init(self.allocator, .{});
@@ -396,6 +399,7 @@ pub const Recorder = struct {
                 continue;
             }
 
+            focused = cap.focus(current);
             const frame = (try cap.next(100)) orelse {
                 self.elapsed_ns.store(clock.elapsed(win32.nowNs()), .monotonic);
                 continue;
@@ -446,7 +450,8 @@ pub const Recorder = struct {
             self.area_x.store(current.x, .monotonic);
             self.area_y.store(current.y, .monotonic);
 
-            const view = capture_types.cropView(frame.pixels, frame.stride, current);
+            // GDI снял только область (#30) — кадр с нуля; DXGI — режем стол.
+            const view = capture_types.cropView(frame.pixels, frame.stride, if (focused) current.atOrigin() else current);
             var pixels = view;
             var pixels_stride = frame.stride;
             if (canvas) |buf| {

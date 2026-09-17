@@ -39,6 +39,11 @@ pub const Rect = struct {
         return self.width == 0 or self.height == 0;
     }
 
+    /// Тот же размер с началом в нуле: так режут кадр, снятый с самой области.
+    pub fn atOrigin(self: Rect) Rect {
+        return .{ .x = 0, .y = 0, .width = self.width, .height = self.height };
+    }
+
     /// Пересечение с кадром экрана: область не должна вылезать за его границы.
     pub fn clampTo(self: Rect, w: u32, h: u32) Rect {
         const x0: i64 = @max(self.x, 0);
@@ -176,4 +181,13 @@ test "вырезка вне буфера отдаёт пустоту, а не м
     var buf: [16]u8 = undefined;
     const view = cropView(&buf, 16, .{ .x = 0, .y = 10, .width = 1, .height = 1 });
     try std.testing.expectEqual(@as(usize, 0), view.len);
+}
+
+test "atOrigin: тот же размер, начало в нуле" {
+    const r = Rect{ .x = 40, .y = 30, .width = 200, .height = 100 };
+    const o = r.atOrigin();
+    try std.testing.expectEqual(@as(i32, 0), o.x);
+    try std.testing.expectEqual(@as(i32, 0), o.y);
+    try std.testing.expectEqual(r.width, o.width);
+    try std.testing.expectEqual(r.height, o.height);
 }

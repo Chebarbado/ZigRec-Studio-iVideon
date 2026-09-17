@@ -55,6 +55,17 @@ pub const Options = struct {
     always_frames: bool = false,
 };
 
+/// Имя из DXGI (UTF-16 с нулём в конце) — в ASCII-буфер, чужие знаки как «?».
+fn narrow(out: []u8, wide_name: []const u16) usize {
+    var n: usize = 0;
+    for (wide_name) |ch| {
+        if (ch == 0 or n >= out.len) break;
+        out[n] = if (ch < 128) @intCast(ch) else '?';
+        n += 1;
+    }
+    return n;
+}
+
 /// Захват одного выхода (монитора) через DXGI Desktop Duplication.
 pub const Duplicator = struct {
     allocator: std.mem.Allocator,
@@ -69,6 +80,20 @@ pub const Duplicator = struct {
     holding: bool = false,
     mapped: bool = false,
     stats: Stats = .{},
+    /// Какой адаптер и какой выход дублируем — для отчёта стенда: на машине
+    /// с двумя видеокартами дубликация молчит, если устройство не на той.
+    adapter_name: [128]u8 = @splat(0),
+    adapter_len: usize = 0,
+    output_name: [32]u8 = @splat(0),
+    output_len: usize = 0,
+
+    pub fn adapterName(self: *const Duplicator) []const u8 {
+        return self.adapter_name[0..self.adapter_len];
+    }
+
+    pub fn outputName(self: *const Duplicator) []const u8 {
+        return self.output_name[0..self.output_len];
+    }
 
     pub fn init(allocator: std.mem.Allocator, output_index: u32) Error!Duplicator {
         if (builtin.os.tag != .windows) return Error.Unsupported;
@@ -131,6 +156,10 @@ pub const Duplicator = struct {
         var adapter: ?*c.IDXGIAdapter = null;
         if (win32.failed(dxgi_device.?.lpVtbl.*.GetAdapter.?(dxgi_device.?, &adapter))) return Error.NoDevice;
         defer _ = adapter.?.lpVtbl.*.Release.?(@ptrCast(adapter.?));
+        var adesc: c.DXGI_ADAPTER_DESC = undefined;
+        if (!win32.failed(adapter.?.lpVtbl.*.GetDesc.?(adapter.?, &adesc))) {
+            self.adapter_len = narrow(&self.adapter_name, &adesc.Description);
+        }
 
         var output: ?*c.IDXGIOutput = null;
         if (win32.failed(adapter.?.lpVtbl.*.EnumOutputs.?(adapter.?, self.output_index, &output))) return Error.NoOutput;
@@ -138,6 +167,7 @@ pub const Duplicator = struct {
 
         var desc: c.DXGI_OUTPUT_DESC = undefined;
         if (win32.failed(output.?.lpVtbl.*.GetDesc.?(output.?, &desc))) return Error.NoOutput;
+        self.output_len = narrow(&self.output_name, &desc.DeviceName);
         self.width = @intCast(desc.DesktopCoordinates.right - desc.DesktopCoordinates.left);
         self.height = @intCast(desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top);
 
@@ -375,6 +405,19 @@ pub const Capturer = struct {
         return switch (self.which) {
             .dxgi => |d| .{ .width = d.width, .height = d.height },
             .gdi => |g| g.area,
+        };
+    }
+
+    /// Снимать только область (#30): GDI умеет и делает, DXGI отдаёт весь
+    /// выход всегда. Возвращает, стал ли кадр самой областью — тогда его
+    /// не режут, а берут с нуля.
+    pub fn focus(self: *Capturer, area: Rect) bool {
+        return switch (self.which) {
+            .dxgi => false,
+            .gdi => |*g| blk: {
+                g.focus(area) catch break :blk false;
+                break :blk true;
+            },
         };
     }
 

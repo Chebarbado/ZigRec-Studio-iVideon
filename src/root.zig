@@ -31,6 +31,7 @@ pub const keyframes = @import("file/keyframes.zig");
 pub const takes = @import("edit/takes.zig");
 pub const export_mp4 = @import("file/export.zig");
 pub const pan = @import("capture/pan.zig");
+pub const stimulus = @import("capture/stimulus.zig");
 pub const events = @import("file/events.zig");
 pub const event_tap = @import("capture/event_tap.zig");
 pub const cursor_paint = @import("capture/cursor_paint.zig");

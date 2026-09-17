@@ -272,6 +272,15 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem Замер себя (#30): две секунды 1080p60 — стенд должен отработать и
+rem оставить строку таблицы; числа смотрят глазами в .check\bench.md.
+echo [check] замер для сравнения
+"zig-out\bin\zigrec.exe" bench-run 2 60 ".check\bench.mp4"
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: замер не отработал
+  exit /b 1
+)
+
 rem Часы плеера (#23): время идёт по отданным в колонки отсчётам.
 echo [check] самопроверка часов плеера
 "zig-out\bin\zigrec.exe" clock-smoke
