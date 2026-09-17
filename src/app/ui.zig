@@ -33,6 +33,7 @@ const mcp = @import("mcp.zig");
 const settings_mod = @import("settings.zig");
 const paths = @import("paths.zig");
 const recent_mod = @import("recent.zig");
+const events_mod = @import("../file/events.zig");
 const hotkey_mod = @import("hotkey.zig");
 const tray_menu = @import("tray_menu.zig");
 const listen = @import("listen.zig");
@@ -2497,6 +2498,14 @@ fn serveCall(call: *control.Call) void {
                 if (req.monitor) |n| app.settings.monitor = n;
             }
             if (req.fps) |n| app.settings.fps = n;
+            // Курсор: в кадр или только в слой (#92) — та же галочка, что
+            // у человека, чтобы окно и просьба не спорили.
+            if (req.cursor) |cur| {
+                const burn = cur == .burn;
+                app.settings.cursor = burn;
+                app.settings.clicks = burn;
+                _ = c.SendMessageW(app.chk_cursor, c.BM_SETCHECK, if (burn) 1 else 0, 0);
+            }
             app.sound_on = req.sound;
             _ = c.SendMessageW(app.chk_sound, c.BM_SETCHECK, if (req.sound) 1 else 0, 0);
             setGainEnabled(req.sound);
@@ -2551,9 +2560,64 @@ fn serveCall(call: *control.Call) void {
                 p.frames,
                 @as(f64, @floatFromInt(p.elapsed_ns)) / @as(f64, std.time.ns_per_s),
             }) catch {};
+            w.print(", курсор: {s}", .{if (app.settings.cursor) "в кадре и в слое событий" else "только в слое событий"}) catch {};
             if (p.state != .idle) {
                 w.print(", пишется в {s}", .{app.last_path[0..app.last_path_len]}) catch {};
+            } else if (app.last_path_len > 0) {
+                var side_buf: [1024]u8 = undefined;
+                const side = events_mod.sidecarPath(&side_buf, app.last_path[0..app.last_path_len]);
+                w.print(", последняя запись {s}, слой событий {s}", .{
+                    app.last_path[0..app.last_path_len],
+                    if (recent_mod.onDisk(side)) side else "не найден",
+                }) catch {};
             }
+            call.say(w.buffered());
+        },
+        .events => |ask| {
+            if (app.last_path_len == 0) {
+                call.failed = true;
+                call.say("записи ещё не было: события брать неоткуда");
+                return;
+            }
+            var side_buf: [1024]u8 = undefined;
+            const side = events_mod.sidecarPath(&side_buf, app.last_path[0..app.last_path_len]);
+            var threaded: std.Io.Threaded = .init(app.allocator, .{});
+            defer threaded.deinit();
+            const data = std.Io.Dir.cwd().readFileAlloc(threaded.io(), side, app.allocator, .limited(1 << 26)) catch {
+                call.failed = true;
+                var msg: [1200]u8 = undefined;
+                call.say(std.fmt.bufPrint(&msg, "слой событий не читается: {s}", .{side}) catch "слой событий не читается");
+                return;
+            };
+            defer app.allocator.free(data);
+            var layer = events_mod.read(app.allocator, data) catch |err| {
+                call.failed = true;
+                var msg: [200]u8 = undefined;
+                call.say(std.fmt.bufPrint(&msg, "слой событий испорчен: {s}", .{@errorName(err)}) catch "слой событий испорчен");
+                return;
+            };
+            defer layer.deinit(app.allocator);
+            const from_ns: u64 = @intFromFloat(@max(ask.from_s, 0) * @as(f64, std.time.ns_per_s));
+            const to_ns: u64 = if (ask.to_s > 0) @intFromFloat(ask.to_s * @as(f64, std.time.ns_per_s)) else std.math.maxInt(u64);
+            var shown: u32 = 0;
+            var total: usize = 0;
+            for (layer.list()) |e| {
+                if (e.at_ns < from_ns or e.at_ns > to_ns) continue;
+                total += 1;
+                if (shown >= ask.limit) continue;
+                shown += 1;
+                const secs = @as(f64, @floatFromInt(e.at_ns)) / @as(f64, std.time.ns_per_s);
+                switch (e.kind) {
+                    .area => w.print("{d:.3} область {d},{d} {d}x{d}\n", .{ secs, e.x, e.y, e.w, e.h }) catch {},
+                    .move => w.print("{d:.3} курсор {d},{d}\n", .{ secs, e.x, e.y }) catch {},
+                    .down => w.print("{d:.3} нажата {c} в {d},{d}\n", .{ secs, e.button.letter(), e.x, e.y }) catch {},
+                    .up => w.print("{d:.3} отпущена {c} в {d},{d}\n", .{ secs, e.button.letter(), e.x, e.y }) catch {},
+                    .wheel => w.print("{d:.3} колесо {d} в {d},{d}\n", .{ secs, e.w, e.x, e.y }) catch {},
+                    .key => w.print("{d:.3} клавиша {d}\n", .{ secs, e.w }) catch {},
+                    .focus => w.print("{d:.3} окно «{s}»\n", .{ secs, e.text() }) catch {},
+                }
+            }
+            w.print("событий {d}, показано {d}; файл {s}", .{ total, shown, side }) catch {};
             call.say(w.buffered());
         },
         .monitors => {

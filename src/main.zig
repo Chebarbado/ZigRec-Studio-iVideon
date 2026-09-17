@@ -4025,6 +4025,18 @@ fn mcpSmoke(allocator: std.mem.Allocator, w: anytype, port: u32) !u8 {
             .expect = "точке",
         },
         .{
+            // Слой событий в MCP (#92): инструмент есть в списке, а до
+            // первой записи честно говорит, что брать неоткуда.
+            .what = "события последней записи без записи",
+            .line = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"recording_events\",\"arguments\":{\"from\":0,\"to\":5}}}",
+            .expect = "записи ещё не было",
+        },
+        .{
+            .what = "инструмент событий в списке",
+            .line = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/list\"}",
+            .expect = "recording_events",
+        },
+        .{
             .what = "неизвестный инструмент",
             .line = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"полетели\"}}",
             .expect = "-32601",

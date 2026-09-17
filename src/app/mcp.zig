@@ -21,6 +21,18 @@ pub const server_name = "zigrec";
 /// Что попросили сделать. Разбор отделён от исполнения: разобрать просьбу
 /// можно и проверить тестами, а исполнить её умеет только тот, у кого есть
 /// экран и кодировщик.
+/// Куда писать курсор (#92): в кадр (и в слой, слой пишется всегда)
+/// или только в слой событий.
+pub const Cursor = enum { burn, layer };
+
+/// События последней записи из слоя: отрезок в секундах, не больше `limit`.
+pub const EventsAsk = struct {
+    from_s: f64 = 0,
+    /// Ноль — до конца.
+    to_s: f64 = 0,
+    limit: u32 = 200,
+};
+
 pub const Request = union(enum) {
     /// Рукопожатие.
     initialize,
@@ -38,6 +50,8 @@ pub const Request = union(enum) {
     monitors,
     /// Какие есть окна.
     windows,
+    /// События последней записи из слоя (#92).
+    events: EventsAsk,
 
     pub const Start = struct {
         /// Что снимать: весь монитор, прямоугольник или окно по заголовку.
@@ -51,6 +65,9 @@ pub const Request = union(enum) {
         separate: bool = false,
         /// Область едет за курсором (#29); только с area.
         follow: bool = false,
+        /// Курсор в кадр или только в слой (#92); без параметра — как
+        /// галочка в окне.
+        cursor: ?Cursor = null,
         fps: ?u32 = null,
     };
 };
@@ -188,6 +205,10 @@ fn parseValue(root: std.json.Value) Parsed {
             if (a.get("follow")) |v| if (v == .bool) {
                 start.follow = v.bool;
             };
+            if (a.get("cursor")) |v| if (v == .string) {
+                if (std.mem.eql(u8, v.string, "burn")) start.cursor = .burn;
+                if (std.mem.eql(u8, v.string, "layer")) start.cursor = .layer;
+            };
             if (a.get("separate")) |v| if (v == .bool) {
                 start.separate = v.bool;
             };
@@ -220,6 +241,18 @@ fn parseValue(root: std.json.Value) Parsed {
         out.request = .windows;
         return out;
     }
+    if (std.mem.eql(u8, name, tool_events)) {
+        var ask = EventsAsk{};
+        if (args) |a| {
+            if (a.get("from")) |v| ask.from_s = number(v) orelse 0;
+            if (a.get("to")) |v| ask.to_s = number(v) orelse 0;
+            if (a.get("limit")) |v| if (v == .integer and v.integer > 0) {
+                ask.limit = @intCast(@min(v.integer, 10_000));
+            };
+        }
+        out.request = .{ .events = ask };
+        return out;
+    }
     return .{ .id = out.id, .fault = .method_not_found };
 }
 
@@ -228,6 +261,16 @@ pub const tool_stop = "stop_recording";
 pub const tool_status = "recording_status";
 pub const tool_monitors = "list_monitors";
 pub const tool_windows = "list_windows";
+pub const tool_events = "recording_events";
+
+/// Число из JSON: клиенты шлют секунды и как 1, и как 1.5.
+fn number(v: std.json.Value) ?f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => null,
+    };
+}
 
 /// Описание инструментов для клиента.
 ///
@@ -245,6 +288,7 @@ pub const tools_json =
     \\   "system":{"type":"boolean","description":"Писать ли системный звук — то, что идёт в колонки; сводится с микрофоном в одну дорожку"},
     \\   "separate":{"type":"boolean","description":"Микрофон и колонки — двумя дорожками в файле, а не одной сведённой"},
     \\   "follow":{"type":"boolean","description":"Область записи едет за курсором (только вместе с area)"},
+    \\   "cursor":{"type":"string","enum":["burn","layer"],"description":"burn — курсор впечатывается в кадр (слой событий пишется всегда), layer — только слой; без параметра — как галочка «Курсор и клики» в окне"},
     \\   "fps":{"type":"integer","description":"Кадров в секунду"}}}},
     \\{"name":"stop_recording",
     \\ "description":"Остановить запись и вернуть путь к готовому файлу mp4.",
@@ -257,7 +301,13 @@ pub const tools_json =
     \\ "inputSchema":{"type":"object","properties":{}}},
     \\{"name":"list_windows",
     \\ "description":"Какие есть видимые окна с заголовками.",
-    \\ "inputSchema":{"type":"object","properties":{}}}
+    \\ "inputSchema":{"type":"object","properties":{}}},
+    \\{"name":"recording_events",
+    \\ "description":"События последней записи из слоя рядом с ней: движения и клики мыши, клавиши, смена окна, область записи — со временем в секундах.",
+    \\ "inputSchema":{"type":"object","properties":{
+    \\   "from":{"type":"number","description":"С какой секунды записи"},
+    \\   "to":{"type":"number","description":"По какую секунду; 0 или нет — до конца"},
+    \\   "limit":{"type":"integer","description":"Не больше стольких событий (по умолчанию 200)"}}}}
     \\]
 ;
 
@@ -528,7 +578,7 @@ test "ответ рукопожатия — годный JSON с версией 
     try std.testing.expectEqualStrings("0.1.19.0", result.get("serverInfo").?.object.get("version").?.string);
 }
 
-test "список инструментов — годный JSON, и в нём все пять" {
+test "список инструментов — годный JSON, и в нём все шесть" {
     var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try writeToolList(&w, .{ .number = 2 });
@@ -536,7 +586,7 @@ test "список инструментов — годный JSON, и в нём 
     const back = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, w.buffered(), .{});
     defer back.deinit();
     const list = back.value.object.get("result").?.object.get("tools").?.array;
-    try std.testing.expectEqual(@as(usize, 5), list.items.len);
+    try std.testing.expectEqual(@as(usize, 6), list.items.len);
     // У каждого инструмента должно быть человеческое описание: его читает
     // модель, и от него зависит, вызовет она нужное или нет.
     for (list.items) |item| {
@@ -591,4 +641,29 @@ test "просьба записать системный звук разбира
     try std.testing.expect(start.system);
     // Просили только колонки — микрофон не включается сам.
     try std.testing.expect(!start.sound);
+}
+
+test "start понимает cursor, а recording_events — отрезок и предел" {
+    const a = std.testing.allocator;
+    var s = parse(a,
+        \\{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"start_recording","arguments":{"cursor":"layer"}}}
+    );
+    defer s.deinit();
+    try std.testing.expectEqual(Cursor.layer, s.result.request.?.start.cursor.?);
+
+    var e = parse(a,
+        \\{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"recording_events","arguments":{"from":1.5,"to":4,"limit":7}}}
+    );
+    defer e.deinit();
+    const ask = e.result.request.?.events;
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), ask.from_s, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 4), ask.to_s, 0.001);
+    try std.testing.expectEqual(@as(u32, 7), ask.limit);
+
+    // Без аргументов — с начала до конца, двести штук.
+    var bare = parse(a,
+        \\{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"recording_events"}}
+    );
+    defer bare.deinit();
+    try std.testing.expectEqual(@as(u32, 200), bare.result.request.?.events.limit);
 }
