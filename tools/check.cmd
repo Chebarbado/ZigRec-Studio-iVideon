@@ -185,6 +185,28 @@ if defined FFMPEG (
     echo [check] ПРОВАЛ: ключевые кадры разошлись с ffmpeg
     exit /b 1
   )
+  rem Экспорт (#27): gate.mp4 (восемь ключевых, список правок) — клип с ключевого кадра без перекодирования
+  rem и клип не с ключевого с перекодированием; ffmpeg раскодирует оба без ошибок.
+  echo [check] самопроверка экспорта
+  "zig-out\bin\zigrec.exe" export-smoke ".check\gate.mp4" ".check\export_pass.mp4"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: экспорт без перекодирования
+    exit /b 1
+  )
+  "zig-out\bin\zigrec.exe" export-smoke ".check\gate.mp4" ".check\export_re.mp4" --offkey
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: экспорт с перекодированием
+    exit /b 1
+  )
+  "%FFMPEG%" -v error -i ".check\export_pass.mp4" -f null - > ".check\export_errors.txt" 2>&1
+  "%FFMPEG%" -v error -i ".check\export_re.mp4" -f null - >> ".check\export_errors.txt" 2>&1
+  rem Пустой файл ошибок — ноль байт. Проверяем размер прямо в теле for:
+  rem переменная, выставленная внутри скобок, до конца блока не видна.
+  for %%A in (".check\export_errors.txt") do if not "%%~zA"=="0" (
+    echo [check] ПРОВАЛ: ffmpeg нашёл ошибки в экспортированных файлах
+    type ".check\export_errors.txt"
+    exit /b 1
+  )
 )
 
 rem Часы плеера (#23): время идёт по отданным в колонки отсчётам.

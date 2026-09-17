@@ -43,6 +43,9 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec export-smoke ИСХОДНИК.mp4 ВЫХОД.mp4 [--offkey]
+    \\        самопроверка экспорта: клип с ключевого кадра — без перекодирования,
+    \\        с --offkey — с перекодированием; длина и кадры сверяются нашим читателем
     \\  zigrec keyframes-smoke ФАЙЛ.mp4 СПИСОК.txt
     \\        самопроверка ключевых кадров: наш список против I-кадров ffmpeg
     \\  zigrec clock-smoke
@@ -329,6 +332,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "export-smoke")) {
+        if (args.len < 4) {
+            try w.writeAll("нужны исходник mp4 и выходной файл\n");
+            code = 2;
+        } else {
+            code = try exportSmoke(arena, w, args[2], args[3], args.len > 4 and eq(args[4], "--offkey"));
+        }
     } else if (eq(cmd, "keyframes-smoke")) {
         if (args.len < 4) {
             try w.writeAll("нужны путь к mp4 и файл со списком I-кадров от ffmpeg\n");
@@ -3255,6 +3265,106 @@ fn micCheck(w: anytype, seconds: u32) !u8 {
         return 1;
     }
     try w.print("[mic] СЛЫШНО: звук был в {d} замерах из {d}\n", .{ loud, i });
+    return 0;
+}
+
+/// Самопроверка экспорта (#27): проект из одного исходника — клип со
+/// второго ключевого кадра до конца, положенный в ноль. Без --offkey
+/// начало на ключевом — ждём путь без перекодирования; с --offkey начало
+/// сдвинуто на полсекунды — ждём перекодирование. Длину и кадры готового
+/// файла сверяем нашим читателем; ffmpeg раскодирует его в check.cmd.
+fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, out_path: []const u8, off_key: bool) !u8 {
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const keys = zigrec.keyframes.read(io, allocator, src_path) catch |err| {
+        try w.print("[export] ПРОВАЛ: ключевые кадры исходника не прочитались: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(keys);
+    if (keys.len < 2) {
+        try w.print("[export] ПРОВАЛ: в исходнике {d} ключевых кадров, нужно хотя бы два\n", .{keys.len});
+        return 1;
+    }
+    const info = try zigrec.media.read(io, allocator, src_path);
+
+    const project = try allocator.create(zigrec.timeline.Project);
+    defer allocator.destroy(project);
+    project.* = .{};
+    const src = try project.addSource(src_path, info.duration_ns);
+    const vt = try project.addTrack(.video, "видео");
+    const at = try project.addTrack(.audio, "звук");
+    const shift: u64 = if (off_key) 500 * std.time.ns_per_ms else 0;
+    const in_ns: u64 = keys[1] + shift;
+    if (in_ns >= info.duration_ns) {
+        try w.writeAll("[export] ПРОВАЛ: второй ключевой кадр за концом файла\n");
+        return 1;
+    }
+    const len_ns = info.duration_ns - in_ns;
+    try project.place(vt, src, 0, len_ns);
+    project.tracks[vt].clips[0].in_ns = in_ns;
+    try project.place(at, src, 0, len_ns);
+    project.tracks[at].clips[0].in_ns = in_ns;
+
+    var audio = zigrec.audio_read.read(allocator, src_path) catch zigrec.audio_read.Audio{};
+    defer audio.deinit(allocator);
+    const sources = [_]zigrec.mixdown.SourceAudio{.{ .rate = audio.rate, .samples = audio.samples }};
+
+    const key_lists = [_][]const u64{keys};
+    const decided = zigrec.export_mp4.plan(project, &key_lists);
+    const want: zigrec.export_mp4.Mode = if (off_key) .reencode else .passthrough;
+    try w.print("[export] план: {s}, клипов {d}, не с ключевого {d}\n", .{ decided.mode.label(), decided.clips, decided.off_key });
+    if (decided.mode != want) {
+        try w.print("[export] ПРОВАЛ: ждали путь «{s}»\n", .{want.label()});
+        return 1;
+    }
+
+    const started = zigrec.win32.nowNs();
+    const summary = zigrec.export_mp4.run(allocator, project, &key_lists, if (audio.samples.len > 0) &sources else &.{}, out_path) catch |err| {
+        try w.print("[export] ПРОВАЛ: экспорт не удался: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    const took_ms = (zigrec.win32.nowNs() - started) / std.time.ns_per_ms;
+    try w.print("[export] готово за {d} мс: {d} кадров, {d} мс, звук {d} отсчётов\n", .{
+        took_ms,
+        summary.frames,
+        summary.duration_ns / std.time.ns_per_ms,
+        summary.audio_samples,
+    });
+
+    // Готовый файл — нашим читателем: длина сходится с клипом до кадра-двух.
+    const back = zigrec.media.read(io, allocator, out_path) catch |err| {
+        try w.print("[export] ПРОВАЛ: готовый файл не читается: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    // Длину берём по звуковой дорожке: она равна клипу до отсчёта. У видео
+    // в заголовке дорожки писатель прибавляет задержку перестановки кадров
+    // (до секунды при B-кадрах) — ffmpeg и плееры считают по отсчётам и
+    // показывают ровно клип; наш читатель берёт заголовок. Видео проверяем
+    // только снизу: не короче клипа больше чем на кадры.
+    var audio_ms: u64 = 0;
+    var video_ms: u64 = 0;
+    for (back.list()) |t| {
+        if (t.fps > 0) video_ms = t.duration_ns / std.time.ns_per_ms else audio_ms = t.duration_ns / std.time.ns_per_ms;
+    }
+    const want_ms = len_ns / std.time.ns_per_ms;
+    const got_ms = if (audio_ms > 0) audio_ms else video_ms;
+    try w.print("[export] длина: клип {d} мс, звук {d} мс, видео по заголовку {d} мс, дорожек {d}\n", .{ want_ms, audio_ms, video_ms, back.count });
+    const gap = if (got_ms > want_ms) got_ms - want_ms else want_ms - got_ms;
+    if (gap > 150) {
+        try w.writeAll("[export] ПРОВАЛ: длина звука разошлась с клипом больше чем на 150 мс\n");
+        return 1;
+    }
+    if (video_ms + 150 < want_ms) {
+        try w.writeAll("[export] ПРОВАЛ: видео короче клипа\n");
+        return 1;
+    }
+    if (summary.frames == 0) {
+        try w.writeAll("[export] ПРОВАЛ: ни одного кадра не записано\n");
+        return 1;
+    }
+    try w.print("[export] ЭКСПОРТ {s} ПРОХОДИТ\n", .{if (off_key) "С ПЕРЕКОДИРОВАНИЕМ" else "БЕЗ ПЕРЕКОДИРОВАНИЯ"});
     return 0;
 }
 

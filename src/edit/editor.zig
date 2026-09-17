@@ -27,6 +27,7 @@ const player_mod = @import("../file/player.zig");
 const frames = @import("../file/frames.zig");
 const keyframes = @import("../file/keyframes.zig");
 const takes_mod = @import("takes.zig");
+const export_mod = @import("../file/export.zig");
 const clock_play = @import("../sound/clock_play.zig");
 const play = @import("../sound/play.zig");
 const stepping = @import("stepping.zig");
@@ -59,6 +60,7 @@ const id_menu_save_as = 304;
 const id_menu_save_bundle = 305;
 const id_menu_close = 303;
 const id_menu_mixdown = 306;
+const id_menu_export = 319;
 const id_menu_marks = 310;
 const id_menu_takes = 318;
 /// Номера строк в списках недавних. Два ряда подряд, по одному на список.
@@ -2725,6 +2727,65 @@ fn saveMarksPanel() void {
     _ = settings_mod.save(&prefs, dir);
 }
 
+/// Экспорт проекта в mp4 (#27): без перекодирования, если все клипы
+/// с ключевых кадров одного файла, иначе — с перекодированием.
+fn exportToMp4() void {
+    if (export_mod.videoTrack(ed.project) == null) {
+        ed.say("экспортировать нечего: на видеодорожках пусто");
+        refresh();
+        return;
+    }
+
+    var path: [1024]u16 = @splat(0);
+    const default = ui.wide("экспорт.mp4");
+    @memcpy(path[0..default.len], default);
+    var ofn = std.mem.zeroes(c.OPENFILENAMEW);
+    ofn.lStructSize = @sizeOf(c.OPENFILENAMEW);
+    ofn.hwndOwner = ed.hwnd;
+    ofn.lpstrFile = &path;
+    ofn.nMaxFile = path.len;
+    ofn.lpstrFilter = ui.wide("Видео MP4\x00*.mp4\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrDefExt = ui.wide("mp4");
+    ofn.lpstrTitle = ui.wide("Экспорт в mp4");
+    ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_NOCHANGEDIR;
+    if (c.GetSaveFileNameW(&ofn) == 0) return;
+    var utf8: [1024]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&path, 0)) catch {
+        ed.say("путь не переводится: экспортируйте в другое место");
+        refresh();
+        return;
+    };
+    exportTo(utf8[0..len]);
+}
+
+fn exportTo(where: []const u8) void {
+    if (ed.playing) togglePlay();
+    loadAudio();
+    var keys: [timeline.max_sources][]const u64 = undefined;
+    for (&keys, 0..) |*k, i| k.* = ed.keys[i];
+    const decided = export_mod.plan(ed.project, &keys);
+    var note: [200]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&note, "экспорт {s}: {d} клип(ов)… окно подождёт", .{ decided.mode.label(), decided.clips }) catch "экспорт…");
+    _ = c.UpdateWindow(ed.hwnd);
+
+    const n = ed.project.sourceList().len;
+    const summary = export_mod.run(ed.allocator, ed.project, &keys, ed.audio_mix[0..n], where) catch |err| {
+        var buf: [300]u8 = undefined;
+        ed.say(std.fmt.bufPrint(&buf, "экспорт не удался: {s}", .{@errorName(err)}) catch "экспорт не удался");
+        refresh();
+        return;
+    };
+    var buf: [320]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "экспорт готов {s}: {d} кадров, {d:.1} с, звук {d:.1} с — {s}", .{
+        summary.mode.label(),
+        summary.frames,
+        @as(f64, @floatFromInt(summary.duration_ns)) / @as(f64, std.time.ns_per_s),
+        @as(f64, @floatFromInt(summary.audio_samples)) / 48_000.0,
+        std.fs.path.basename(where),
+    }) catch "экспорт готов");
+    refresh();
+}
+
 /// Свести звук проекта в один WAV.
 ///
 /// Здесь нарисованная кривая громкости впервые становится слышной: до этого
@@ -4159,6 +4220,7 @@ fn buildMenu(hwnd: c.HWND) void {
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_bundle, ui.wide("Собрать всё в один файл…"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_mixdown, ui.wide("Свести звук в WAV…"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_export, ui.wide("Экспорт в mp4…\tCtrl+E"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(
         file_menu,
@@ -4280,6 +4342,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_save_as => saveProjectAs(),
                 id_menu_save_bundle => saveProjectBundle(),
                 id_menu_mixdown => mixdownToWav(),
+                id_menu_export => exportToMp4(),
                 id_menu_marks => toggleMarksPanel(),
                 id_menu_takes => toggleTakesPanel(),
                 id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
@@ -4395,6 +4458,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 // M — «метка»: ставится там, где стоит указатель.
                 'M' => if (ctrl) toggleMarksPanel() else addMarkAtPlayhead(),
                 'D' => if (ctrl) toggleTakesPanel(),
+                'E' => if (ctrl) exportToMp4(),
                 // Прыжок по меткам: их и ставят затем, чтобы пройти подряд.
                 c.VK_OEM_4 => stepToMark(false),
                 c.VK_OEM_6 => stepToMark(true),
