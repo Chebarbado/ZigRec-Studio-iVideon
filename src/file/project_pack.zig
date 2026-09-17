@@ -126,7 +126,7 @@ pub fn write(
 
     var text: [256 * 1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
-    try project_file.write(project, &w);
+    try project_file.write(project, &w, "");
     try archive.add(project_entry, w.buffered(), .deflate);
 
     var name_buf: [512]u8 = undefined;
@@ -198,7 +198,7 @@ pub fn readMarkup(
 
     const markup = (try zip.find(allocator, window, project_entry)) orelse return Error.NoProject;
     defer allocator.free(markup);
-    try project_file.read(project, markup);
+    try project_file.read(project, markup, "");
     return out;
 }
 

@@ -25,6 +25,7 @@ const project_file = @import("../file/project_file.zig");
 const pack = @import("../file/project_pack.zig");
 const player_mod = @import("../file/player.zig");
 const frames = @import("../file/frames.zig");
+const keyframes = @import("../file/keyframes.zig");
 const clock_play = @import("../sound/clock_play.zig");
 const play = @import("../sound/play.zig");
 const stepping = @import("stepping.zig");
@@ -216,6 +217,9 @@ const Editor = struct {
     play_expect_ns: u64 = 0,
     /// Длительность кадра каждого исходника — для шага стрелками.
     frame_ns: [timeline.max_sources]u64 = @splat(0),
+    /// Ключевые кадры каждого исходника (#24): к ним липнет указатель,
+    /// по ним ходит K, они рисуются рисками на клипе.
+    keys: [timeline.max_sources][]u64 = @splat(&.{}),
 
     /// Дорожка, с которой работают: её переименовывает F2.
     cur_track: usize = 0,
@@ -903,6 +907,7 @@ fn drawClips(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, wid
 
         const rect = c.RECT{ .left = left, .top = top + 4, .right = right, .bottom = top + view_mod.lane_h - 4 };
         solid(dc, rect, if (track.muted) col_muted else body);
+        if (track.kind == .video and !track.muted) drawKeyTicks(dc, clip, rect);
 
         const selected = ed.has_selection and ed.sel_track == track_index and ed.sel_clip == i;
         const frame_color = if (selected) col_selected else edge;
@@ -1188,6 +1193,101 @@ fn frameNsOf(info: *const media.Info) u64 {
     return 0;
 }
 
+// ------------------------------------------------------ ключевые кадры (#24)
+
+/// Ключевые кадры файла; без них (звук, не mp4) — пустой список.
+fn loadKeys(path: []const u8) []u64 {
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    return keyframes.read(threaded.io(), ed.allocator, path) catch &.{};
+}
+
+fn replaceKeys(index: usize, made: []u64) void {
+    if (index >= ed.keys.len) return;
+    if (ed.keys[index].len > 0) ed.allocator.free(ed.keys[index]);
+    ed.keys[index] = made;
+}
+
+fn dropKeys() void {
+    for (&ed.keys) |*k| {
+        if (k.len > 0) ed.allocator.free(k.*);
+        k.* = &.{};
+    }
+}
+
+/// Ключевые кадры клипа под моментом дорожки: время в файле и список.
+const ClipKeys = struct { clip: timeline.Clip, keys: []const u64 };
+
+fn keysUnder(when_ns: u64) ?ClipKeys {
+    for (ed.project.trackList()) |track| {
+        if (track.kind != .video or track.muted) continue;
+        const index = track.clipAt(when_ns) orelse continue;
+        const clip = track.clips[index];
+        if (clip.source >= ed.keys.len or ed.keys[clip.source].len == 0) return null;
+        return .{ .clip = clip, .keys = ed.keys[clip.source] };
+    }
+    return null;
+}
+
+/// Прилипнуть к ключевому кадру, если он не дальше шести точек экрана.
+///
+/// Резать по ключевому — дёшево (#27), и человек хочет попадать в него
+/// мышью, а не искать с точностью до кадра. Дальше шести точек — не трогаем:
+/// иначе указатель нельзя поставить между ними.
+fn snapToKey(when_ns: u64) u64 {
+    const found = keysUnder(when_ns) orelse return when_ns;
+    const inside = found.clip.in_ns + (when_ns -| found.clip.at_ns);
+    const within = 6 * ed.view.ns_per_px;
+    const key = keyframes.nearest(found.keys, inside, within) orelse return when_ns;
+    if (key < found.clip.in_ns or key > found.clip.in_ns + found.clip.len_ns) return when_ns;
+    return found.clip.at_ns + (key - found.clip.in_ns);
+}
+
+/// K — к следующему ключевому кадру, Shift+K — к предыдущему.
+fn stepToKey(forward: bool) void {
+    if (ed.playing) togglePlay();
+    const found = keysUnder(ed.playhead_ns) orelse {
+        ed.say("под указателем нет видео с ключевыми кадрами");
+        refresh();
+        return;
+    };
+    const inside = found.clip.in_ns + (ed.playhead_ns -| found.clip.at_ns);
+    const key = keyframes.step(found.keys, inside, forward) orelse {
+        ed.say(if (forward) "дальше ключевых кадров нет" else "раньше ключевых кадров нет");
+        refresh();
+        return;
+    };
+    if (key < found.clip.in_ns or key > found.clip.in_ns + found.clip.len_ns) {
+        ed.say("следующий ключевой кадр — за краем клипа");
+        refresh();
+        return;
+    }
+    ed.playhead_ns = found.clip.at_ns + (key - found.clip.in_ns);
+    var buf: [64]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "ключевой кадр · {d:.2} с в файле", .{
+        @as(f64, @floatFromInt(key)) / @as(f64, std.time.ns_per_s),
+    }) catch "ключевой кадр");
+    showFrame();
+    refreshStage();
+}
+
+/// Риски ключевых кадров по верхнему краю клипа — когда между ними
+/// есть хоть три точки, иначе они сливаются в полосу.
+fn drawKeyTicks(dc: c.HDC, clip: timeline.Clip, rect: c.RECT) void {
+    if (clip.source >= ed.keys.len) return;
+    const keys = ed.keys[clip.source];
+    if (keys.len < 2) return;
+    const spacing_ns = keys[1] - keys[0];
+    if (spacing_ns / @max(ed.view.ns_per_px, 1) < 3) return;
+    for (keys) |k| {
+        if (k < clip.in_ns) continue;
+        if (k > clip.in_ns + clip.len_ns) break;
+        const x = ed.view.timeToX(clip.at_ns + (k - clip.in_ns));
+        if (x < rect.left or x >= rect.right) continue;
+        line(dc, x, rect.top, x, rect.top + 5, 0x00202020, 1);
+    }
+}
+
 /// Такт воспроизведения.
 ///
 /// Время идёт по часам, а не по числу тактов: такт может задержаться,
@@ -1359,7 +1459,7 @@ fn loadProject(path: []const u8) void {
     };
     defer ed.allocator.free(data);
 
-    project_file.read(ed.project, data) catch |err| {
+    project_file.read(ed.project, data, std.fs.path.dirname(path) orelse "") catch |err| {
         ed.say(project_file.explain(err));
         refresh();
         return;
@@ -1379,6 +1479,7 @@ fn loadProject(path: []const u8) void {
         };
         replaceWave(i, made);
         ed.frame_ns[i] = frameNsFor(src.fullPath());
+        replaceKeys(i, loadKeys(src.fullPath()));
     }
     dropAudio();
 
@@ -2585,7 +2686,7 @@ fn writeProjectTo(where: []const u8, bundle: pack.Bundle) void {
 
     var text: [64 * 1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
-    project_file.write(ed.project, &w) catch {
+    project_file.write(ed.project, &w, std.fs.path.dirname(where) orelse "") catch {
         ed.say("проект не помещается в файл: слишком много клипов");
         refresh();
         return;
@@ -2722,6 +2823,7 @@ fn afterProjectLoaded(made_by: []const u8, inside: usize, unpacked: bool) void {
         replaceWave(i, .{});
         startWave(src.fullPath(), @intCast(i));
         ed.frame_ns[i] = frameNsFor(src.fullPath());
+        replaceKeys(i, loadKeys(src.fullPath()));
         if (!recent_mod.onDisk(src.fullPath())) missing += 1;
     }
     dropAudio();
@@ -2787,6 +2889,7 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
 
     const source = ed.project.addSource(path, info.duration_ns) catch |err| return complain(err);
     if (source < ed.frame_ns.len) ed.frame_ns[source] = frameNsOf(&info);
+    if (source < ed.keys.len) replaceKeys(source, loadKeys(path));
     // Исходников стало больше — звук для игры читается заново.
     dropAudio();
 
@@ -2989,7 +3092,7 @@ fn onDown(x: i32, y: i32) void {
     const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
     switch (hit.target) {
         .ruler => {
-            ed.playhead_ns = hit.when_ns;
+            ed.playhead_ns = snapToKey(hit.when_ns);
             ed.drag = .playhead;
             showFrame();
             _ = c.SetCapture(ed.hwnd);
@@ -3239,7 +3342,7 @@ fn onMove(x: i32, y: i32) void {
     const when = ed.view.xToTime(x);
     switch (ed.drag) {
         .playhead => {
-            ed.playhead_ns = when;
+            ed.playhead_ns = snapToKey(when);
             showFrame();
             refresh();
         },
@@ -4079,6 +4182,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 c.VK_RIGHT => stepFrame(1, ctrl),
                 c.VK_PRIOR => pageView(false),
                 c.VK_NEXT => pageView(true),
+                'K' => stepToKey(c.GetKeyState(c.VK_SHIFT) >= 0),
                 c.VK_F2 => if (ed.sel_mark) |i| startMarkRename(i) else startRename(ed.cur_track),
                 // M — «метка»: ставится там, где стоит указатель.
                 'M' => if (ctrl) toggleMarksPanel() else addMarkAtPlayhead(),
@@ -4105,6 +4209,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             dropWaves();
             stopAudio();
             dropAudio();
+            dropKeys();
             c.PostQuitMessage(0);
             return 0;
         },

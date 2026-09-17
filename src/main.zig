@@ -43,6 +43,8 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec keyframes-smoke ФАЙЛ.mp4 СПИСОК.txt
+    \\        самопроверка ключевых кадров: наш список против I-кадров ffmpeg
     \\  zigrec clock-smoke
     \\        самопроверка часов плеера: время идёт по отданным в колонки отсчётам
     \\  zigrec devices-smoke
@@ -327,6 +329,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "keyframes-smoke")) {
+        if (args.len < 4) {
+            try w.writeAll("нужны путь к mp4 и файл со списком I-кадров от ffmpeg\n");
+            code = 2;
+        } else {
+            code = try keyframesSmoke(arena, w, args[2], args[3]);
+        }
     } else if (eq(cmd, "clock-smoke")) {
         code = try clockSmoke(w);
     } else if (eq(cmd, "devices-smoke")) {
@@ -3001,7 +3010,7 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
 
     var text: [64 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&text);
-    try pf.write(made, &writer);
+    try pf.write(made, &writer, "");
     const bytes = writer.buffered();
 
     std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
@@ -3019,7 +3028,7 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
     const back = try allocator.create(timeline.Project);
     defer allocator.destroy(back);
     back.* = .{};
-    pf.read(back, back_data) catch |err| {
+    pf.read(back, back_data, "") catch |err| {
         try w.print("[project] ПРОВАЛ: {s}\n", .{pf.explain(err)});
         return 1;
     };
@@ -3236,6 +3245,56 @@ fn micCheck(w: anytype, seconds: u32) !u8 {
         return 1;
     }
     try w.print("[mic] СЛЫШНО: звук был в {d} замерах из {d}\n", .{ loud, i });
+    return 0;
+}
+
+/// Самопроверка ключевых кадров (#24): наш разбор `stss`/`stts` против
+/// списка I-кадров, который ffmpeg напечатал через `showinfo`
+/// (`pts_time:` в каждой строке). Число должно сойтись, время — до кадра.
+fn keyframesSmoke(allocator: std.mem.Allocator, w: anytype, path: []const u8, list_path: []const u8) !u8 {
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const ours = zigrec.keyframes.read(io, allocator, path) catch |err| {
+        try w.print("[keys] ПРОВАЛ: ключевые кадры не прочитались: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(ours);
+
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, list_path, allocator, .limited(1 << 24));
+    defer allocator.free(text);
+    var theirs: std.ArrayList(u64) = .empty;
+    defer theirs.deinit(allocator);
+    var rest = text;
+    while (std.mem.indexOf(u8, rest, "pts_time:")) |at| {
+        rest = rest[at + 9 ..];
+        const end = std.mem.indexOfAny(u8, rest, " \r\n") orelse rest.len;
+        const secs = std.fmt.parseFloat(f64, rest[0..end]) catch continue;
+        try theirs.append(allocator, @intFromFloat(secs * @as(f64, std.time.ns_per_s)));
+    }
+
+    try w.print("[keys] у нас {d} ключевых, у ffmpeg {d} I-кадров\n", .{ ours.len, theirs.items.len });
+    if (ours.len == 0 or ours.len != theirs.items.len) {
+        try w.writeAll("[keys] ПРОВАЛ: число ключевых кадров не сошлось\n");
+        return 1;
+    }
+    var worst: u64 = 0;
+    for (ours, theirs.items, 0..) |a, b, i| {
+        const gap = if (a > b) a - b else b - a;
+        if (gap > worst) worst = gap;
+        // Первые расхождения — словами: по ним видно, сдвиг это или сбой.
+        if (gap > 40 * std.time.ns_per_ms and i < 8) {
+            try w.print("[keys]   #{d}: у нас {d} мс, у ffmpeg {d} мс\n", .{ i, a / std.time.ns_per_ms, b / std.time.ns_per_ms });
+        }
+    }
+    try w.print("[keys] самое большое расхождение времени: {d} мс\n", .{worst / std.time.ns_per_ms});
+    // Кадр при 30 к/с — 33 мс; ffmpeg округляет pts до микросекунд.
+    if (worst > 40 * std.time.ns_per_ms) {
+        try w.writeAll("[keys] ПРОВАЛ: время ключевых кадров разошлось больше чем на кадр\n");
+        return 1;
+    }
+    try w.writeAll("[keys] КЛЮЧЕВЫЕ КАДРЫ СОШЛИСЬ С FFMPEG\n");
     return 0;
 }
 

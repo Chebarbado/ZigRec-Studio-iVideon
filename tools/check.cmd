@@ -169,6 +169,24 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem Ключевые кадры (#24): наш разбор таблиц mp4 против I-кадров ffmpeg.
+rem Файл — своя запись на шесть секунд: сверять есть что, а не один
+rem кадр в начале. Код 3 у записи (пропуски кадров) здесь не важен.
+if defined FFMPEG (
+  echo [check] самопроверка ключевых кадров
+  "zig-out\bin\zigrec.exe" record ".check\keys.mp4" --sec 6 --fps 30 --gop 30 --area 0,0,320,200 > nul
+  rem Новый ffmpeg не знает -vsync, старый — -fps_mode: пробуем оба,
+  rem иначе список I-кадров пуст и стенд врёт про расхождение.
+  "%FFMPEG%" -i ".check\keys.mp4" -vf "select='eq(pict_type,I)',showinfo" -fps_mode passthrough -f null - > ".check\iframes.txt" 2>&1
+  %SystemRoot%\System32\find.exe "pts_time" ".check\iframes.txt" > nul
+  if errorlevel 1 "%FFMPEG%" -i ".check\keys.mp4" -vf "select='eq(pict_type,I)',showinfo" -vsync 0 -f null - > ".check\iframes.txt" 2>&1
+  "zig-out\bin\zigrec.exe" keyframes-smoke ".check\keys.mp4" ".check\iframes.txt"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: ключевые кадры разошлись с ffmpeg
+    exit /b 1
+  )
+)
+
 rem Часы плеера (#23): время идёт по отданным в колонки отсчётам.
 echo [check] самопроверка часов плеера
 "zig-out\bin\zigrec.exe" clock-smoke

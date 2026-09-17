@@ -36,11 +36,15 @@ pub const Error = error{
 ///
 /// Пишем в переданный писатель, а не в файл: так запись проверяется тестом
 /// в память, без диска и без временных файлов.
-pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
+/// `base_dir` — папка файла проекта: исходники из неё и из её подпапок
+/// пишутся относительно (#24), и проект переезжает вместе с ними.
+/// Пусто — все пути полные, как раньше.
+pub fn write(project: *const timeline.Project, w: *std.Io.Writer, base_dir: []const u8) !void {
     try w.print("{s} {d}\n", .{ magic, version });
 
     for (project.sourceList()) |src| {
-        try w.print("source {d} {s}\n", .{ src.duration_ns, src.fullPath() });
+        const shown = relativeTo(base_dir, src.fullPath()) orelse src.fullPath();
+        try w.print("source {d} {s}\n", .{ src.duration_ns, shown });
     }
 
     // Метки — до дорожек: они принадлежат всему проекту, а не дорожке,
@@ -96,7 +100,8 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
 }
 
 /// Прочитать проект из текста в уже созданный (пустой) проект.
-pub fn read(project: *timeline.Project, data: []const u8) Error!void {
+/// `base_dir` — папка файла проекта: относительные пути считаются от неё.
+pub fn read(project: *timeline.Project, data: []const u8, base_dir: []const u8) Error!void {
     var lines = std.mem.splitScalar(u8, data, '\n');
 
     const head = trim(lines.next() orelse return Error.NotProject);
@@ -124,7 +129,9 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             // Путь — весь остаток строки: в нём бывают пробелы.
             const path = parts.rest();
             if (path.len == 0) return Error.Malformed;
-            _ = project.addSource(path, duration) catch return Error.TooBig;
+            var full_buf: [520]u8 = undefined;
+            const full = resolve(&full_buf, base_dir, path);
+            _ = project.addSource(full, duration) catch return Error.TooBig;
             continue;
         }
 
@@ -304,6 +311,82 @@ fn withTracks() !*timeline.Project {
     return p;
 }
 
+/// Путь относительно папки, если он в ней или в её подпапках.
+///
+/// Сравниваем без учёта регистра и вида косой черты: Windows их не
+/// различает, а человек пишет как придётся.
+pub fn relativeTo(base_dir: []const u8, path: []const u8) ?[]const u8 {
+    if (base_dir.len == 0 or path.len <= base_dir.len) return null;
+    var i: usize = 0;
+    while (i < base_dir.len) : (i += 1) {
+        if (!sameChar(base_dir[i], path[i])) return null;
+    }
+    const sep = path[base_dir.len];
+    if (sep != '\\' and sep != '/') {
+        // Папка кончается косой чертой — тогда остаток начинается сразу.
+        const last = base_dir[base_dir.len - 1];
+        if (last != '\\' and last != '/') return null;
+        return path[base_dir.len..];
+    }
+    if (base_dir.len + 1 >= path.len) return null;
+    return path[base_dir.len + 1 ..];
+}
+
+fn sameChar(a: u8, b: u8) bool {
+    if ((a == '\\' or a == '/') and (b == '\\' or b == '/')) return true;
+    return std.ascii.toLower(a) == std.ascii.toLower(b);
+}
+
+/// Полный ли это путь: с диска или с сетевого корня.
+pub fn isAbsolute(path: []const u8) bool {
+    if (path.len >= 2 and path[1] == ':') return true;
+    if (path.len >= 2 and (path[0] == '\\' or path[0] == '/') and (path[1] == '\\' or path[1] == '/')) return true;
+    return false;
+}
+
+/// Полный путь из записанного: относительный — от папки проекта.
+pub fn resolve(buf: []u8, base_dir: []const u8, path: []const u8) []const u8 {
+    if (isAbsolute(path) or base_dir.len == 0) return path;
+    const last = base_dir[base_dir.len - 1];
+    const sep: []const u8 = if (last == '\\' or last == '/') "" else "\\";
+    return std.fmt.bufPrint(buf, "{s}{s}{s}", .{ base_dir, sep, path }) catch path;
+}
+
+test "путь в папке проекта пишется относительно, чужой — полностью" {
+    try std.testing.expectEqualStrings("запись.mp4", relativeTo("D:\\видео", "D:\\видео\\запись.mp4").?);
+    // Регистр латиницы и вид косой черты не важны. Регистр кириллицы —
+    // важен: складывать русские буквы без таблиц Unicode мы не берёмся,
+    // а Windows сам сохраняет имя папки так, как её создали.
+    try std.testing.expectEqualStrings("дубли\\1.wav", relativeTo("d:/Видео", "D:\\Видео\\дубли\\1.wav").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), relativeTo("D:\\видео", "E:\\видео\\запись.mp4"));
+    // «D:\видео2» — не подпапка «D:\видео».
+    try std.testing.expectEqual(@as(?[]const u8, null), relativeTo("D:\\видео", "D:\\видео2\\a.mp4"));
+    try std.testing.expectEqual(@as(?[]const u8, null), relativeTo("", "D:\\видео\\a.mp4"));
+}
+
+test "относительный путь собирается от папки проекта, полный остаётся" {
+    var buf: [520]u8 = undefined;
+    try std.testing.expectEqualStrings("D:\\видео\\запись.mp4", resolve(&buf, "D:\\видео", "запись.mp4"));
+    try std.testing.expectEqualStrings("D:\\видео\\запись.mp4", resolve(&buf, "D:\\видео\\", "запись.mp4"));
+    try std.testing.expectEqualStrings("E:\\x.mp4", resolve(&buf, "D:\\видео", "E:\\x.mp4"));
+    try std.testing.expectEqualStrings("\\\\сервер\\x.mp4", resolve(&buf, "D:\\видео", "\\\\сервер\\x.mp4"));
+    // Без папки проекта относительное остаётся как есть — честнее, чем гадать.
+    try std.testing.expectEqualStrings("запись.mp4", resolve(&buf, "", "запись.mp4"));
+}
+
+test "проект с относительным путём переезжает вместе с папкой" {
+    var p = timeline.Project{};
+    _ = try p.addSource("D:\\видео\\запись.mp4", 10 * std.time.ns_per_s);
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&p, &w, "D:\\видео");
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "source 10000000000 запись.mp4") != null);
+
+    var moved = timeline.Project{};
+    try read(&moved, w.buffered(), "E:\\архив");
+    try std.testing.expectEqualStrings("E:\\архив\\запись.mp4", moved.sourceList()[0].fullPath());
+}
+
 test "записанное читается обратно до последнего числа" {
     const original = try makeProject();
     defer std.testing.allocator.destroy(original);
@@ -318,11 +401,11 @@ test "записанное читается обратно до последне
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(original, &w);
+    try write(original, &w, "");
 
     const copy = try makeProject();
     defer std.testing.allocator.destroy(copy);
-    try read(copy, w.buffered());
+    try read(copy, w.buffered(), "");
 
     try std.testing.expectEqual(original.source_count, copy.source_count);
     try std.testing.expectEqualStrings(
@@ -356,11 +439,11 @@ test "путь с пробелами не теряет хвост" {
 
     var buf: [1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
     try std.testing.expectEqualStrings(
         "C:\\Мои видео\\запись за 15 сентября.mp4",
         back.sourceList()[0].fullPath(),
@@ -374,11 +457,11 @@ test "имя дорожки с пробелами тоже цело" {
 
     var buf: [1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
     try std.testing.expectEqualStrings("Микрофон ведущего", back.trackList()[0].title());
 }
 
@@ -391,11 +474,11 @@ test "открытый проект — начало, а не продолжен
 
     var buf: [1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
     // Отменять только что открытое некуда: иначе первая же отмена стёрла бы
     // всё содержимое проекта.
     try std.testing.expect(!back.canUndo());
@@ -406,24 +489,24 @@ test "чужой файл и обрубок кончаются словами, �
     const p = try makeProject();
     defer std.testing.allocator.destroy(p);
 
-    try std.testing.expectError(Error.NotProject, read(p, "это просто текст"));
-    try std.testing.expectError(Error.NotProject, read(p, ""));
+    try std.testing.expectError(Error.NotProject, read(p, "это просто текст", ""));
+    try std.testing.expectError(Error.NotProject, read(p, "", ""));
     try std.testing.expectError(
         Error.Malformed,
-        read(p, "zigrec-project 1\ntrack video 0 Видео\nclip 0 не-число 1 2\n"),
+        read(p, "zigrec-project 1\ntrack video 0 Видео\nclip 0 не-число 1 2\n", ""),
     );
 }
 
 test "файл от будущей версии отклоняется, а не читается наполовину" {
     const p = try makeProject();
     defer std.testing.allocator.destroy(p);
-    try std.testing.expectError(Error.TooNew, read(p, "zigrec-project 99\n"));
+    try std.testing.expectError(Error.TooNew, read(p, "zigrec-project 99\n", ""));
 }
 
 test "клип без дорожки — это повреждённый файл" {
     const p = try makeProject();
     defer std.testing.allocator.destroy(p);
-    try std.testing.expectError(Error.Malformed, read(p, "zigrec-project 1\nclip 0 0 1 2\n"));
+    try std.testing.expectError(Error.Malformed, read(p, "zigrec-project 1\nclip 0 0 1 2\n", ""));
 }
 
 test "незнакомая строка пропускается, а не роняет чтение" {
@@ -436,7 +519,7 @@ test "незнакомая строка пропускается, а не рон
         \\track video 0 Видео
         \\clip 0 0 1000 0
         \\
-    );
+    , "");
     try std.testing.expectEqual(@as(usize, 1), p.track_count);
     try std.testing.expectEqual(@as(usize, 1), p.trackList()[0].list().len);
 }
@@ -444,7 +527,7 @@ test "незнакомая строка пропускается, а не рон
 test "перевод строки в стиле Windows не мешает" {
     const p = try makeProject();
     defer std.testing.allocator.destroy(p);
-    try read(p, "zigrec-project 1\r\nsource 1000 а.mp4\r\ntrack audio 1 Звук\r\n");
+    try read(p, "zigrec-project 1\r\nsource 1000 а.mp4\r\ntrack audio 1 Звук\r\n", "");
     try std.testing.expectEqual(@as(usize, 1), p.source_count);
     try std.testing.expect(p.trackList()[0].muted);
     try std.testing.expectEqualStrings("Звук", p.trackList()[0].title());
@@ -468,11 +551,11 @@ test "связка переживает запись и чтение" {
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
 
     const got = back.tracks[0].clips[0].link;
     try std.testing.expect(got != 0);
@@ -493,7 +576,7 @@ test "файл прежнего поколения без номера связ�
         \\track video 0 Видео
         \\clip 0 0 1000000000 0
         \\
-    );
+    , "");
     try std.testing.expectEqual(@as(u16, 0), p.tracks[0].clips[0].link);
 }
 
@@ -508,11 +591,11 @@ test "громкость дорожки, клипа и кривая пережи
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
 
     try std.testing.expectEqual(@as(i16, -75), back.tracks[1].gain_db10);
     try std.testing.expectEqual(@as(i16, -35), back.tracks[1].clips[0].gain_db10);
@@ -533,11 +616,11 @@ test "выключенная кривая пишется выключенной 
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
 
     try std.testing.expect(!back.tracks[1].curve_on);
     try std.testing.expectEqual(@as(usize, 1), back.tracks[1].curve.count);
@@ -551,7 +634,7 @@ test "проект без громкости не пишет о ней лишн�
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "gain ") == null);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "point ") == null);
 }
@@ -565,7 +648,7 @@ test "файл прежнего поколения без громкости ч�
         \\track audio 0 Микрофон
         \\clip 0 0 1000000000 0 0
         \\
-    );
+    , "");
     try std.testing.expectEqual(@as(i16, 0), p.tracks[0].gain_db10);
     try std.testing.expectEqual(@as(i16, 0), p.tracks[0].clips[0].gain_db10);
     try std.testing.expect(!p.tracks[0].curve_on);
@@ -584,7 +667,7 @@ test "громкость из файла прижимается к предел�
         \\gain 9990 1
         \\clip 0 0 1000000000 0 0 -9990
         \\
-    );
+    , "");
     try std.testing.expectEqual(timeline.Volume.max_db10, p.tracks[0].gain_db10);
     try std.testing.expectEqual(timeline.Volume.min_db10, p.tracks[0].clips[0].gain_db10);
 }
@@ -597,11 +680,11 @@ test "метки переживают запись и чтение" {
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
 
     try std.testing.expectEqual(@as(usize, 2), back.marks.count);
     try std.testing.expectEqual(@as(u64, 2 * sec), back.marks.items[0].at_ns);
@@ -620,11 +703,11 @@ test "имя метки с пробелами читается целиком" {
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
     try std.testing.expectEqualStrings("три слова тут", back.marks.items[0].title());
 }
 
@@ -639,7 +722,7 @@ test "незнакомый цвет метки не мешает открыть 
         \\mark 1000000000 бирюзовый важное место
         \\track video 0 Видео
         \\
-    );
+    , "");
     try std.testing.expectEqual(@as(usize, 1), p.marks.count);
     try std.testing.expectEqual(timeline.Marks.Colour.yellow, p.marks.items[0].colour);
     try std.testing.expectEqualStrings("важное место", p.marks.items[0].title());
@@ -651,7 +734,7 @@ test "проект без меток не пишет о них лишних ст
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "mark ") == null);
 }
 
@@ -664,11 +747,11 @@ test "комментарий метки переживает запись и ч�
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
 
     try std.testing.expectEqualStrings(
         "свет с другой стороны, микрофон ближе",
@@ -692,7 +775,7 @@ test "строка комментария без метки перед ней н
         \\source 60000000000 а.mp4
         \\track video 0 Видео
         \\
-    );
+    , "");
     try std.testing.expectEqual(@as(usize, 1), p.track_count);
     try std.testing.expectEqual(@as(usize, 0), p.marks.count);
 }
@@ -707,11 +790,11 @@ test "диапазон переживает запись и чтение" {
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
 
     try std.testing.expect(back.marks.items[0].isSpan());
     try std.testing.expectEqual(@as(u64, 5 * sec), back.marks.items[0].endsAt());
@@ -732,7 +815,7 @@ test "файл прежнего поколения без длины даёт т
         \\mark 2000000000 red вырезать
         \\track video 0 Видео
         \\
-    );
+    , "");
     try std.testing.expectEqual(@as(usize, 1), p.marks.count);
     try std.testing.expect(!p.marks.items[0].isSpan());
 }
@@ -747,11 +830,11 @@ test "значки метки, дорожки и клипа переживают
 
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
 
     const back = try makeProject();
     defer std.testing.allocator.destroy(back);
-    try read(back, w.buffered());
+    try read(back, w.buffered(), "");
 
     try std.testing.expectEqual(timeline.Marks.Icons.Icon.scissors, back.marks.items[0].icon);
     try std.testing.expectEqual(timeline.Marks.Icons.Icon.mic, back.tracks[1].icon);
@@ -765,7 +848,7 @@ test "проект без значков не пишет о них лишних 
     defer std.testing.allocator.destroy(p);
     var buf: [8192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try write(p, &w);
+    try write(p, &w, "");
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "icon ") == null);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "tricon ") == null);
 }
@@ -783,7 +866,7 @@ test "незнакомый значок не мешает открыть про�
         \\track video 0 Видео
         \\tricon динозавр
         \\
-    );
+    , "");
     try std.testing.expectEqual(@as(usize, 1), p.marks.count);
     try std.testing.expectEqual(timeline.Marks.Icons.Icon.none, p.marks.items[0].icon);
     try std.testing.expectEqual(timeline.Marks.Icons.Icon.none, p.tracks[0].icon);
