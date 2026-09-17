@@ -25,6 +25,9 @@ const project_file = @import("../file/project_file.zig");
 const pack = @import("../file/project_pack.zig");
 const player_mod = @import("../file/player.zig");
 const frames = @import("../file/frames.zig");
+const clock_play = @import("../sound/clock_play.zig");
+const play = @import("../sound/play.zig");
+const stepping = @import("stepping.zig");
 const settings_mod = @import("../app/settings.zig");
 const paths = @import("../app/paths.zig");
 const recent_mod = @import("../app/recent.zig");
@@ -195,6 +198,19 @@ const Editor = struct {
     /// Когда был предыдущий такт — чтобы время шло по часам, а не по тактам.
     last_tick_ns: u64 = 0,
     btn_play: c.HWND = null,
+    /// Звук при воспроизведении (#23): часы — по отданным в колонки отсчётам.
+    audio_play: clock_play.Player = .{},
+    audio_srcs: [timeline.max_sources]audio_read.Audio = @splat(.{}),
+    audio_mix: [timeline.max_sources]mixdown.SourceAudio = @splat(.{}),
+    audio_loaded: bool = false,
+    /// Снимок проекта для потока звука: окно правит свой, поток читает этот.
+    play_project: ?*timeline.Project = null,
+    /// Где стоял указатель, когда звук пошёл, и где мы его оставили
+    /// на прошлом такте: если он сдвинулся мышью — звук начинает заново.
+    play_anchor_ns: u64 = 0,
+    play_expect_ns: u64 = 0,
+    /// Длительность кадра каждого исходника — для шага стрелками.
+    frame_ns: [timeline.max_sources]u64 = @splat(0),
 
     /// Дорожка, с которой работают: её переименовывает F2.
     cur_track: usize = 0,
@@ -1052,14 +1068,117 @@ fn togglePlay() void {
         ed.last_tick_ns = win32.nowNs();
         _ = c.SetTimer(ed.hwnd, timer_play, 33, null);
         ui.setText(ed.btn_play, "⏸ Пауза");
-        ed.say("играю");
+        // Сперва звук: он читает исходники и говорит своё, а «играю» —
+        // последнее слово.
+        startAudio();
+        if (ed.audio_play.isRunning()) ed.say("играю");
     } else {
         _ = c.KillTimer(ed.hwnd, timer_play);
+        stopAudio();
         ui.setText(ed.btn_play, "▶ Играть");
         ed.say("пауза");
     }
     showFrame();
     refresh();
+}
+
+// ------------------------------------------------------ звук при игре (#23)
+
+/// Прочитать звук исходников для воспроизведения. Один раз: дальше
+/// лежит в памяти, пока исходники не изменятся.
+fn loadAudio() void {
+    if (ed.audio_loaded) return;
+    ed.say("читаю звук исходников…");
+    _ = c.UpdateWindow(ed.hwnd);
+    for (ed.project.sourceList(), 0..) |src, i| {
+        if (i >= ed.audio_srcs.len) break;
+        ed.audio_srcs[i].deinit(ed.allocator);
+        // Исходник без звука — обычное дело; он просто молчит.
+        ed.audio_srcs[i] = audio_read.read(ed.allocator, src.fullPath()) catch .{};
+        ed.audio_mix[i] = .{ .rate = ed.audio_srcs[i].rate, .samples = ed.audio_srcs[i].samples };
+    }
+    ed.audio_loaded = true;
+}
+
+/// Забыть прочитанный звук: исходники изменились или окно закрывается.
+fn dropAudio() void {
+    for (&ed.audio_srcs, 0..) |*a, i| {
+        a.deinit(ed.allocator);
+        ed.audio_mix[i] = .{};
+    }
+    ed.audio_loaded = false;
+}
+
+/// Поток звука просит следующий кусок: смешиваем снимок проекта.
+fn feedMix(userdata: ?*anyopaque, from: usize, out: []i16) void {
+    _ = userdata;
+    const project = ed.play_project orelse return;
+    mixdown.mixAt(project, mic_rate, ed.audio_mix[0..project.sourceList().len], from, out);
+}
+
+/// Пустить звук с указателя. Без колонок или без звука — играем молча,
+/// по часам процессора, как раньше; об этом говорим.
+fn startAudio() void {
+    loadAudio();
+    if (ed.play_project == null) {
+        ed.play_project = ed.allocator.create(timeline.Project) catch null;
+    }
+    const snapshot = ed.play_project orelse return;
+    snapshot.* = ed.project.*;
+    ed.play_anchor_ns = ed.playhead_ns;
+    ed.play_expect_ns = ed.playhead_ns;
+    const total = mixdown.totalSamples(snapshot, mic_rate);
+    const from = mixdown.nsToSamples(ed.playhead_ns, mic_rate);
+    ed.audio_play.start(mic_rate, from, total, feedMix, null) catch |err| {
+        var buf: [200]u8 = undefined;
+        ed.say(std.fmt.bufPrint(&buf, "играю без звука: {s}", .{play.explain(err)}) catch "играю без звука");
+    };
+}
+
+fn stopAudio() void {
+    ed.audio_play.stop();
+}
+
+/// Шаг стрелками: на кадр исходника под указателем, с Ctrl — на секунду.
+fn stepFrame(dir: i32, by_second: bool) void {
+    if (ed.playing) togglePlay();
+    const total = ed.project.durationNs();
+    if (by_second) {
+        const s: u64 = std.time.ns_per_s;
+        ed.playhead_ns = if (dir < 0) ed.playhead_ns -| s else @min(ed.playhead_ns + s, total);
+    } else if (clipUnderPlayhead()) |found| {
+        const clip = found.clip;
+        const frame_ns = if (clip.source < ed.frame_ns.len and ed.frame_ns[clip.source] > 0)
+            ed.frame_ns[clip.source]
+        else
+            stepping.default_frame_ns;
+        const inside = clip.in_ns + (ed.playhead_ns -| clip.at_ns);
+        const next = stepping.step(inside, frame_ns, dir);
+        // Из файла — обратно на дорожку; за край клипа не выходим.
+        ed.playhead_ns = @min(clip.at_ns + (next -| clip.in_ns), @min(clip.endsAt(), total));
+        var buf: [64]u8 = undefined;
+        ed.say(stepping.label(&buf, next, frame_ns));
+    } else {
+        const f = stepping.default_frame_ns;
+        ed.playhead_ns = if (dir < 0) ed.playhead_ns -| f else @min(ed.playhead_ns + f, total);
+    }
+    showFrame();
+    refreshStage();
+}
+
+/// Длительность кадра файла — по его частоте, быстрым чтением заголовка.
+fn frameNsFor(path: []const u8) u64 {
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    const info = media.read(threaded.io(), ed.allocator, path) catch return 0;
+    return frameNsOf(&info);
+}
+
+fn frameNsOf(info: *const media.Info) u64 {
+    for (info.list()) |t| {
+        if (t.fps > 0) return stepping.frameNs(t.fps);
+    }
+    return 0;
 }
 
 /// Такт воспроизведения.
@@ -1072,12 +1191,26 @@ fn onPlayTick() void {
     const step = now -| ed.last_tick_ns;
     ed.last_tick_ns = now;
 
-    ed.playhead_ns += step;
+    // Указатель сдвинули мышью во время игры — звук начинает с нового места.
+    if (ed.audio_play.isRunning() and ed.playhead_ns != ed.play_expect_ns) {
+        stopAudio();
+        startAudio();
+    }
+    if (ed.audio_play.isRunning()) {
+        // Часы — звуковые: кадры идут за тем, что слышно.
+        ed.playhead_ns = ed.play_anchor_ns + ed.audio_play.playedNs();
+    } else if (ed.audio_play.hasEnded()) {
+        ed.playhead_ns = ed.project.durationNs();
+    } else {
+        ed.playhead_ns += step;
+    }
+    ed.play_expect_ns = ed.playhead_ns;
     const total = ed.project.durationNs();
     if (ed.playhead_ns >= total) {
         ed.playhead_ns = total;
         ed.playing = false;
         _ = c.KillTimer(ed.hwnd, timer_play);
+        stopAudio();
         ui.setText(ed.btn_play, "▶ Играть");
         ed.say("конец");
     }
@@ -1238,7 +1371,9 @@ fn loadProject(path: []const u8) void {
             break :blk waveform.Envelope{};
         };
         replaceWave(i, made);
+        ed.frame_ns[i] = frameNsFor(src.fullPath());
     }
+    dropAudio();
 
     ed.has_selection = false;
     ed.playhead_ns = 0;
@@ -1497,6 +1632,7 @@ fn stopRecordTo() void {
         refresh();
         return;
     };
+    dropAudio();
     ed.project.place(track_index, source, ed.rec_at_ns, len_ns) catch {
         ed.say("клипов на дорожке больше не помещается");
         refresh();
@@ -2549,8 +2685,10 @@ fn afterProjectLoaded(made_by: []const u8, inside: usize, unpacked: bool) void {
         if (i >= ed.waves.len) break;
         replaceWave(i, .{});
         startWave(src.fullPath(), @intCast(i));
+        ed.frame_ns[i] = frameNsFor(src.fullPath());
         if (!recent_mod.onDisk(src.fullPath())) missing += 1;
     }
+    dropAudio();
 
     var buf: [400]u8 = undefined;
     ed.say(std.fmt.bufPrint(&buf, "открыт проект: дорожек {d}{s}{s}{s}", .{
@@ -2612,6 +2750,9 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
     };
 
     const source = ed.project.addSource(path, info.duration_ns) catch |err| return complain(err);
+    if (source < ed.frame_ns.len) ed.frame_ns[source] = frameNsOf(&info);
+    // Исходников стало больше — звук для игры читается заново.
+    dropAudio();
 
     // Волну считаем в стороне, а не здесь. Декодирование звука часового
     // файла занимает секунды, и всё это время окно стояло бы столбом
@@ -3852,6 +3993,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                     refresh();
                 },
                 c.VK_SPACE => togglePlay(),
+                c.VK_LEFT => stepFrame(-1, ctrl),
+                c.VK_RIGHT => stepFrame(1, ctrl),
                 c.VK_F2 => if (ed.sel_mark) |i| startMarkRename(i) else startRename(ed.cur_track),
                 // M — «метка»: ставится там, где стоит указатель.
                 'M' => if (ctrl) toggleMarksPanel() else addMarkAtPlayhead(),
@@ -3876,6 +4019,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             if (ed.name_box != null) finishRename(false);
             ed.frames.stop();
             dropWaves();
+            stopAudio();
+            dropAudio();
             c.PostQuitMessage(0);
             return 0;
         },

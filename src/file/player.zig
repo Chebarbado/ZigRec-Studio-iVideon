@@ -105,8 +105,12 @@ pub const Player = struct {
 
         // Просим Media Foundation самой привести картинку к RGB32.
         var attrs: ?*c.IMFAttributes = null;
-        if (win32.failed(c.MFCreateAttributes(&attrs, 2))) return Error.NoVideo;
+        if (win32.failed(c.MFCreateAttributes(&attrs, 3))) return Error.NoVideo;
         defer _ = attrs.?.lpVtbl.*.Release.?(@ptrCast(attrs.?));
+        // Аппаратный декодер, если он есть (#23): тот же флаг, что у
+        // кодировщика. Без него H.264 на часовом файле раскодируется
+        // процессором, и перемотка ждёт дольше.
+        _ = attrs.?.lpVtbl.*.SetUINT32.?(attrs.?, &c.MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1);
         // Две настройки видеообработки взаимно исключают друг друга: если
         // поставить обе, читатель не создастся вовсе. Проверено дорого —
         // кадр перестал приходить с ошибкой «нет картинки».

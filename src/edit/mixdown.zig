@@ -58,8 +58,25 @@ pub fn mix(
     sources: []const SourceAudio,
     out: []i16,
 ) void {
+    mixAt(project, rate, sources, 0, out);
+}
+
+/// Свести только окно: отсчёты с `offset` по `offset + out.len`.
+///
+/// Плеер (#23) смешивает на ходу кусками, а не весь проект заранее:
+/// часовой проект целиком — это сотни мегабайт и секунды ожидания перед
+/// первым звуком. Окно из середины должно совпадать с тем же куском
+/// полной смеси — это проверяет тест.
+pub fn mixAt(
+    project: *const timeline.Project,
+    rate: u32,
+    sources: []const SourceAudio,
+    offset: usize,
+    out: []i16,
+) void {
     @memset(out, 0);
     if (rate == 0 or out.len == 0) return;
+    const window_end = offset + out.len;
 
     for (project.trackList(), 0..) |track, track_index| {
         _ = track_index;
@@ -73,8 +90,8 @@ pub fn mix(
             const src = sources[clip.source];
             if (src.samples.len == 0 or src.rate == 0) continue;
 
-            const from = @min(nsToSamples(clip.at_ns, rate), out.len);
-            const to = @min(nsToSamples(clip.endsAt(), rate), out.len);
+            const from = std.math.clamp(nsToSamples(clip.at_ns, rate), offset, window_end);
+            const to = std.math.clamp(nsToSamples(clip.endsAt(), rate), offset, window_end);
 
             var at = from;
             while (at < to) {
@@ -90,7 +107,7 @@ pub fn mix(
                     // Прямая между границами блока: ступенька слышна щелчком.
                     const part = @as(f32, @floatFromInt(k - at)) / @as(f32, @floatFromInt(span));
                     const gain = g0 + (g1 - g0) * part;
-                    out[k] = addClamped(out[k], src.samples[src_at] * gain);
+                    out[k - offset] = addClamped(out[k - offset], src.samples[src_at] * gain);
                 }
                 at = block_end;
             }
@@ -367,4 +384,31 @@ test "чужой номер исходника не роняет сведени�
     // Исходников не передали вовсе.
     mix(p, test_rate, &.{}, out);
     try testing.expectEqual(@as(f32, 0), peakBetween(out, 0, 4));
+}
+
+test "окно из середины совпадает с тем же куском полной смеси" {
+    const tone_a = try steady(testing.allocator, 2.0, 0.5);
+    defer testing.allocator.free(tone_a);
+    var project = timeline.Project{};
+    _ = try project.addTrack(.audio, "Звук");
+    const src = try project.addSource("a.wav", 2 * sec);
+    try project.place(0, src, sec / 2, 2 * sec);
+    // Громкость с кривой: окно должно взять гейн по тому же времени.
+    try project.setTrackGain(0, -60);
+    const sources = [_]SourceAudio{.{ .rate = test_rate, .samples = tone_a }};
+
+    const total = totalSamples(&project, test_rate);
+    const full = try testing.allocator.alloc(i16, total);
+    defer testing.allocator.free(full);
+    mix(&project, test_rate, &sources, full);
+
+    const offset: usize = 30_000;
+    var window: [7000]i16 = undefined;
+    mixAt(&project, test_rate, &sources, offset, &window);
+    try testing.expectEqualSlices(i16, full[offset .. offset + window.len], &window);
+
+    // Окно за концом проекта — тишина, а не чтение за краем.
+    var beyond: [100]i16 = undefined;
+    mixAt(&project, test_rate, &sources, total + 10, &beyond);
+    for (beyond) |v| try testing.expectEqual(@as(i16, 0), v);
 }

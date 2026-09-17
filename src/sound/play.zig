@@ -59,131 +59,186 @@ pub fn playSamples(samples: []const i16, rate: u32) Error!void {
     return playSource(.{ .samples = .{ .data = samples, .rate = rate } }, seconds);
 }
 
-fn playSource(source: Source, seconds: f32) Error!void {
-    if (builtin.os.tag != .windows) return Error.Unsupported;
-
-    _ = c.CoInitializeEx(null, c.COINIT_MULTITHREADED);
-    defer c.CoUninitialize();
-
-    var enumerator: ?*c.IMMDeviceEnumerator = null;
-    if (win32.failed(c.CoCreateInstance(
-        &c.CLSID_MMDeviceEnumerator,
-        null,
-        c.CLSCTX_ALL,
-        &c.IID_IMMDeviceEnumerator,
-        @ptrCast(&enumerator),
-    ))) return Error.NoSpeakers;
-    defer _ = enumerator.?.lpVtbl.*.Release.?(@ptrCast(enumerator.?));
-
-    var device: ?*c.IMMDevice = null;
-    if (win32.failed(enumerator.?.lpVtbl.*.GetDefaultAudioEndpoint.?(
-        enumerator.?,
-        c.eRender,
-        c.eConsole,
-        &device,
-    ))) return Error.NoSpeakers;
-    defer _ = device.?.lpVtbl.*.Release.?(@ptrCast(device.?));
-
-    var client: ?*c.IAudioClient = null;
-    if (win32.failed(device.?.lpVtbl.*.Activate.?(
-        device.?,
-        &c.IID_IAudioClient,
-        c.CLSCTX_ALL,
-        null,
-        @ptrCast(&client),
-    ))) return Error.NoSpeakers;
-    defer _ = client.?.lpVtbl.*.Release.?(@ptrCast(client.?));
-
-    var format: [*c]c.WAVEFORMATEX = null;
-    if (win32.failed(client.?.lpVtbl.*.GetMixFormat.?(client.?, &format))) return Error.BadFormat;
-    defer c.CoTaskMemFree(format);
-
-    const rate = format.*.nSamplesPerSec;
-    const channels: usize = format.*.nChannels;
-    const is_float = format.*.wFormatTag == c.WAVE_FORMAT_IEEE_FLOAT or
-        (format.*.wFormatTag == c.WAVE_FORMAT_EXTENSIBLE and format.*.wBitsPerSample == 32);
-    if (!is_float and format.*.wBitsPerSample != 16) return Error.BadFormat;
-
-    // Буфер на полсекунды: нам не нужна малая задержка, нужна надёжность —
-    // стенд не должен заикаться оттого, что система придержала поток.
-    const buffer_duration: c.REFERENCE_TIME = 5_000_000;
-    if (win32.failed(client.?.lpVtbl.*.Initialize.?(
-        client.?,
-        c.AUDCLNT_SHAREMODE_SHARED,
-        0,
-        buffer_duration,
-        0,
-        format,
-        null,
-    ))) return Error.BadFormat;
-
-    var buffer_frames: c.UINT32 = 0;
-    if (win32.failed(client.?.lpVtbl.*.GetBufferSize.?(client.?, &buffer_frames))) return Error.Failed;
-
-    var render: ?*c.IAudioRenderClient = null;
-    if (win32.failed(client.?.lpVtbl.*.GetService.?(
-        client.?,
-        &c.IID_IAudioRenderClient,
-        @ptrCast(&render),
-    ))) return Error.Failed;
-    defer _ = render.?.lpVtbl.*.Release.?(@ptrCast(render.?));
-
-    const total: usize = @intFromFloat(seconds * @as(f32, @floatFromInt(rate)));
-    var written: usize = 0;
-
-    // Заполняем буфер до старта: иначе первые миллисекунды — тишина
-    // и щелчок, а стенд меряет как раз начало.
-    try fill(render.?, buffer_frames, &written, total, source, rate, channels, is_float);
-    if (win32.failed(client.?.lpVtbl.*.Start.?(client.?))) return Error.Failed;
-    defer _ = client.?.lpVtbl.*.Stop.?(client.?);
-
-    while (written < total) {
-        var padding: c.UINT32 = 0;
-        if (win32.failed(client.?.lpVtbl.*.GetCurrentPadding.?(client.?, &padding))) return Error.Failed;
-        const room = buffer_frames - padding;
-        if (room == 0) {
-            c.Sleep(5);
-            continue;
-        }
-        try fill(render.?, room, &written, total, source, rate, channels, is_float);
-    }
-    // Дать буферу дозвучать: остановка сразу срезала бы хвост последнего
-    // всплеска, и стенд счёл бы его короче задуманного.
-    const tail_ms: u32 = @intCast(@as(u64, buffer_frames) * 1000 / @max(rate, 1) + 50);
-    c.Sleep(tail_ms);
-}
-
-/// Положить в устройство до `frames` кадров плана, начиная с `written`.
-fn fill(
+/// Устройство вывода по умолчанию, открытое и готовое принимать отсчёты.
+///
+/// Общее для стендов и плеера редактора (#23): открыть, подать, узнать,
+/// сколько ещё лежит в буфере. Живёт в потоке, который его открыл:
+/// COM инициализируется здесь же.
+pub const Renderer = struct {
+    client: *c.IAudioClient,
     render: *c.IAudioRenderClient,
-    frames: c.UINT32,
-    written: *usize,
-    total: usize,
-    source: Source,
+    format: [*c]c.WAVEFORMATEX,
     rate: u32,
     channels: usize,
     is_float: bool,
-) Error!void {
-    const want: usize = @min(@as(usize, frames), total - written.*);
-    if (want == 0) return;
+    buffer_frames: u32,
 
-    var data: [*c]c.BYTE = undefined;
-    if (win32.failed(render.lpVtbl.*.GetBuffer.?(render, @intCast(want), &data))) return Error.Failed;
+    pub fn open() Error!Renderer {
+        if (builtin.os.tag != .windows) return Error.Unsupported;
+        _ = c.CoInitializeEx(null, c.COINIT_MULTITHREADED);
+        errdefer c.CoUninitialize();
 
-    var i: usize = 0;
-    while (i < want) : (i += 1) {
-        const v = source.sampleAt(written.* + i, rate);
-        if (is_float) {
-            const out: [*]f32 = @ptrCast(@alignCast(data));
-            for (0..channels) |ch| out[i * channels + ch] = v;
-        } else {
-            const out: [*]i16 = @ptrCast(@alignCast(data));
-            const s: i16 = @intFromFloat(std.math.clamp(v * 32767.0, -32768.0, 32767.0));
-            for (0..channels) |ch| out[i * channels + ch] = s;
-        }
+        var enumerator: ?*c.IMMDeviceEnumerator = null;
+        if (win32.failed(c.CoCreateInstance(
+            &c.CLSID_MMDeviceEnumerator,
+            null,
+            c.CLSCTX_ALL,
+            &c.IID_IMMDeviceEnumerator,
+            @ptrCast(&enumerator),
+        ))) return Error.NoSpeakers;
+        defer _ = enumerator.?.lpVtbl.*.Release.?(@ptrCast(enumerator.?));
+
+        var device: ?*c.IMMDevice = null;
+        if (win32.failed(enumerator.?.lpVtbl.*.GetDefaultAudioEndpoint.?(
+            enumerator.?,
+            c.eRender,
+            c.eConsole,
+            &device,
+        ))) return Error.NoSpeakers;
+        defer _ = device.?.lpVtbl.*.Release.?(@ptrCast(device.?));
+
+        var client: ?*c.IAudioClient = null;
+        if (win32.failed(device.?.lpVtbl.*.Activate.?(
+            device.?,
+            &c.IID_IAudioClient,
+            c.CLSCTX_ALL,
+            null,
+            @ptrCast(&client),
+        ))) return Error.NoSpeakers;
+        errdefer _ = client.?.lpVtbl.*.Release.?(@ptrCast(client.?));
+
+        var format: [*c]c.WAVEFORMATEX = null;
+        if (win32.failed(client.?.lpVtbl.*.GetMixFormat.?(client.?, &format))) return Error.BadFormat;
+        errdefer c.CoTaskMemFree(format);
+
+        const is_float = format.*.wFormatTag == c.WAVE_FORMAT_IEEE_FLOAT or
+            (format.*.wFormatTag == c.WAVE_FORMAT_EXTENSIBLE and format.*.wBitsPerSample == 32);
+        if (!is_float and format.*.wBitsPerSample != 16) return Error.BadFormat;
+
+        // Буфер на полсекунды: нам не нужна малая задержка, нужна надёжность —
+        // ни стенд, ни плеер не должны заикаться оттого, что система
+        // придержала поток.
+        const buffer_duration: c.REFERENCE_TIME = 5_000_000;
+        if (win32.failed(client.?.lpVtbl.*.Initialize.?(
+            client.?,
+            c.AUDCLNT_SHAREMODE_SHARED,
+            0,
+            buffer_duration,
+            0,
+            format,
+            null,
+        ))) return Error.BadFormat;
+
+        var buffer_frames: c.UINT32 = 0;
+        if (win32.failed(client.?.lpVtbl.*.GetBufferSize.?(client.?, &buffer_frames))) return Error.Failed;
+
+        var render: ?*c.IAudioRenderClient = null;
+        if (win32.failed(client.?.lpVtbl.*.GetService.?(
+            client.?,
+            &c.IID_IAudioRenderClient,
+            @ptrCast(&render),
+        ))) return Error.Failed;
+
+        return .{
+            .client = client.?,
+            .render = render.?,
+            .format = format,
+            .rate = format.*.nSamplesPerSec,
+            .channels = format.*.nChannels,
+            .is_float = is_float,
+            .buffer_frames = buffer_frames,
+        };
     }
-    if (win32.failed(render.lpVtbl.*.ReleaseBuffer.?(render, @intCast(want), 0))) return Error.Failed;
-    written.* += want;
+
+    pub fn close(self: *Renderer) void {
+        _ = self.render.lpVtbl.*.Release.?(self.render);
+        _ = self.client.lpVtbl.*.Release.?(self.client);
+        c.CoTaskMemFree(self.format);
+        c.CoUninitialize();
+    }
+
+    pub fn start(self: *Renderer) Error!void {
+        if (win32.failed(self.client.lpVtbl.*.Start.?(self.client))) return Error.Failed;
+    }
+
+    pub fn stop(self: *Renderer) void {
+        _ = self.client.lpVtbl.*.Stop.?(self.client);
+    }
+
+    /// Сколько кадров ещё лежит в буфере и не сыграно.
+    pub fn padding(self: *Renderer) Error!u32 {
+        var value: c.UINT32 = 0;
+        if (win32.failed(self.client.lpVtbl.*.GetCurrentPadding.?(self.client, &value))) return Error.Failed;
+        return value;
+    }
+
+    /// Сколько кадров сейчас влезет.
+    pub fn room(self: *const Renderer, padding_now: u32) usize {
+        return self.buffer_frames -| padding_now;
+    }
+
+    /// Отдать моно-отсчёты (−1…1): каждый — во все каналы. Не больше,
+    /// чем влезает.
+    pub fn writeMono(self: *Renderer, samples: []const f32) Error!void {
+        if (samples.len == 0) return;
+        var data: [*c]c.BYTE = undefined;
+        if (win32.failed(self.render.lpVtbl.*.GetBuffer.?(self.render, @intCast(samples.len), &data))) return Error.Failed;
+        for (samples, 0..) |v, i| {
+            if (self.is_float) {
+                const out: [*]f32 = @ptrCast(@alignCast(data));
+                for (0..self.channels) |ch| out[i * self.channels + ch] = v;
+            } else {
+                const out: [*]i16 = @ptrCast(@alignCast(data));
+                const s16: i16 = @intFromFloat(std.math.clamp(v * 32767.0, -32768.0, 32767.0));
+                for (0..self.channels) |ch| out[i * self.channels + ch] = s16;
+            }
+        }
+        if (win32.failed(self.render.lpVtbl.*.ReleaseBuffer.?(self.render, @intCast(samples.len), 0))) return Error.Failed;
+    }
+
+    /// Сколько ждать, чтобы буфер дозвучал: остановка сразу срезала бы хвост.
+    pub fn tailMs(self: *const Renderer) u32 {
+        return @intCast(@as(u64, self.buffer_frames) * 1000 / @max(self.rate, 1) + 50);
+    }
+};
+
+fn playSource(source: Source, seconds: f32) Error!void {
+    var out = try Renderer.open();
+    defer out.close();
+
+    const total: usize = @intFromFloat(seconds * @as(f32, @floatFromInt(out.rate)));
+    var written: usize = 0;
+    var chunk: [4096]f32 = undefined;
+
+    // Заполняем буфер до старта: иначе первые миллисекунды — тишина
+    // и щелчок, а стенд меряет как раз начало.
+    try fillFrom(&out, &chunk, &written, total, source);
+    try out.start();
+    defer out.stop();
+
+    while (written < total) {
+        const padding = try out.padding();
+        if (out.room(padding) == 0) {
+            c.Sleep(5);
+            continue;
+        }
+        try fillFrom(&out, &chunk, &written, total, source);
+    }
+    // Дать буферу дозвучать: остановка сразу срезала бы хвост последнего
+    // всплеска, и стенд счёл бы его короче задуманного.
+    c.Sleep(out.tailMs());
+}
+
+/// Положить в устройство столько, сколько влезает, начиная с `written`.
+fn fillFrom(out: *Renderer, chunk: []f32, written: *usize, total: usize, source: Source) Error!void {
+    while (written.* < total) {
+        const padding = try out.padding();
+        const want = @min(@min(out.room(padding), chunk.len), total - written.*);
+        if (want == 0) return;
+        for (chunk[0..want], 0..) |*v, i| v.* = source.sampleAt(written.* + i, out.rate);
+        try out.writeMono(chunk[0..want]);
+        written.* += want;
+    }
 }
 
 /// Объяснение словами.

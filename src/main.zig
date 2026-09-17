@@ -43,6 +43,8 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec clock-smoke
+    \\        самопроверка часов плеера: время идёт по отданным в колонки отсчётам
     \\  zigrec devices-smoke
     \\        самопроверка микрофонов: список устройств ввода с именами
     \\  zigrec probe-smoke [СЕК]
@@ -325,6 +327,8 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "clock-smoke")) {
+        code = try clockSmoke(w);
     } else if (eq(cmd, "devices-smoke")) {
         code = try devicesSmoke(w);
     } else if (eq(cmd, "probe-smoke")) {
@@ -3232,6 +3236,65 @@ fn micCheck(w: anytype, seconds: u32) !u8 {
         return 1;
     }
     try w.print("[mic] СЛЫШНО: звук был в {d} замерах из {d}\n", .{ loud, i });
+    return 0;
+}
+
+/// Источник для стенда часов: тон 440 Гц.
+fn clockTone(userdata: ?*anyopaque, from: usize, out: []i16) void {
+    _ = userdata;
+    for (out, 0..) |*v, i| {
+        const t = @as(f32, @floatFromInt(from + i)) / 48_000.0;
+        v.* = @intFromFloat(@sin(t * 440.0 * 2.0 * std.math.pi) * 8000.0);
+    }
+}
+
+/// Самопроверка часов плеера (#23): полторы секунды тона через тот же
+/// путь, что у редактора; время по отсчётам не идёт назад и к концу
+/// сходится с длиной. Без колонок — честно пропускаем.
+fn clockSmoke(w: anytype) !u8 {
+    const c = zigrec.win32.c;
+    const rate: u32 = 48_000;
+    const total: usize = rate * 3 / 2;
+    var player = zigrec.clock_play.Player{};
+    player.start(rate, 0, total, clockTone, null) catch |err| {
+        try w.print("[clock] не завёлся ({s}) — проверка пропущена\n", .{zigrec.play.explain(err)});
+        return 0;
+    };
+    c.Sleep(200);
+    if (player.failure) |err| {
+        player.stop();
+        try w.print("[clock] колонок нет ({s}) — проверка пропущена\n", .{zigrec.play.explain(err)});
+        return 0;
+    }
+
+    var last: u64 = 0;
+    var went_back = false;
+    var waited: u32 = 0;
+    while (player.isRunning() and waited < 5000) : (waited += 50) {
+        c.Sleep(50);
+        const now = player.playedNs();
+        if (now < last) went_back = true;
+        last = now;
+    }
+    player.stop();
+    const final_ms = player.playedNs() / std.time.ns_per_ms;
+    try w.print("[clock] отзвучало {d} мс при длине 1500 мс, дошли до конца: {s}\n", .{
+        final_ms,
+        if (player.hasEnded()) "да" else "нет",
+    });
+    if (went_back) {
+        try w.writeAll("[clock] ПРОВАЛ: время пошло назад\n");
+        return 1;
+    }
+    if (!player.hasEnded()) {
+        try w.writeAll("[clock] ПРОВАЛ: плеер не дошёл до конца за пять секунд\n");
+        return 1;
+    }
+    if (final_ms < 1400 or final_ms > 1600) {
+        try w.writeAll("[clock] ПРОВАЛ: часы разошлись с длиной больше чем на сто миллисекунд\n");
+        return 1;
+    }
+    try w.writeAll("[clock] ЧАСЫ ИДУТ ПО ЗВУКУ\n");
     return 0;
 }
 
