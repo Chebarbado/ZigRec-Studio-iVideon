@@ -29,6 +29,28 @@ pub const name_line_h: i32 = 24;
 /// Насколько близко к краю клипа надо ткнуть, чтобы взяться за край.
 pub const edge_grab: i32 = 6;
 
+// ------------------------------------------------------------- метки
+
+/// Насколько близко к метке надо ткнуть, чтобы взяться за неё.
+///
+/// Шире, чем за край клипа: метка — это одна вертикальная черта, и попасть
+/// в неё мышью труднее, чем в край клипа высотой в полосу.
+pub const mark_grab: i32 = 8;
+/// Высота флажка метки на линейке.
+pub const mark_flag_h: i32 = 12;
+/// Ширина флажка.
+pub const mark_flag_w: i32 = 9;
+
+/// Где нарисован флажок метки, стоящей в точке `x`.
+pub fn markFlag(x: i32) struct { left: i32, top: i32, right: i32, bottom: i32 } {
+    return .{
+        .left = x,
+        .top = ruler_h - mark_flag_h - 1,
+        .right = x + mark_flag_w,
+        .bottom = ruler_h - 1,
+    };
+}
+
 // --------------------------------------------- громкость в левой колонке
 
 /// Высота строки с ползунком громкости — самый низ левой колонки.
@@ -340,6 +362,8 @@ pub const Target = enum {
     header_curve,
     /// Кнопка записи с микрофона на эту дорожку.
     header_rec,
+    /// Метка на линейке: прыжок к ней и перетаскивание.
+    mark,
     /// Точка кривой громкости: её тянут.
     curve_point,
     /// Сама кривая мимо точек: щелчок ставит новую точку.
@@ -360,6 +384,8 @@ pub const Hit = struct {
     clip: usize = 0,
     /// Номер точки кривой — при попадании в `curve_point`.
     point: usize = 0,
+    /// Номер метки — при попадании в `mark`.
+    mark: usize = 0,
     /// Время под указателем.
     when_ns: u64 = 0,
 
@@ -376,7 +402,15 @@ pub const Hit = struct {
 /// оказывается «телом».
 pub fn hitTest(project: *const timeline.Project, view: View, x: i32, y: i32) Hit {
     if (y < ruler_h) {
-        return .{ .target = .ruler, .when_ns = view.xToTime(x) };
+        const when_here = view.xToTime(x);
+        // Метка проверяется раньше самой линейки: флажок нарисован поверх
+        // делений, и ткнуть в то, что видно сверху, должно означать
+        // попадание в него.
+        const tolerance = @as(u64, mark_grab) * view.ns_per_px;
+        if (project.marks.nearest(when_here, tolerance)) |i| {
+            return .{ .target = .mark, .mark = i, .when_ns = when_here };
+        }
+        return .{ .target = .ruler, .when_ns = when_here };
     }
     const track_index = view.trackAtY(y, project.track_count) orelse return .{};
     const lane_top = view.laneTop(track_index);
@@ -960,4 +994,41 @@ test "во включённую пустую кривую можно ткнут�
     const top = v.laneTop(1);
     const got = hitTest(p, v, v.timeToX(5 * sec), curveY(top, Volume.unity));
     try std.testing.expectEqual(Target.curve_line, got.target);
+}
+
+test "метка на линейке ловится раньше самой линейки" {
+    const p = try testProject();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(5 * sec, .red, "тут");
+
+    const v = View{ .at_ns = 0, .ns_per_px = 20 * std.time.ns_per_ms };
+    const at = v.timeToX(5 * sec);
+
+    const on_mark = hitTest(p, v, at, 5);
+    try std.testing.expectEqual(Target.mark, on_mark.target);
+    try std.testing.expectEqual(@as(usize, 0), on_mark.mark);
+
+    // Рядом с меткой — обычная линейка.
+    const beside = hitTest(p, v, at + mark_grab + 4, 5);
+    try std.testing.expectEqual(Target.ruler, beside.target);
+}
+
+test "метка не перехватывает мышь на дорожках" {
+    // Флажок нарисован на линейке; ниже неё метка — только тонкая черта,
+    // и отнимать у клипа полоску она не должна.
+    const p = try testProject();
+    defer std.testing.allocator.destroy(p);
+    try p.place(0, 0, 0, 10 * sec);
+    _ = try p.addMark(5 * sec, .red, "тут");
+
+    const v = View{ .at_ns = 0, .ns_per_px = 20 * std.time.ns_per_ms };
+    const got = hitTest(p, v, v.timeToX(5 * sec), ruler_h + 10);
+    try std.testing.expectEqual(Target.clip, got.target);
+}
+
+test "флажок метки помещается в линейку" {
+    const f = markFlag(100);
+    try std.testing.expect(f.top >= 0);
+    try std.testing.expect(f.bottom <= ruler_h);
+    try std.testing.expect(f.right > f.left);
 }

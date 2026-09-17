@@ -2320,6 +2320,11 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
     try made.split(0, 4 * std.time.ns_per_s);
     try made.setMuted(1, true);
 
+    // Метки: они принадлежат проекту, а не дорожке, и должны пережить
+    // запись вместе с цветом и подписью.
+    _ = try made.addMark(2 * std.time.ns_per_s, .red, "тут переснять");
+    _ = try made.addMark(7 * std.time.ns_per_s, .violet, "сюда заставку");
+
     try w.print("[project] собран проект: дорожек {d}, клипов {d}\n", .{
         made.track_count,
         made.trackList()[0].list().len + made.trackList()[1].list().len,
@@ -2378,6 +2383,25 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
             }
         }
     }
+
+    if (back.marks.count != made.marks.count) {
+        try w.print("[project] ПРОВАЛ: меток было {d}, стало {d}\n", .{
+            made.marks.count,
+            back.marks.count,
+        });
+        return 1;
+    }
+    for (made.marks.list(), back.marks.list()) |a, b| {
+        if (a.at_ns != b.at_ns or a.colour != b.colour or !std.mem.eql(u8, a.title(), b.title())) {
+            try w.writeAll("[project] ПРОВАЛ: метка не пережила запись целиком\n");
+            return 1;
+        }
+    }
+    try w.print("[project] метки целы: {d}, первая «{s}» ({s})\n", .{
+        back.marks.count,
+        back.marks.items[0].title(),
+        back.marks.items[0].colour.label(),
+    });
 
     try w.print("[project] прочитано обратно: дорожек {d}, пути и имена целы\n", .{back.track_count});
 

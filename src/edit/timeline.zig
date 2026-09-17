@@ -17,9 +17,12 @@
 //! сам по себе. Так делают, когда звук нарочно кладут под другую картинку.
 const std = @import("std");
 const volume = @import("../sound/volume.zig");
+const marks_mod = @import("marks.zig");
 
 /// Громкость наружу, чтобы окно не тянуло звуковой модуль отдельно.
 pub const Volume = volume;
+/// Метки наружу — по той же причине.
+pub const Marks = marks_mod;
 
 pub const TrackKind = enum {
     video,
@@ -290,6 +293,9 @@ pub const Error = error{
 const Snapshot = struct {
     tracks: [max_tracks]Track = @splat(.{}),
     track_count: usize = 0,
+    /// Метки отменяются наравне с резкой: поставленная не туда метка —
+    /// такая же правка, как сдвинутый не туда клип.
+    marks: marks_mod.Marks = .{},
 };
 
 /// Проект. **Заводится в куче, а не на стеке**: вместе с журналом отмен
@@ -303,6 +309,12 @@ pub const Project = struct {
     source_count: usize = 0,
     tracks: [max_tracks]Track = @splat(.{}),
     track_count: usize = 0,
+
+    /// Метки на времени проекта: где переснять, вырезать, вставить.
+    ///
+    /// На времени проекта, а не на клипе: подвинул клип — метка осталась
+    /// там, где поставлена. Так это работает в монтажных программах.
+    marks: marks_mod.Marks = .{},
 
     /// Откуда берутся номера связок. Ноль означает «ещё ни одной»:
     /// первый же вызов `newLink` выдаст единицу.
@@ -381,7 +393,7 @@ pub const Project = struct {
             while (i + 1 < max_history) : (i += 1) self.history[i] = self.history[i + 1];
             self.past -= 1;
         }
-        var shot = Snapshot{ .track_count = self.track_count };
+        var shot = Snapshot{ .track_count = self.track_count, .marks = self.marks };
         @memcpy(shot.tracks[0..self.track_count], self.tracks[0..self.track_count]);
         self.history[self.past] = shot;
         self.past += 1;
@@ -398,7 +410,7 @@ pub const Project = struct {
     pub fn undo(self: *Project) bool {
         if (self.past == 0) return false;
         // Текущее состояние кладём вперёд, чтобы можно было вернуть.
-        var now = Snapshot{ .track_count = self.track_count };
+        var now = Snapshot{ .track_count = self.track_count, .marks = self.marks };
         @memcpy(now.tracks[0..self.track_count], self.tracks[0..self.track_count]);
 
         // Журнал — одна лента: слева от `past` лежит прошлое, справа —
@@ -412,13 +424,14 @@ pub const Project = struct {
         self.future += 1;
 
         self.track_count = shot.track_count;
+        self.marks = shot.marks;
         @memcpy(self.tracks[0..shot.track_count], shot.tracks[0..shot.track_count]);
         return true;
     }
 
     pub fn redo(self: *Project) bool {
         if (self.future == 0) return false;
-        var now = Snapshot{ .track_count = self.track_count };
+        var now = Snapshot{ .track_count = self.track_count, .marks = self.marks };
         @memcpy(now.tracks[0..self.track_count], self.tracks[0..self.track_count]);
 
         const shot = self.history[self.past];
@@ -427,6 +440,7 @@ pub const Project = struct {
         self.future -= 1;
 
         self.track_count = shot.track_count;
+        self.marks = shot.marks;
         @memcpy(self.tracks[0..shot.track_count], shot.tracks[0..shot.track_count]);
         return true;
     }
@@ -944,6 +958,59 @@ pub const Project = struct {
         self.remember();
         const tr = try self.track(track_index);
         tr.curve.removeAt(point) catch unreachable;
+    }
+
+    // --------------------------------------------------------------- метки
+
+    /// Поставить метку. Возвращает её номер.
+    ///
+    /// Без имени — даём своё: пустая подпись выглядит недоделкой, а
+    /// придумывать имя на каждую метку человек не обязан. Их ставят
+    /// быстро, подряд, и называют потом только те, к которым возвращаются.
+    pub fn addMark(self: *Project, at_ns: u64, colour: marks_mod.Colour, name: []const u8) Error!usize {
+        // Считаем ДО снимка: меток могло не остаться, и снимок был бы
+        // потрачен на несостоявшееся действие.
+        var probe = self.marks;
+        var buf: [32]u8 = undefined;
+        const title = if (name.len > 0) name else marks_mod.defaultName(&buf, probe.count + 1);
+        const where = probe.add(at_ns, colour, title) catch return Error.TooManyClips;
+
+        self.remember();
+        self.marks = probe;
+        return where;
+    }
+
+    pub fn removeMark(self: *Project, index: usize) Error!void {
+        if (index >= self.marks.count) return Error.NoSuchThing;
+        self.remember();
+        self.marks.removeAt(index) catch unreachable;
+    }
+
+    /// Передвинуть метку. Возвращает её новый номер.
+    pub fn moveMark(self: *Project, index: usize, at_ns: u64) Error!usize {
+        if (index >= self.marks.count) return Error.NoSuchThing;
+        if (self.marks.items[index].at_ns == at_ns) return index;
+        var probe = self.marks;
+        const where = probe.moveTo(index, at_ns) catch return Error.NoSuchThing;
+        self.remember();
+        self.marks = probe;
+        return where;
+    }
+
+    pub fn renameMark(self: *Project, index: usize, name: []const u8) Error!void {
+        if (index >= self.marks.count) return Error.NoSuchThing;
+        const clean = std.mem.trim(u8, name, " ");
+        if (clean.len == 0) return;
+        if (std.mem.eql(u8, self.marks.items[index].title(), clean)) return;
+        self.remember();
+        self.marks.rename(index, clean) catch unreachable;
+    }
+
+    pub fn setMarkColour(self: *Project, index: usize, colour: marks_mod.Colour) Error!void {
+        if (index >= self.marks.count) return Error.NoSuchThing;
+        if (self.marks.items[index].colour == colour) return;
+        self.remember();
+        self.marks.setColour(index, colour) catch unreachable;
     }
 
     /// Насколько тише или громче звучит дорожка в этой точке времени.
@@ -1755,4 +1822,103 @@ test "громкость не вылезает за пределы, откуда
     try std.testing.expectEqual(volume.max_db10, p.tracks[1].gain_db10);
     try p.setTrackGain(1, -30000);
     try std.testing.expectEqual(volume.min_db10, p.tracks[1].gain_db10);
+}
+
+// ------------------------------------------------------------- метки
+
+test "метка стоит на времени проекта, а не на клипе" {
+    // Подвинул клип — метка осталась там, где поставлена. Так это работает
+    // в монтажных программах: метку ставят на место в готовой записи.
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(0, 0, 0, 10 * sec);
+    _ = try p.addMark(5 * sec, .red, "тут переснять");
+
+    try p.move(0, 0, 0, 20 * sec);
+    try std.testing.expectEqual(@as(u64, 5 * sec), p.marks.items[0].at_ns);
+}
+
+test "метка без имени получает своё" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(sec, .yellow, "");
+    try std.testing.expectEqualStrings("метка 1", p.marks.items[0].title());
+    _ = try p.addMark(2 * sec, .yellow, "");
+    try std.testing.expectEqualStrings("метка 2", p.marks.items[1].title());
+}
+
+test "метки отменяются наравне с резкой" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(sec, .red, "раз");
+    _ = try p.addMark(2 * sec, .green, "два");
+    try std.testing.expectEqual(@as(usize, 2), p.marks.count);
+
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(@as(usize, 1), p.marks.count);
+    try std.testing.expect(p.redo());
+    try std.testing.expectEqual(@as(usize, 2), p.marks.count);
+    try std.testing.expectEqualStrings("два", p.marks.items[1].title());
+}
+
+test "цвет и имя метки отменяются" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(sec, .yellow, "было");
+
+    try p.setMarkColour(0, .violet);
+    try p.renameMark(0, "стало");
+    try std.testing.expectEqual(marks_mod.Colour.violet, p.marks.items[0].colour);
+
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqualStrings("было", p.marks.items[0].title());
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(marks_mod.Colour.yellow, p.marks.items[0].colour);
+}
+
+test "тот же цвет и то же имя не тратят шаг отмены" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(sec, .red, "раз");
+    const after = p.past;
+    try p.setMarkColour(0, .red);
+    try p.renameMark(0, "раз");
+    try p.renameMark(0, "   ");
+    try std.testing.expectEqual(after, p.past);
+}
+
+test "метка переезжает и остаётся по порядку" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(1 * sec, .red, "раз");
+    _ = try p.addMark(3 * sec, .green, "два");
+
+    const now = try p.moveMark(0, 5 * sec);
+    try std.testing.expectEqual(@as(usize, 1), now);
+    try std.testing.expectEqualStrings("раз", p.marks.items[1].title());
+    // И это отменяется.
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(@as(u64, sec), p.marks.items[0].at_ns);
+}
+
+test "чужой номер метки — отказ, а не порча соседней" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try std.testing.expectError(Error.NoSuchThing, p.removeMark(0));
+    try std.testing.expectError(Error.NoSuchThing, p.renameMark(3, "нет"));
+    try std.testing.expectError(Error.NoSuchThing, p.setMarkColour(3, .red));
+    try std.testing.expectError(Error.NoSuchThing, p.moveMark(3, sec));
+    try std.testing.expectEqual(@as(usize, 0), p.past);
+}
+
+test "меток больше отведённого не помещается, и шаг отмены не тратится" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    var i: usize = 0;
+    while (i < marks_mod.max_marks) : (i += 1) {
+        _ = try p.addMark(@as(u64, i + 1) * sec, .yellow, "");
+    }
+    const after = p.past;
+    try std.testing.expectError(Error.TooManyClips, p.addMark(10_000 * sec, .red, "лишняя"));
+    try std.testing.expectEqual(after, p.past);
 }

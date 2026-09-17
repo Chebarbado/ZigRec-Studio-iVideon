@@ -128,7 +128,7 @@ fn apart() bool {
 const cs_dblclks: c.UINT = 0x0008;
 
 /// Что человек тянет мышью прямо сейчас.
-const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point };
+const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point, mark };
 
 const Editor = struct {
     allocator: std.mem.Allocator,
@@ -146,6 +146,14 @@ const Editor = struct {
     drag: Drag = .none,
     /// Какую точку кривой тянут. Значимо только при `drag == .curve_point`.
     curve_point: usize = 0,
+    /// Выбранная метка. `null` — ни одна не выбрана.
+    sel_mark: ?usize = null,
+    /// Каким цветом ставить следующую метку.
+    ///
+    /// Своё поле, а не «следующий за цветом последней в списке»: список
+    /// отсортирован по времени, и метка, поставленная раньше по времени,
+    /// не меняет того, что в конце списка — цвет повторялся бы снова и снова.
+    next_mark: timeline.Marks.Colour = .yellow,
 
     // ------------------------------------------------ запись с микрофона
 
@@ -203,6 +211,12 @@ const Editor = struct {
 
     /// Поле ввода имени, открытое поверх полосы дорожки.
     name_box: c.HWND = null,
+    /// Что переименовываем: дорожку или метку. Поле ввода одно на обоих:
+    /// два поля с одинаковым поведением — это два места, где чинить
+    /// перехват Enter и Esc.
+    name_of_mark: bool = false,
+    /// Номер метки при `name_of_mark`.
+    name_mark: usize = 0,
     /// Чьё имя правим и какой обработчик у поля был до нас.
     name_track: usize = 0,
     name_prev_proc: usize = 0,
@@ -309,6 +323,7 @@ fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
 
     drawRuler(dc, width);
     drawTracks(dc, width, lane_height);
+    drawMarkLines(dc, width, lane_height);
     drawEmptyHint(dc, width, lane_height);
     drawPlayhead(dc, lane_height);
     drawScrollBar(dc, width, lane_height);
@@ -506,10 +521,103 @@ fn drawRuler(dc: c.HDC, width: i32) void {
         if (x > width) break;
         if (x >= view_mod.header_w) {
             line(dc, x, view_mod.ruler_h - 8, x, view_mod.ruler_h - 1, col_lane_line, 1);
-            var buf: [32]u8 = undefined;
-            drawText(dc, x + 3, 4, view_mod.timeLabel(&buf, when, step), col_text);
+            // Деление, закрытое подписью метки, не пишем вовсе: недописанное
+            // число читается как другое число, а это хуже, чем его отсутствие.
+            if (!markLabelCovers(x)) {
+                var buf: [32]u8 = undefined;
+                drawText(dc, x + 3, 4, view_mod.timeLabel(&buf, when, step), col_text);
+            }
         }
         when += step;
+    }
+
+    drawMarkFlags(dc, width);
+}
+
+/// Ширина подписи метки на экране — той же прикидкой, что и при рисовании.
+fn markLabelWidth(text: []const u8) i32 {
+    return @intCast(text.len * 7 + 6);
+}
+
+/// Закрыта ли подпись деления подписью метки.
+///
+/// Считаем по тем же числам, по которым подпись метки и рисуется: два
+/// разных счёта разошлись бы, и деление то пряталось бы зря, то торчало
+/// бы половиной из-под букв.
+fn markLabelCovers(tick_x: i32) bool {
+    // Подпись времени занимает около сорока точек вправо от деления.
+    const tick_right = tick_x + 40;
+    for (ed.project.marks.list()) |m| {
+        if (m.title().len == 0) continue;
+        const f = view_mod.markFlag(ed.view.timeToX(m.at_ns));
+        const left = f.left;
+        const right = f.right + 1 + markLabelWidth(m.title());
+        if (left < tick_right and tick_x < right) return true;
+    }
+    return false;
+}
+
+/// Флажки меток на линейке.
+///
+/// Рисуем после делений: флажок должен лежать поверх подписи времени,
+/// а не наоборот, иначе метка теряется среди цифр.
+fn drawMarkFlags(dc: c.HDC, width: i32) void {
+    for (ed.project.marks.list(), 0..) |m, i| {
+        const x = ed.view.timeToX(m.at_ns);
+        if (x < view_mod.header_w - view_mod.mark_flag_w or x > width) continue;
+
+        const col: c.COLORREF = m.colour.rgb();
+        const f = view_mod.markFlag(x);
+        solid(dc, .{ .left = f.left, .top = f.top, .right = f.right, .bottom = f.bottom }, col);
+        // Тонкая ножка до самого низа линейки: по ней видно точное место,
+        // а флажок шириной в девять точек показывал бы «примерно здесь».
+        line(dc, x, f.top, x, view_mod.ruler_h - 1, col, 1);
+
+        // Выбранную метку обводим: иначе после щелчка непонятно, с какой
+        // именно работает меню и клавиши.
+        if (ed.sel_mark == i) {
+            const dark: c.COLORREF = 0x00202020;
+            line(dc, f.left - 1, f.top - 1, f.right + 1, f.top - 1, dark, 1);
+            line(dc, f.left - 1, f.bottom, f.right + 1, f.bottom, dark, 1);
+            line(dc, f.left - 1, f.top - 1, f.left - 1, f.bottom, dark, 1);
+            line(dc, f.right, f.top - 1, f.right, f.bottom, dark, 1);
+        }
+
+        // Подпись справа от флажка — если до следующей метки есть место.
+        const next_x = if (i + 1 < ed.project.marks.count)
+            ed.view.timeToX(ed.project.marks.items[i + 1].at_ns)
+        else
+            width;
+        const room = next_x - f.right - 6;
+        if (room > 24 and m.title().len > 0) {
+            const letters = @as(usize, @intCast(@divTrunc(room, 7)));
+            const shown = m.title()[0..timeline.Marks.fitName(m.title(), letters)];
+            // Под подписью — своя подложка: она ложится поверх делений
+            // времени, и без подложки цифры и буквы читаются вперемешку.
+            const label_w = @min(@as(i32, @intCast(shown.len * 7 + 6)), room);
+            solid(dc, .{
+                .left = f.right + 1,
+                .top = 1,
+                .right = f.right + 1 + label_w,
+                // До самого низа линейки: подпись высотой в тринадцать
+                // точек не влезает в полоску над флажком, а обрезанная
+                // подложка оставляет цифры торчать из-под букв.
+                .bottom = view_mod.ruler_h - 2,
+            }, col_ruler);
+            drawText(dc, f.right + 3, 2, shown, col_text);
+        }
+    }
+}
+
+/// Черта метки через все дорожки.
+///
+/// Тонкая и своим цветом: метка должна быть видна на фоне клипов, но не
+/// закрывать их. Толстая черта поверх волны читалась бы как обрыв звука.
+fn drawMarkLines(dc: c.HDC, width: i32, height: i32) void {
+    for (ed.project.marks.list()) |m| {
+        const x = ed.view.timeToX(m.at_ns);
+        if (x < view_mod.header_w or x > width) continue;
+        line(dc, x, view_mod.ruler_h, x, height, m.colour.rgb(), 1);
     }
 }
 
@@ -1350,6 +1458,138 @@ fn writeMicWav(where: []const u8) !void {
     try fw.interface.flush();
 }
 
+// ------------------------------------------------------------- метки
+
+/// С этого номера идут строки меню метки.
+const id_mark_menu = 800;
+
+/// Сказать о метке в строке состояния.
+fn sayMark(index: usize) void {
+    if (index >= ed.project.marks.count) return;
+    const m = ed.project.marks.items[index];
+    var when: [32]u8 = undefined;
+    var say: [160]u8 = undefined;
+    const line_text = std.fmt.bufPrint(&say, "метка «{s}» ({s}) на {s}", .{
+        m.title(),
+        m.colour.label(),
+        view_mod.lengthLabel(&when, m.at_ns),
+    }) catch "метка";
+    ed.say(line_text);
+}
+
+/// Поставить метку там, где стоит указатель.
+fn addMarkAtPlayhead() void {
+    const where = ed.project.addMark(ed.playhead_ns, takeMarkColour(), "") catch {
+        ed.say("меток больше не помещается: уберите ненужные");
+        refresh();
+        return;
+    };
+    ed.sel_mark = where;
+    sayMark(where);
+    refresh();
+}
+
+/// Цвет для новой метки и переход к следующему.
+///
+/// Подряд поставленные метки получаются разноцветными сами: одинаковый
+/// цвет у всех отнял бы у цвета весь смысл, а спрашивать цвет на каждую
+/// метку — это лишнее решение там, где метку ставят на бегу.
+fn takeMarkColour() timeline.Marks.Colour {
+    const col = ed.next_mark;
+    ed.next_mark = col.next();
+    return col;
+}
+
+/// Прыжок к следующей или предыдущей метке.
+fn stepToMark(forward: bool) void {
+    const found = ed.project.marks.step(ed.playhead_ns, forward) orelse {
+        ed.say(if (forward) "дальше меток нет" else "раньше меток нет");
+        refresh();
+        return;
+    };
+    ed.sel_mark = found;
+    ed.playhead_ns = ed.project.marks.items[found].at_ns;
+    showFrame();
+    sayMark(found);
+    refresh();
+}
+
+/// Переименовать метку: то же поле ввода, что у дорожки, но над линейкой.
+fn startMarkRename(index: usize) void {
+    if (ed.name_box != null) return;
+    if (index >= ed.project.marks.count) return;
+
+    const m = ed.project.marks.items[index];
+    // Ставим поле под флажком, а не поверх него: иначе не видно, какую
+    // метку переименовываешь.
+    const x = @max(ed.view.timeToX(m.at_ns), view_mod.header_w);
+    const box = ui.editBox(ed.hwnd, id_rename_box, x, laneAreaTop() + view_mod.ruler_h, 180, 22);
+    if (box == null) return;
+
+    ed.name_box = box;
+    ed.name_of_mark = true;
+    ed.name_mark = index;
+    ed.name_prev_proc = @bitCast(c.SetWindowLongPtrW(box, gwlp_wndproc, @bitCast(@intFromPtr(&renameProc))));
+
+    ui.setText(box, m.title());
+    _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
+    _ = c.SetFocus(box);
+    ed.say("новое имя метки, затем Enter; Esc — оставить как было");
+    refresh();
+}
+
+/// Меню метки: цвет, переименовать, убрать.
+///
+/// Цвета списком, а не перебором по кругу: перебор требует помнить,
+/// сколько раз нажать, а список показывает всё сразу.
+fn showMarkMenu(index: usize, at: c.POINT) void {
+    if (index >= ed.project.marks.count) return;
+    const menu = c.CreatePopupMenu();
+    if (menu == null) return;
+    defer _ = c.DestroyMenu(menu);
+
+    const now = ed.project.marks.items[index].colour;
+    for (timeline.Marks.all_colours, 0..) |col, i| {
+        var wide_buf: [64]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&wide_buf, col.label()) catch continue;
+        wide_buf[n] = 0;
+        const flags: c.UINT = if (col == now) c.MF_STRING | c.MF_CHECKED else c.MF_STRING;
+        _ = c.AppendMenuW(menu, flags, @intCast(id_mark_menu + @as(c_int, @intCast(i))), @ptrCast(&wide_buf));
+    }
+    _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 100, ui.wide("Переименовать…"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 101, ui.wide("Убрать метку"));
+
+    _ = c.SetForegroundWindow(ed.hwnd);
+    const chosen = c.TrackPopupMenu(
+        menu,
+        c.TPM_LEFTBUTTON | c.TPM_RETURNCMD | c.TPM_NONOTIFY,
+        at.x,
+        at.y,
+        0,
+        ed.hwnd,
+        null,
+    );
+    if (chosen == 0) return;
+
+    if (chosen == id_mark_menu + 101) {
+        ed.project.removeMark(index) catch return;
+        ed.sel_mark = null;
+        ed.say("метка убрана");
+        refresh();
+        return;
+    }
+    if (chosen == id_mark_menu + 100) {
+        startMarkRename(index);
+        return;
+    }
+    const which: usize = @intCast(chosen - id_mark_menu);
+    if (which >= timeline.Marks.all_colours.len) return;
+    ed.project.setMarkColour(index, timeline.Marks.all_colours[which]) catch return;
+    sayMark(index);
+    refresh();
+}
+
 /// Свести звук проекта в один WAV.
 ///
 /// Здесь нарисованная кривая громкости впервые становится слышной: до этого
@@ -1890,6 +2130,17 @@ fn onDown(x: i32, y: i32) void {
             showFrame();
             _ = c.SetCapture(ed.hwnd);
         },
+        .mark => {
+            // Щелчок по метке ставит указатель точно на неё, а не туда,
+            // куда попала мышь: метку и ставят затем, чтобы возвращаться
+            // ровно в это место.
+            ed.sel_mark = hit.mark;
+            ed.playhead_ns = ed.project.marks.items[hit.mark].at_ns;
+            ed.drag = .mark;
+            showFrame();
+            _ = c.SetCapture(ed.hwnd);
+            sayMark(hit.mark);
+        },
         .clip, .clip_left, .clip_right => {
             ed.has_selection = true;
             ed.sel_track = hit.track;
@@ -2058,6 +2309,16 @@ fn onMove(x: i32, y: i32) void {
         moveCurvePoint(x, y);
         return;
     }
+    if (ed.drag == .mark) {
+        const index = ed.sel_mark orelse return;
+        const when = ed.view.xToTime(x);
+        ed.sel_mark = ed.project.moveMark(index, when) catch return;
+        // Указатель едет вместе с меткой: так видно, куда она встанет.
+        ed.playhead_ns = when;
+        ed.drag_started = true;
+        refresh();
+        return;
+    }
 
     const when = ed.view.xToTime(x);
     switch (ed.drag) {
@@ -2105,7 +2366,7 @@ fn onMove(x: i32, y: i32) void {
         },
         // Ползунок громкости и точку кривой обработали выше: им не нужно
         // время под курсором, им нужна высота.
-        .gain, .curve_point, .splitter, .scroll, .none => {},
+        .gain, .curve_point, .mark, .splitter, .scroll, .none => {},
     }
 }
 
@@ -2128,6 +2389,28 @@ fn moveSplitter(y: i32) void {
 fn onRightDown(x: i32, y: i32) void {
     if (y < laneAreaTop()) return;
     const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
+
+    if (hit.target == .mark) {
+        ed.sel_mark = hit.mark;
+        var at: c.POINT = undefined;
+        _ = c.GetCursorPos(&at);
+        showMarkMenu(hit.mark, at);
+        return;
+    }
+    if (hit.target == .ruler) {
+        // Правая кнопка по пустой линейке ставит метку там, куда ткнули:
+        // это самое частое действие, и оно должно быть в одно движение.
+        const where = ed.project.addMark(hit.when_ns, takeMarkColour(), "") catch {
+            ed.say("меток больше не помещается: уберите ненужные");
+            refresh();
+            return;
+        };
+        ed.sel_mark = where;
+        sayMark(where);
+        refresh();
+        return;
+    }
+
     if (hit.target != .curve_point) return;
 
     ed.project.removeCurvePoint(hit.track, hit.point) catch return;
@@ -2387,6 +2670,7 @@ fn startRename(track_index: usize) void {
 
     ed.name_box = box;
     ed.name_track = track_index;
+    ed.name_of_mark = false;
 
     // Поле ввода само не отдаёт Enter и Esc: перехватываем их, подменив
     // его обработчик. Прежний держим числом — типизированный указатель
@@ -2451,6 +2735,16 @@ fn finishRename(accept: bool) void {
     _ = c.SetFocus(ed.hwnd);
 
     if (accept and typed.len > 0) {
+        if (ed.name_of_mark) {
+            ed.project.renameMark(ed.name_mark, typed) catch {
+                ed.say("имя не принято");
+                refresh();
+                return;
+            };
+            sayMark(ed.name_mark);
+            refresh();
+            return;
+        }
         ed.project.renameTrack(ed.name_track, typed) catch {
             ed.say("имя не принято");
             refresh();
@@ -2760,7 +3054,12 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                     refresh();
                 },
                 c.VK_SPACE => togglePlay(),
-                c.VK_F2 => startRename(ed.cur_track),
+                c.VK_F2 => if (ed.sel_mark) |i| startMarkRename(i) else startRename(ed.cur_track),
+                // M — «метка»: ставится там, где стоит указатель.
+                'M' => addMarkAtPlayhead(),
+                // Прыжок по меткам: их и ставят затем, чтобы пройти подряд.
+                c.VK_OEM_4 => stepToMark(false),
+                c.VK_OEM_6 => stepToMark(true),
                 c.VK_F12 => saveFrame(),
                 else => {},
             }

@@ -43,6 +43,13 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
         try w.print("source {d} {s}\n", .{ src.duration_ns, src.fullPath() });
     }
 
+    // Метки — до дорожек: они принадлежат всему проекту, а не дорожке,
+    // и строка `mark` после строки `track` читалась бы как дорожкина.
+    for (project.marks.list()) |m| {
+        // Имя — весь остаток строки: в нём бывают пробелы.
+        try w.print("mark {d} {s} {s}\n", .{ m.at_ns, @tagName(m.colour), m.title() });
+    }
+
     for (project.trackList()) |track| {
         try w.print("track {s} {d} {s}\n", .{
             @tagName(track.kind),
@@ -123,6 +130,16 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             const index = project.addTrack(kind, title) catch return Error.TooBig;
             project.tracks[index].muted = muted != 0;
             current_track = index;
+            continue;
+        }
+
+        if (std.mem.eql(u8, word, "mark")) {
+            const at_ns = parseU64(parts.next()) orelse return Error.Malformed;
+            const colour_text = parts.next() orelse return Error.Malformed;
+            // Незнакомый цвет — не повод не открыть проект: метка важнее
+            // своего оттенка. Берём цвет по умолчанию и идём дальше.
+            const colour = std.meta.stringToEnum(timeline.Marks.Colour, colour_text) orelse .yellow;
+            _ = project.marks.add(at_ns, colour, parts.rest()) catch return Error.TooBig;
             continue;
         }
 
@@ -515,4 +532,70 @@ test "громкость из файла прижимается к предел�
     );
     try std.testing.expectEqual(timeline.Volume.max_db10, p.tracks[0].gain_db10);
     try std.testing.expectEqual(timeline.Volume.min_db10, p.tracks[0].clips[0].gain_db10);
+}
+
+test "метки переживают запись и чтение" {
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "тут переснять");
+    _ = try p.addMark(7 * sec, .violet, "сюда заставку");
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+
+    const back = try makeProject();
+    defer std.testing.allocator.destroy(back);
+    try read(back, w.buffered());
+
+    try std.testing.expectEqual(@as(usize, 2), back.marks.count);
+    try std.testing.expectEqual(@as(u64, 2 * sec), back.marks.items[0].at_ns);
+    try std.testing.expectEqualStrings("тут переснять", back.marks.items[0].title());
+    try std.testing.expectEqual(timeline.Marks.Colour.red, back.marks.items[0].colour);
+    try std.testing.expectEqualStrings("сюда заставку", back.marks.items[1].title());
+    try std.testing.expectEqual(timeline.Marks.Colour.violet, back.marks.items[1].colour);
+}
+
+test "имя метки с пробелами читается целиком" {
+    // Имя — весь остаток строки, и обрезать его по первому пробелу значит
+    // потерять всё, кроме первого слова.
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(sec, .green, "три слова тут");
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+
+    const back = try makeProject();
+    defer std.testing.allocator.destroy(back);
+    try read(back, w.buffered());
+    try std.testing.expectEqualStrings("три слова тут", back.marks.items[0].title());
+}
+
+test "незнакомый цвет метки не мешает открыть проект" {
+    // Метка важнее своего оттенка: отказаться открыть проект из-за цвета —
+    // это потерять работу из-за мелочи.
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+    try read(p,
+        \\zigrec-project 1
+        \\source 60000000000 а.mp4
+        \\mark 1000000000 бирюзовый важное место
+        \\track video 0 Видео
+        \\
+    );
+    try std.testing.expectEqual(@as(usize, 1), p.marks.count);
+    try std.testing.expectEqual(timeline.Marks.Colour.yellow, p.marks.items[0].colour);
+    try std.testing.expectEqualStrings("важное место", p.marks.items[0].title());
+}
+
+test "проект без меток не пишет о них лишних строк" {
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "mark ") == null);
 }
