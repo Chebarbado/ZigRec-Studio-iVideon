@@ -31,6 +31,12 @@ pub const c = if (builtin.os.tag == .windows) @cImport({
     @cInclude("commdlg.h");
     // shlobj.h: системный выбор папки для настроек.
     @cInclude("shlobj.h");
+    // iphlpapi.h: адреса сетевых интерфейсов для выбора, где слушать MCP (#86).
+    // winsock2.h раньше него: без WIN32_LEAN_AND_MEAN windows.h тянет старый
+    // winsock.h, а с ним — ничего, и iphlpapi остаётся без типов сокетов.
+    @cInclude("winsock2.h");
+    @cInclude("ws2tcpip.h");
+    @cInclude("iphlpapi.h");
 }) else struct {};
 
 /// HRESULT как беззнаковое: так его печатают в документации и в отладчике.

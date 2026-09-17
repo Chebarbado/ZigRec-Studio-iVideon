@@ -34,7 +34,7 @@ const usage =
     \\  zigrec mcp [ПОРТ]
     \\        сервер MCP для Claude Code; передаёт просьбы в открытое окно
     \\  zigrec listen-smoke [ПОРТ]
-    \\        самопроверка адресов: слушать и достучаться, IPv4 и IPv6
+    \\        самопроверка адресов: каждый адрес из списка настроек слушает и отвечает
     \\  zigrec nav-smoke ФАЙЛ [ПРОСЬБ]
     \\        самопроверка навигации: окно не ждёт декодер
     \\  zigrec open-smoke ФАЙЛ
@@ -1108,9 +1108,38 @@ fn audioSync(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
 /// невежливо. Что мы про него знаем, проверено тестами на разборе.
 fn listenSmoke(io: std.Io, w: anytype, port: u16) !u8 {
     const listen = zigrec.listen;
+    const interfaces = zigrec.interfaces;
     var bad: u8 = 0;
 
-    for ([_][]const u8{ "127.0.0.1", "::1" }) |address| {
+    // Список — тот же, что видит человек в настройках (#86): каждая его
+    // строка обязана слушать и отвечать, иначе она обещает то, чего нет.
+    var found: [interfaces.max_entries]interfaces.Entry = undefined;
+    const got = interfaces.list(&found);
+    var rows: [interfaces.max_choices]interfaces.Choice = undefined;
+    const list = interfaces.choices(&rows, got);
+    try w.print("[listen] адресов у машины: {d}, строк в списке: {d}\n", .{ got.len, list.len });
+    for (got) |*e| try w.print("[listen]   {s} — {s}\n", .{ e.address(), e.ifaceName() });
+    if (list.len < 4) {
+        try w.writeAll("[listen] ПРОВАЛ: в списке нет даже постоянных строк\n");
+        return 1;
+    }
+    // При «всех» угол окна называет адрес интерфейса — он должен быть
+    // одним из найденных, а не выдуманным.
+    const reach = interfaces.reachable("0.0.0.0", got);
+    try w.print("[listen] при 0.0.0.0 наружу называем: {s}\n", .{reach});
+    if (!std.mem.eql(u8, reach, "0.0.0.0")) {
+        var known = false;
+        for (got) |*e| {
+            if (std.mem.eql(u8, e.address(), reach)) known = true;
+        }
+        if (!known) {
+            try w.writeAll("[listen] ПРОВАЛ: названный наружу адрес не из найденных\n");
+            bad = 1;
+        }
+    }
+
+    for (list) |choice| {
+        const address = choice.address;
         var where_buf: [listen.max_text + 8]u8 = undefined;
         const where = listen.write(&where_buf, address, port);
 
@@ -1123,8 +1152,13 @@ fn listenSmoke(io: std.Io, w: anytype, port: u16) !u8 {
 
         var server = addr.listen(io, .{ .reuse_address = true }) catch |err| {
             // IPv6 на машине может быть выключен — это не поломка программы,
-            // но и «работает» сказать нельзя.
+            // но и «работает» сказать нельзя. А адрес IPv4, который Windows
+            // только что назвала поднятым, слушать обязан.
             try w.print("[listen] {s}: слушать не вышло ({s})\n", .{ where, @errorName(err) });
+            if (choice.family == .ip4) {
+                try w.print("[listen] ПРОВАЛ: {s} — {s} есть в списке, но не слушается\n", .{ address, choice.note });
+                bad = 1;
+            }
             continue;
         };
         defer server.deinit(io);
@@ -1145,7 +1179,7 @@ fn listenSmoke(io: std.Io, w: anytype, port: u16) !u8 {
         stream.close(io);
 
         const scope = listen.scopeOf(address) catch listen.Scope.loopback;
-        try w.print("[listen] {s} — {s}: слушает и отвечает\n", .{ where, scope.label() });
+        try w.print("[listen] {s} — {s} ({s}): слушает и отвечает\n", .{ where, scope.label(), choice.note });
     }
 
     if (bad != 0) return 1;
@@ -1406,6 +1440,31 @@ fn uiSmoke(allocator: std.mem.Allocator, w: anytype) !u8 {
     if (!drop.fits()) {
         try w.print("[ui] ПРОВАЛ: подпись поля броска не влезает, не хватает {d} точек\n", .{
             drop.need - drop.have,
+        });
+        bad = 1;
+    }
+
+    // Подписи окна настроек: при 125 % DPI они обрезались (#86).
+    var set_fits: [zigrec.ui.settings_labels.len]zigrec.ui.DropFit = undefined;
+    for (zigrec.ui.settingsLabelsFit(&set_fits), 0..) |fit, i| {
+        try w.print("[ui] подпись настроек «{s}»: надо {d}, есть {d}\n", .{ zigrec.ui.settings_labels[i].text, fit.need, fit.have });
+        if (!fit.fits()) {
+            try w.print("[ui] ПРОВАЛ: подпись настроек не влезает, не хватает {d} точек\n", .{fit.need - fit.have});
+            bad = 1;
+        }
+    }
+
+    // Угол MCP (#86): с адресом интерфейса и числом просьб надпись длиннее
+    // прежней, а места под неё столько же.
+    const corner_fit = zigrec.ui.cornerFit();
+    try w.print("[ui] надпись угла MCP «{s}»: надо {d}, есть {d}\n", .{
+        zigrec.mcp_corner.longest_text,
+        corner_fit.need,
+        corner_fit.have,
+    });
+    if (!corner_fit.fits()) {
+        try w.print("[ui] ПРОВАЛ: надпись угла MCP не влезает, не хватает {d} точек\n", .{
+            corner_fit.need - corner_fit.have,
         });
         bad = 1;
     }

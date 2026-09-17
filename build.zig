@@ -46,6 +46,8 @@ pub fn build(b: *std.Build) void {
     core.linkSystemLibrary("oleaut32", .{});
     // WASAPI: захват микрофона для индикатора уровня.
     core.linkSystemLibrary("ksuser", .{});
+    // iphlpapi: адреса сетевых интерфейсов для выбора адреса MCP.
+    core.linkSystemLibrary("iphlpapi", .{});
 
     const exe = b.addExecutable(.{
         .name = "zigrec",

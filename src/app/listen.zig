@@ -99,9 +99,34 @@ pub fn write(buf: []u8, text: []const u8, port: u16) []const u8 {
     return w.buffered();
 }
 
+/// Что сказать человеку, когда адрес не принят.
+///
+/// Слова про адрес живут здесь, рядом с разбором, а не в окне: окно
+/// и стенд должны говорить одно и то же.
+pub fn rejected(buf: []u8, text: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "адрес «{s}» не понят — остался прежний", .{text}) catch "адрес не понят";
+}
+
+/// Что сказать, когда адрес принят. Про открытый наружу порт — прямо
+/// и сразу; про петлю говорить нечего, и возвращается пусто.
+pub fn warning(buf: []u8, text: []const u8) []const u8 {
+    if (!opensToNetwork(text)) return "";
+    return std.fmt.bufPrint(buf, "внимание: {s} — порт будет виден из сети", .{text}) catch "порт будет виден из сети";
+}
+
 // ---------------------------------------------------------------- тесты
 
 const testing = std.testing;
+
+test "слова про адрес: непонятый назван, открытый наружу предупреждён" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("адрес «чепуха» не понят — остался прежний", rejected(&buf, "чепуха"));
+    try testing.expectEqualStrings("внимание: 0.0.0.0 — порт будет виден из сети", warning(&buf, "0.0.0.0"));
+    try testing.expectEqualStrings("внимание: 192.168.1.5 — порт будет виден из сети", warning(&buf, "192.168.1.5"));
+    // Петля — не повод для предупреждения.
+    try testing.expectEqualStrings("", warning(&buf, "127.0.0.1"));
+    try testing.expectEqualStrings("", warning(&buf, "::1"));
+}
 
 test "обычные адреса разбираются" {
     try testing.expect(valid("127.0.0.1"));

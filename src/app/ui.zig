@@ -33,6 +33,7 @@ const hotkey_mod = @import("hotkey.zig");
 const tray_menu = @import("tray_menu.zig");
 const listen = @import("listen.zig");
 const corner = @import("mcp_corner.zig");
+const interfaces = @import("interfaces.zig");
 const boost_mod = @import("boost.zig");
 const remote = @import("remote.zig");
 const remote_win = @import("remote_win.zig");
@@ -72,6 +73,9 @@ const id_set_portable = 340;
 const id_set_area_key = 341;
 const id_set_listen = 342;
 const id_set_boost = 343;
+const id_set_pick = 344;
+/// Строки списка адресов: с запасом от остальных номеров.
+const id_listen_base = 900;
 /// Номера строк меню значка в трее. Далеко от прочих: они приходят тем же
 /// путём, что и нажатия кнопок.
 const id_tray_base = 800;
@@ -103,7 +107,37 @@ pub const DropFit = struct {
 
 /// Померить подпись тем шрифтом, которым она рисуется.
 pub fn dropLabelFit() DropFit {
-    const have = drop_zone.right - drop_zone.left - 16;
+    return textFit(drop_text, drop_zone.right - drop_zone.left - 16);
+}
+
+/// Ширина надписи угла MCP: от лампочки до кнопки «пуск/стоп».
+pub const corner_label_w: i32 = 406;
+
+/// Влезает ли самая длинная надпись угла (#86): с адресом интерфейса
+/// и числом просьб она длиннее прежней «MCP 127.0.0.1:15599».
+pub fn cornerFit() DropFit {
+    return textFit(corner.longest_text, corner_label_w);
+}
+
+/// Подписи окна настроек и ширина, отведённая каждой. Список один
+/// на окно и на стенд: «Обвести область и писать» и «Сервер MCP: адрес
+/// и порт» при 125 % DPI обрезались до «…и», и глазами это заметили
+/// не сразу (#86).
+pub const SettingsLabel = struct { text: []const u8, width: i32 };
+pub const settings_labels = [_]SettingsLabel{
+    .{ .text = "Папка для записей", .width = 200 },
+    .{ .text = "Имя файла: %d — дата, %t — время, %n — номер", .width = 400 },
+    .{ .text = "Обвести область", .width = 200 },
+    .{ .text = "MCP: адрес и порт", .width = 200 },
+};
+
+/// Померить подписи настроек тем шрифтом, которым они рисуются.
+pub fn settingsLabelsFit(out: *[settings_labels.len]DropFit) []DropFit {
+    for (settings_labels, 0..) |l, i| out[i] = textFit(l.text, l.width);
+    return out[0..];
+}
+
+fn textFit(text: []const u8, have: i32) DropFit {
     const dc = c.CreateCompatibleDC(null);
     if (dc == null) return .{ .have = have };
     defer _ = c.DeleteDC(dc);
@@ -113,7 +147,7 @@ pub fn dropLabelFit() DropFit {
     defer _ = c.SelectObject(dc, old_font);
 
     var wide_buf: [128]u16 = undefined;
-    const n = std.unicode.utf8ToUtf16Le(&wide_buf, drop_text) catch return .{ .have = have };
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch return .{ .have = have };
     var size: c.SIZE = std.mem.zeroes(c.SIZE);
     _ = c.GetTextExtentPoint32W(dc, @ptrCast(&wide_buf), @intCast(n), &size);
     return .{ .need = size.cx, .have = have };
@@ -193,6 +227,10 @@ const App = struct {
     lbl_server: c.HWND = null,
     /// Сервер для Claude Code. Сам не поднимается: только по кнопке.
     server: control.Server = .{},
+    /// По какому адресу до сервера достучаться снаружи (#86). Считается
+    /// при запуске сервера: спрашивать Windows на каждую перерисовку незачем.
+    reach: [listen.max_text]u8 = @splat(0),
+    reach_len: usize = 0,
     /// Положение ползунка усиления. Растягивает картинку, уровень не трогает.
     gain_pos: u8 = 0,
     /// Сколько раз в секунду обновляется экран, с которого пишем.
@@ -1185,6 +1223,7 @@ fn cornerFacts() corner.Facts {
     return .{
         .state = app.server.state(),
         .address = app.prefs.listenAddress(),
+        .reach = app.reach[0..app.reach_len],
         .port = app.prefs.port,
         .running = app.server.isRunning(),
         .served = app.server.served.load(.monotonic),
@@ -1193,7 +1232,9 @@ fn cornerFacts() corner.Facts {
 }
 
 fn serverLampRect() c.RECT {
-    return .{ .left = 214, .top = 406, .right = 228, .bottom = 420 };
+    // Ряд сервера начинается от левого края: слева от него ничего нет,
+    // а надписи с адресом интерфейса и числом просьб нужна вся ширина (#86).
+    return .{ .left = 14, .top = 406, .right = 28, .bottom = 420 };
 }
 
 fn drawServerLamp(dc: c.HDC) void {
@@ -1345,6 +1386,7 @@ fn settingsProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(
         c.WM_COMMAND => {
             switch (wp & 0xFFFF) {
                 id_set_browse => browseForDir(hwnd),
+                id_set_pick => showListenPicker(hwnd),
                 id_set_ok => {
                     settings_win.accepted = true;
                     _ = c.DestroyWindow(hwnd);
@@ -1387,18 +1429,15 @@ fn collectSettings() void {
 
     var addr_buf: [128]u8 = undefined;
     const addr_text = boxText(settings_win.listen_box, &addr_buf);
+    var addr_note: [256]u8 = undefined;
     if (!app.prefs.setListenAddress(addr_text)) {
-        var note: [256]u8 = undefined;
-        setText(app.status, std.fmt.bufPrint(&note, "адрес «{s}» не понят — остался прежний", .{
-            addr_text,
-        }) catch "адрес не понят");
-    } else if (listen.opensToNetwork(app.prefs.listenAddress())) {
+        setText(app.status, listen.rejected(&addr_note, addr_text));
+    } else {
         // Про открытый наружу порт говорим прямо и сразу: человек должен
-        // узнать об этом здесь, а не потом и от кого-то другого.
-        var note: [256]u8 = undefined;
-        setText(app.status, std.fmt.bufPrint(&note, "внимание: {s} — порт будет виден из сети", .{
-            app.prefs.listenAddress(),
-        }) catch "порт будет виден из сети");
+        // узнать об этом здесь, а не потом и от кого-то другого. Слова —
+        // в `listen`, одни на окно и стенд.
+        const warn = listen.warning(&addr_note, app.prefs.listenAddress());
+        if (warn.len > 0) setText(app.status, warn);
     }
 
     var key_buf: [128]u8 = undefined;
@@ -1534,18 +1573,20 @@ fn createSettings(owner: c.HWND) void {
 
     settings_win = .{ .hwnd = hwnd };
 
-    _ = label(hwnd, "Папка для записей", 14, 16, 200, 20);
+    _ = label(hwnd, settings_labels[0].text, 14, 16, settings_labels[0].width, 20);
     settings_win.dir_box = editBox(hwnd, id_set_dir, 14, 38, 380, 24);
     _ = button(hwnd, "Обзор…", id_set_browse, 402, 37, 90, 26, 0);
 
-    _ = label(hwnd, "Имя файла: %d — дата, %t — время, %n — номер", 14, 74, 400, 20);
+    _ = label(hwnd, settings_labels[1].text, 14, 74, settings_labels[1].width, 20);
     settings_win.template_box = editBox(hwnd, id_set_template, 14, 96, 300, 24);
 
-    _ = label(hwnd, "Обвести область и писать", 14, 134, 200, 20);
+    _ = label(hwnd, settings_labels[2].text, 14, 134, settings_labels[2].width, 20);
     settings_win.area_key_box = editBox(hwnd, id_set_area_key, 218, 132, 150, 24);
 
-    _ = label(hwnd, "Сервер MCP: адрес и порт", 14, 168, 200, 20);
-    settings_win.listen_box = editBox(hwnd, id_set_listen, 218, 166, 150, 24);
+    _ = label(hwnd, settings_labels[3].text, 14, 168, settings_labels[3].width, 20);
+    settings_win.listen_box = editBox(hwnd, id_set_listen, 218, 166, 120, 24);
+    // «…» рядом с полем: список адресов машины, откуда выбрать (#86).
+    _ = button(hwnd, "…", id_set_pick, 342, 165, 26, 26, 0);
     settings_win.port_box = editBox(hwnd, id_set_port, 376, 166, 90, 24);
 
     settings_win.serve_box = button(hwnd, "Поднимать сервер при запуске", id_set_serve, 14, 200, 300, 24, c.BS_AUTOCHECKBOX);
@@ -2158,11 +2199,66 @@ fn toggleServer(hwnd: c.HWND) void {
         app.server.startAt(hwnd, app.prefs.listenAddress(), app.prefs.port) catch |err| {
             app.server.failure = err;
         };
+        rememberReach();
         // Даём потоку сесть на порт, чтобы лампочка сразу сказала правду,
         // а не «выключен» на первые полсекунды.
         c.Sleep(120);
     }
     refreshServerRow(hwnd);
+}
+
+/// Запомнить, по какому адресу до сервера достучаться снаружи.
+fn rememberReach() void {
+    var found: [interfaces.max_entries]interfaces.Entry = undefined;
+    const got = interfaces.list(&found);
+    const reach = interfaces.reachable(app.prefs.listenAddress(), got);
+    app.reach_len = @min(reach.len, app.reach.len);
+    @memcpy(app.reach[0..app.reach_len], reach[0..app.reach_len]);
+}
+
+/// Список адресов, на которых можно слушать: петля, все, каждый интерфейс.
+///
+/// Задача #86. Адрес своего Wi-Fi никто не помнит, а «0.0.0.0» ещё надо
+/// знать. Выбор — из того, что у машины есть сейчас; набрать руками
+/// по-прежнему можно.
+fn showListenPicker(hwnd: c.HWND) void {
+    var found: [interfaces.max_entries]interfaces.Entry = undefined;
+    const got = interfaces.list(&found);
+    var rows: [interfaces.max_choices]interfaces.Choice = undefined;
+    const list = interfaces.choices(&rows, got);
+
+    var cur_buf: [128]u8 = undefined;
+    const current = std.mem.trim(u8, boxText(settings_win.listen_box, &cur_buf), " \t");
+
+    const menu = c.CreatePopupMenu();
+    if (menu == null) return;
+    defer _ = c.DestroyMenu(menu);
+
+    var prev: ?interfaces.Kind = null;
+    for (list, 0..) |ch, i| {
+        // Между группами — черта: постоянные строки, адреса интерфейсов,
+        // строки IPv6. Глазу проще, когда список разбит.
+        if (prev != null and prev.? != ch.kind and (ch.kind == .iface or prev.? == .iface)) {
+            _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        }
+        prev = ch.kind;
+        var line: [192]u8 = undefined;
+        const text = ch.write(&line);
+        var wide_buf: [256]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch continue;
+        wide_buf[n] = 0;
+        const flags: c.UINT = if (std.mem.eql(u8, ch.address, current)) c.MF_STRING | c.MF_CHECKED else c.MF_STRING;
+        _ = c.AppendMenuW(menu, flags, @intCast(id_listen_base + @as(c_int, @intCast(i))), @ptrCast(&wide_buf));
+    }
+
+    var at: c.POINT = undefined;
+    _ = c.GetCursorPos(&at);
+    _ = c.SetForegroundWindow(hwnd);
+    const chosen = c.TrackPopupMenu(menu, c.TPM_LEFTBUTTON | c.TPM_RETURNCMD | c.TPM_NONOTIFY, at.x, at.y, 0, hwnd, null);
+    if (chosen < id_listen_base) return;
+    const index: usize = @intCast(chosen - id_listen_base);
+    if (index >= list.len) return;
+    setText(settings_win.listen_box, list[index].address);
 }
 
 /// Исполнить просьбу, пришедшую снаружи. Работает в потоке окна: запись
@@ -2521,9 +2617,9 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 wide("STATIC"),
                 wide(""),
                 c.WS_CHILD | c.WS_VISIBLE | c.SS_NOTIFY,
-                234,
+                34,
                 404,
-                206,
+                corner_label_w,
                 20,
                 hwnd,
                 null,

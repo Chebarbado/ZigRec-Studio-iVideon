@@ -37,6 +37,9 @@ pub const Look = struct {
 pub const Facts = struct {
     state: control.State = .off,
     address: []const u8 = listen.default_text,
+    /// По какому адресу до нас достучаться снаружи, если слушаем «на всех»
+    /// (#86). Пусто или равно адресу — показываем сам адрес.
+    reach: []const u8 = "",
     port: u16 = 15599,
     /// Поднимается или уже поднят.
     running: bool = false,
@@ -56,7 +59,13 @@ pub fn look(buf: []u8, f: Facts) Look {
         .listening => blk: {
             const out_to_net = listen.opensToNetwork(f.address);
             var where_buf: [listen.max_text + 8]u8 = undefined;
-            const where = listen.write(&where_buf, f.address, f.port);
+            // «0.0.0.0:15599» человеку на другой машине не набрать: вместо
+            // него — адрес интерфейса, и стрелка перед ним говорит, что это
+            // не то, что задано, а то, куда стучаться.
+            const shown = if (f.reach.len > 0 and !std.mem.eql(u8, f.reach, f.address)) f.reach else f.address;
+            const arrow: []const u8 = if (shown.ptr != f.address.ptr) "→" else "";
+            var addr_buf: [listen.max_text + 8]u8 = undefined;
+            const where = std.fmt.bufPrint(&where_buf, "{s}{s}", .{ arrow, listen.write(&addr_buf, shown, f.port) }) catch "";
             // Число просьб показываем, только когда они были: ноль
             // не сообщает ничего, а место занимает.
             const text = if (f.served > 0)
@@ -202,4 +211,29 @@ test "по адресу можно щёлкнуть, только пока се�
     try std.testing.expect(!addressClickable(.{ .state = .off }));
     try std.testing.expect(!addressClickable(.{ .state = .off, .running = true }));
     try std.testing.expect(!addressClickable(.{ .state = .failed, .why = "порт занят" }));
+}
+
+test "при «всех» в углу — адрес, по которому стучаться, со стрелкой" {
+    var buf: [96]u8 = undefined;
+    const got = look(&buf, .{ .state = .listening, .address = "0.0.0.0", .reach = "192.168.1.5", .port = 15599, .running = true });
+    try testing.expectEqualStrings("MCP →192.168.1.5:15599", got.text);
+    // Красный «виден из сети» при этом остаётся: слушаем-то на всех.
+    try testing.expect(got.exposed);
+    // Петля: стрелки нет, адрес свой.
+    var buf2: [96]u8 = undefined;
+    const home = look(&buf2, .{ .state = .listening, .address = "127.0.0.1", .reach = "127.0.0.1", .port = 15599, .running = true });
+    try testing.expectEqualStrings("MCP 127.0.0.1:15599", home.text);
+    // Интерфейсов не нашлось — показываем как есть, без стрелки.
+    var buf3: [96]u8 = undefined;
+    const bare = look(&buf3, .{ .state = .listening, .address = "0.0.0.0", .port = 15599, .running = true });
+    try testing.expectEqualStrings("MCP 0.0.0.0:15599", bare.text);
+}
+
+/// Самая длинная надпись угла: по ней стенд меряет, влезает ли она.
+pub const longest_text = "MCP →255.255.255.255:65535 · 9999";
+
+test "самая длинная надпись угла и вправду самая длинная из возможных" {
+    var buf: [96]u8 = undefined;
+    const got = look(&buf, .{ .state = .listening, .address = "0.0.0.0", .reach = "255.255.255.255", .port = 65535, .served = 9999, .running = true });
+    try testing.expectEqualStrings(longest_text, got.text);
 }
