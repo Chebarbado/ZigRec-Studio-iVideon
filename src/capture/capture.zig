@@ -51,6 +51,8 @@ pub const Options = struct {
     area: ?Rect = null,
     /// Сколько ждать первого кадра от DXGI, прежде чем признать его негодным.
     downgrade_after_ms: u32 = 1500,
+    /// GDI отдаёт кадр на каждый вызов, даже без изменений (#29, автопанорама).
+    always_frames: bool = false,
 };
 
 /// Захват одного выхода (монитора) через DXGI Desktop Duplication.
@@ -314,7 +316,7 @@ pub const Capturer = struct {
         if (builtin.os.tag != .windows) return Error.Unsupported;
         return switch (opt.backend) {
             .gdi => .{
-                .which = .{ .gdi = try GdiGrabber.init(allocator, opt.area) },
+                .which = .{ .gdi = try GdiGrabber.initWith(allocator, opt.area, opt.always_frames) },
                 .allocator = allocator,
                 .opt = opt,
                 .opened_ns = win32.nowNs(),
@@ -337,7 +339,7 @@ pub const Capturer = struct {
                     };
                 } else |_| {
                     break :blk Capturer{
-                        .which = .{ .gdi = try GdiGrabber.init(allocator, opt.area) },
+                        .which = .{ .gdi = try GdiGrabber.initWith(allocator, opt.area, opt.always_frames) },
                         .allocator = allocator,
                         .opt = opt,
                         .opened_ns = win32.nowNs(),
@@ -411,7 +413,7 @@ pub const Capturer = struct {
             .dxgi => |*d| d.deinit(),
             .gdi => return,
         }
-        var g = try GdiGrabber.init(self.allocator, self.opt.area);
+        var g = try GdiGrabber.initWith(self.allocator, self.opt.area, self.opt.always_frames);
         // Простои DXGI не теряем: по ним видно, сколько времени ушло впустую.
         g.stats.idle = kept.idle;
         self.which = .{ .gdi = g };

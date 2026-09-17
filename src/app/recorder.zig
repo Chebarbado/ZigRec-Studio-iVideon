@@ -306,7 +306,9 @@ pub const Recorder = struct {
     fn loop(self: *Recorder, src: source.Source, settings: Settings) !void {
         const path = self.path_buf[0..self.path_len];
 
-        var cap = try capture.Capturer.open(self.allocator, .{ .output = settings.monitor });
+        // Автопанорама — через GDI: DXGI отдаёт кадр только когда стол
+        // меняется, а область едет и при неподвижном столе — кадр нужен всегда.
+        var cap = try capture.Capturer.open(self.allocator, .{ .output = settings.monitor, .backend = if (settings.follow) .gdi else .auto, .always_frames = settings.follow });
         defer cap.deinit();
         const screen = cap.frameSize();
         const area = try source.resolve(src, screen);

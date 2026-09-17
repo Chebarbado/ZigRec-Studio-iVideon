@@ -804,7 +804,9 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
         src = .{ .area = a };
     }
 
-    var cap = zigrec.capture.Capturer.open(allocator, .{ .output = opt.monitor }) catch |err| {
+    // Автопанорама — через GDI: DXGI отдаёт кадр только когда стол
+    // меняется, а область едет и при неподвижном столе — кадр нужен всегда.
+    var cap = zigrec.capture.Capturer.open(allocator, .{ .output = opt.monitor, .backend = if (opt.follow) .gdi else .auto, .always_frames = opt.follow }) catch |err| {
         try w.print("[rec] ПРОВАЛ: захват не открылся.\n{s}\n", .{explain(err)});
         return 1;
     };

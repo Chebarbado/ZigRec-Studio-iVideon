@@ -36,7 +36,18 @@ pub const Grabber = struct {
     /// ничего не изменилось, и без этой проверки кодировщик получал бы поток
     /// одинаковых кадров.
     prev: []u8,
+    /// Отдавать кадр на каждый вызов, даже когда картинка не изменилась,
+    /// но не чаще тридцати в секунду (#29): при автопанораме область едет
+    /// и при неподвижном столе, и кадр нужен всегда.
+    always: bool = false,
+    last_ns: u64 = 0,
     have_prev: bool = false,
+
+    pub fn initWith(allocator: std.mem.Allocator, area_opt: ?Rect, always: bool) Error!Grabber {
+        var g = try init(allocator, area_opt);
+        g.always = always;
+        return g;
+    }
 
     pub fn init(allocator: std.mem.Allocator, area_opt: ?Rect) Error!Grabber {
         if (builtin.os.tag != .windows) return Error.Unsupported;
@@ -119,7 +130,14 @@ pub const Grabber = struct {
             if (ok == 0) return Error.Failed;
 
             const now = self.bits[0..bytes];
-            if (self.have_prev and std.mem.eql(u8, now, self.prev)) {
+            if (self.always) {
+                // Не чаще тридцати в секунду: иначе цикл записи крутится
+                // на всю катушку ради одинаковых кадров.
+                const min_gap: u64 = 33 * std.time.ns_per_ms;
+                const since = win32.nowNs() -| self.last_ns;
+                if (since < min_gap) c.Sleep(@intCast((min_gap - since) / std.time.ns_per_ms));
+                self.last_ns = win32.nowNs();
+            } else if (self.have_prev and std.mem.eql(u8, now, self.prev)) {
                 if (win32.nowNs() >= deadline) {
                     self.stats.idle += 1;
                     return null;
