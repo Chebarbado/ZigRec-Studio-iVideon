@@ -51,6 +51,10 @@ pub const Kind = enum {
     key,
     /// Активное окно сменилось: заголовок.
     focus,
+    /// Шаблон аннотации, поставленный горячей клавишей при записи (#28):
+    /// x y (тысячные доли области), длительность в мс — в `w`, цвет — в `h`,
+    /// текст — остаток строки.
+    text,
 };
 
 pub const max_title = 120;
@@ -127,6 +131,15 @@ pub const Writer = struct {
 
     pub fn key(self: *Writer, at_ns: u64, code: u32) !void {
         try self.out.print("{d} key {d}\n", .{ at_ns, code });
+        self.count += 1;
+    }
+
+    pub fn text(self: *Writer, at_ns: u64, x_mille: i32, y_mille: i32, len_ms: i32, colour: i32, words: []const u8) !void {
+        try self.out.print("{d} text {d} {d} {d} {d} ", .{ at_ns, x_mille, y_mille, len_ms, colour });
+        for (words[0..@min(words.len, max_title)]) |ch| {
+            try self.out.writeByte(if (ch == '\n' or ch == '\r') ' ' else ch);
+        }
+        try self.out.writeByte('\n');
         self.count += 1;
     }
 
@@ -250,6 +263,15 @@ pub fn read(allocator: std.mem.Allocator, data: []const u8) Error!Events {
         } else if (std.mem.eql(u8, word, "key")) {
             e.kind = .key;
             e.w = parseI32(parts.next()) orelse return Error.Malformed;
+        } else if (std.mem.eql(u8, word, "text")) {
+            e.kind = .text;
+            e.x = parseI32(parts.next()) orelse return Error.Malformed;
+            e.y = parseI32(parts.next()) orelse return Error.Malformed;
+            e.w = parseI32(parts.next()) orelse return Error.Malformed;
+            e.h = parseI32(parts.next()) orelse return Error.Malformed;
+            const rest = parts.rest();
+            e.title_len = @min(rest.len, max_title);
+            @memcpy(e.title[0..e.title_len], rest[0..e.title_len]);
         } else if (std.mem.eql(u8, word, "focus")) {
             e.kind = .focus;
             const rest = parts.rest();
@@ -345,4 +367,19 @@ test "имя файла слоя — рядом с записью, с тем ж�
     try testing.expectEqualStrings("D:\\видео\\запись.events", sidecarPath(&buf, "D:\\видео\\запись.mp4"));
     try testing.expectEqualStrings("D:\\в.идео\\запись.events", sidecarPath(&buf, "D:\\в.идео\\запись"));
     try testing.expectEqualStrings("a.events", sidecarPath(&buf, "a.gif"));
+}
+
+test "шаблон аннотации пишется словом text и читается со всеми полями" {
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    var ev = try Writer.init(&w);
+    try ev.text(700 * ms, 250, 400, 3000, 2, "Шаг");
+    var got = try read(testing.allocator, w.buffered());
+    defer got.deinit(testing.allocator);
+    const e = got.list()[0];
+    try testing.expectEqual(Kind.text, e.kind);
+    try testing.expectEqual(@as(i32, 250), e.x);
+    try testing.expectEqual(@as(i32, 3000), e.w);
+    try testing.expectEqual(@as(i32, 2), e.h);
+    try testing.expectEqualStrings("Шаг", e.text());
 }

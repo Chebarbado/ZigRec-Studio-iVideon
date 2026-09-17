@@ -22,6 +22,7 @@ const media = @import("media.zig");
 const mp4 = @import("mp4.zig");
 const events = @import("events.zig");
 const cursor_paint = @import("../capture/cursor_paint.zig");
+const annot_paint = @import("../capture/annot_paint.zig");
 
 pub const Error = error{
     Unsupported,
@@ -58,6 +59,8 @@ pub const Plan = struct {
     mode: Mode = .reencode,
     /// Курсор из слоя впечатывается — значит, без перекодирования нельзя.
     burns_cursor: bool = false,
+    /// Аннотации есть — тоже впечатываются, тоже перекодирование (#28).
+    burns_annotations: bool = false,
     /// Сколько видеоклипов пойдёт в файл.
     clips: usize = 0,
     /// Сколько из них начинаются не с ключевого кадра.
@@ -104,7 +107,8 @@ pub fn planWith(project: *const timeline.Project, keys: []const []const u64, lay
         if (keyframes.nearest(list, clip.in_ns, key_tolerance_ns) == null) out.off_key += 1;
         if (burn and clip.source < layers.len and layers[clip.source] != null) out.burns_cursor = true;
     }
-    out.mode = if (out.clips > 0 and out.off_key == 0 and out.sources == 1 and !out.burns_cursor) .passthrough else .reencode;
+    out.burns_annotations = project.annotations.count > 0;
+    out.mode = if (out.clips > 0 and out.off_key == 0 and out.sources == 1 and !out.burns_cursor and !out.burns_annotations) .passthrough else .reencode;
     return out;
 }
 
@@ -241,6 +245,8 @@ fn reencode(
                 if (layers[clip.source]) |*layer| burnCursor(layer, inside, opened.pixels, opened.stride, opened.width, opened.height);
             }
             const at_ns = clip.at_ns + (inside - clip.in_ns);
+            // Аннотации живут на времени проекта, а не файла.
+            annot_paint.paintFrame(opened.pixels, opened.stride, opened.width, opened.height, project.annotations.list(), at_ns);
             writer.writeFrame(opened.pixels, @intCast(opened.stride), at_ns) catch return Error.WriteFailed;
             summary.frames += 1;
             summary.duration_ns = at_ns + frame_ns;
@@ -453,8 +459,10 @@ fn writeAudioRaw(project: *const timeline.Project, audio: AudioSources, w: *c.IM
 const testing = std.testing;
 const sec = std.time.ns_per_s;
 
-fn project2(keys_ok: bool, two_sources: bool) !timeline.Project {
-    var p = timeline.Project{};
+/// Проект — в куче: на стеке потока тестов ему не место (см. timeline).
+fn project2(keys_ok: bool, two_sources: bool) !*timeline.Project {
+    const p = try testing.allocator.create(timeline.Project);
+    p.* = .{};
     const a = try p.addSource("a.mp4", 60 * sec);
     const b = try p.addSource("b.mp4", 60 * sec);
     const vt = try p.addTrack(.video, "видео");
@@ -466,9 +474,10 @@ fn project2(keys_ok: bool, two_sources: bool) !timeline.Project {
 
 test "клипы с ключевых кадров одного файла — без перекодирования" {
     const p = try project2(true, false);
+    defer testing.allocator.destroy(p);
     const keys_a = [_]u64{ 0, 2 * sec, 4 * sec, 6 * sec, 8 * sec, 10 * sec, 20 * sec };
     const keys = [_][]const u64{ &keys_a, &.{} };
-    const got = plan(&p, &keys);
+    const got = plan(p, &keys);
     try testing.expectEqual(Mode.passthrough, got.mode);
     try testing.expectEqual(@as(usize, 2), got.clips);
     try testing.expectEqual(@as(usize, 0), got.off_key);
@@ -477,36 +486,42 @@ test "клипы с ключевых кадров одного файла — б
 
 test "клип не с ключевого — перекодирование; два файла — тоже" {
     const off = try project2(false, false);
+    defer testing.allocator.destroy(off);
     const keys_a = [_]u64{ 0, 2 * sec, 4 * sec, 6 * sec, 8 * sec, 10 * sec, 20 * sec };
     const keys = [_][]const u64{ &keys_a, &keys_a };
-    const got = plan(&off, &keys);
+    const got = plan(off, &keys);
     try testing.expectEqual(Mode.reencode, got.mode);
     try testing.expectEqual(@as(usize, 1), got.off_key);
 
     const two = try project2(true, true);
-    const got2 = plan(&two, &keys);
+    defer testing.allocator.destroy(two);
+    const got2 = plan(two, &keys);
     try testing.expectEqual(Mode.reencode, got2.mode);
     try testing.expectEqual(@as(usize, 2), got2.sources);
 }
 
 test "ключевых не знаем — без перекодирования нельзя" {
     const p = try project2(true, false);
+    defer testing.allocator.destroy(p);
     const keys = [_][]const u64{ &.{}, &.{} };
-    try testing.expectEqual(Mode.reencode, plan(&p, &keys).mode);
+    try testing.expectEqual(Mode.reencode, plan(p, &keys).mode);
 }
 
 test "начало клипа в полкадра от ключевого — ещё на нём, дальше — нет" {
-    var p = try project2(true, false);
+    const p = try project2(true, false);
+    defer testing.allocator.destroy(p);
     const keys_a = [_]u64{ 0, 10 * sec, 20 * sec };
     const keys = [_][]const u64{ &keys_a, &.{} };
     p.tracks[0].clips[1].in_ns = 10 * sec + 10 * std.time.ns_per_ms;
-    try testing.expectEqual(Mode.passthrough, plan(&p, &keys).mode);
+    try testing.expectEqual(Mode.passthrough, plan(p, &keys).mode);
     p.tracks[0].clips[1].in_ns = 10 * sec + 40 * std.time.ns_per_ms;
-    try testing.expectEqual(Mode.reencode, plan(&p, &keys).mode);
+    try testing.expectEqual(Mode.reencode, plan(p, &keys).mode);
 }
 
 test "видеодорожка для экспорта — верхняя незаглушённая с клипами" {
-    var p = timeline.Project{};
+    const p = try testing.allocator.create(timeline.Project);
+    defer testing.allocator.destroy(p);
+    p.* = .{};
     const a = try p.addSource("a.mp4", 60 * sec);
     const empty = try p.addTrack(.video, "пусто");
     const muted = try p.addTrack(.video, "выкл");
@@ -515,8 +530,11 @@ test "видеодорожка для экспорта — верхняя нез
     try p.place(good, a, 0, 10 * sec);
     p.tracks[muted].muted = true;
     _ = empty;
-    try testing.expectEqual(@as(?usize, good), videoTrack(&p));
-    try testing.expectEqual(@as(usize, 0), plan(&timeline.Project{}, &.{}).clips);
+    try testing.expectEqual(@as(?usize, good), videoTrack(p));
+    const none = try testing.allocator.create(timeline.Project);
+    defer testing.allocator.destroy(none);
+    none.* = .{};
+    try testing.expectEqual(@as(usize, 0), plan(none, &.{}).clips);
 }
 
 test "у каждого пути есть подпись" {
@@ -526,17 +544,18 @@ test "у каждого пути есть подпись" {
 
 test "курсор из слоя заставляет перекодировать, без слоя — как раньше" {
     const p = try project2(true, false);
+    defer testing.allocator.destroy(p);
     const keys_a = [_]u64{ 0, 2 * sec, 4 * sec, 6 * sec, 8 * sec, 10 * sec, 20 * sec };
     const keys = [_][]const u64{ &keys_a, &.{} };
     var layer = try events.read(testing.allocator, "zigrec-events 1\n0 area 0 0 100 100\n0 move 5 5\n");
     defer layer.deinit(testing.allocator);
     const layers = [_]?events.Events{ layer, null };
-    try testing.expectEqual(Mode.passthrough, planWith(&p, &keys, &layers, false).mode);
-    try testing.expectEqual(Mode.reencode, planWith(&p, &keys, &layers, true).mode);
-    try testing.expect(planWith(&p, &keys, &layers, true).burns_cursor);
+    try testing.expectEqual(Mode.passthrough, planWith(p, &keys, &layers, false).mode);
+    try testing.expectEqual(Mode.reencode, planWith(p, &keys, &layers, true).mode);
+    try testing.expect(planWith(p, &keys, &layers, true).burns_cursor);
     // Слоя нет — впечатывать нечего, путь прежний.
     const none = [_]?events.Events{ null, null };
-    try testing.expectEqual(Mode.passthrough, planWith(&p, &keys, &none, true).mode);
+    try testing.expectEqual(Mode.passthrough, planWith(p, &keys, &none, true).mode);
 }
 
 test "впечатанный курсор оказывается в кадре там, где был в слое" {
@@ -559,4 +578,16 @@ test "впечатанный курсор оказывается в кадре �
     var buf2: [400 * 200 * 4]u8 = @splat(0);
     burnCursor(&layer, 510 * std.time.ns_per_ms, &buf2, 400 * 4, 400, 200);
     try testing.expect(buf2[(60 * 400 + 90) * 4 + 2] > 200);
+}
+
+test "аннотации в проекте заставляют перекодировать" {
+    const p = try project2(true, false);
+    defer testing.allocator.destroy(p);
+    const keys_a = [_]u64{ 0, 2 * sec, 4 * sec, 6 * sec, 8 * sec, 10 * sec, 20 * sec };
+    const keys = [_][]const u64{ &keys_a, &.{} };
+    try testing.expectEqual(Mode.passthrough, plan(p, &keys).mode);
+    _ = try p.addAnnotation(.{ .at_ns = sec, .len_ns = sec, .kind = .text, .x = 100, .y = 100 });
+    const got = plan(p, &keys);
+    try testing.expectEqual(Mode.reencode, got.mode);
+    try testing.expect(got.burns_annotations);
 }

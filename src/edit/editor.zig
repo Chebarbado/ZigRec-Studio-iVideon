@@ -30,6 +30,8 @@ const takes_mod = @import("takes.zig");
 const export_mod = @import("../file/export.zig");
 const events_mod = @import("../file/events.zig");
 const cursor_paint = @import("../capture/cursor_paint.zig");
+const annot_paint = @import("../capture/annot_paint.zig");
+const annot_mod = @import("annotations.zig");
 const clock_play = @import("../sound/clock_play.zig");
 const play = @import("../sound/play.zig");
 const stepping = @import("stepping.zig");
@@ -142,7 +144,7 @@ fn apart() bool {
 const cs_dblclks: c.UINT = 0x0008;
 
 /// Что человек тянет мышью прямо сейчас.
-const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point, mark, mark_edge, panel_edge, pan };
+const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point, mark, mark_edge, panel_edge, pan, annotation };
 
 const Editor = struct {
     allocator: std.mem.Allocator,
@@ -166,6 +168,16 @@ const Editor = struct {
     panel_takes: bool = false,
     /// Выбранная строка списка дублей.
     sel_take: ?usize = null,
+    /// Выбранная аннотация (#28) и что у неё тянут: конец стрелки/указки.
+    sel_ann: ?usize = null,
+    ann_drag_end: bool = false,
+    ann_drag_remembered: bool = false,
+    /// Поле ввода правит текст аннотации.
+    name_of_ann: bool = false,
+    name_ann: usize = 0,
+    /// Где в окне лежит кадр: чтобы щелчки по предпросмотру переводить
+    /// в тысячные доли кадра. Обновляется при каждом рисовании.
+    frame_box: annot_paint.Frame = .{ .left = 0, .top = 0, .width = 0, .height = 0 },
     /// Поле ввода правит заметку дубля; номер исходника — в `name_take_source`.
     name_of_take: bool = false,
     name_take_source: u16 = 0,
@@ -465,6 +477,10 @@ fn drawPreview(dc: c.HDC, width: i32) void {
             const fit = player_mod.fitInto(w, h, self.width, box_h);
             if (fit.w <= 0 or fit.h <= 0) return;
             defer if (self.cursor) |cur| drawLayerCursor(self.dc, fit, self.top, cur);
+            // Аннотации — поверх всего; прямоугольник кадра запоминаем
+            // для мыши.
+            ed.frame_box = .{ .left = fit.x, .top = self.top + fit.y, .width = fit.w, .height = fit.h };
+            defer drawAnnotations(self.dc, ed.frame_box);
 
             // Строки у нас всегда сверху вниз: их так укладывает плеер.
             // Отрицательная высота и означает это направление.
@@ -594,6 +610,7 @@ fn drawRuler(dc: c.HDC, width: i32) void {
     }
 
     drawMarkFlags(dc, width);
+    drawAnnotationTicks(dc, width);
 }
 
 /// Ширина подписи метки на экране — той же прикидкой, что и при рисовании.
@@ -1215,6 +1232,221 @@ fn frameNsOf(info: *const media.Info) u64 {
         if (t.fps > 0) return stepping.frameNs(t.fps);
     }
     return 0;
+}
+
+// ------------------------------------------------------ аннотации (#28)
+
+const id_ann_menu = 860;
+
+/// Нарисовать видимые сейчас аннотации поверх кадра; выбранную — обвести.
+fn drawAnnotations(dc: c.HDC, frame: annot_paint.Frame) void {
+    for (ed.project.annotations.list(), 0..) |a, i| {
+        if (!a.visibleAt(ed.playhead_ns)) continue;
+        annot_paint.drawOnDc(dc, a, frame);
+        if (ed.sel_ann == i) {
+            const p = frame.at(a.x, a.y);
+            const pen = c.CreatePen(c.PS_DOT, 1, 0x00FFFFFF);
+            defer _ = c.DeleteObject(@ptrCast(pen));
+            const old_pen = c.SelectObject(dc, @ptrCast(pen));
+            const old_brush = c.SelectObject(dc, c.GetStockObject(c.NULL_BRUSH));
+            _ = c.Rectangle(dc, p.x - 6, p.y - 6, p.x + 6, p.y + 6);
+            if (a.hasEnd()) {
+                const q = frame.at(a.x2, a.y2);
+                _ = c.Rectangle(dc, q.x - 6, q.y - 6, q.x + 6, q.y + 6);
+            }
+            _ = c.SelectObject(dc, old_pen);
+            _ = c.SelectObject(dc, old_brush);
+        }
+    }
+}
+
+/// Отрезки аннотаций на линейке — тонкой полосой цвета аннотации у нижнего
+/// края: видно, где и сколько держится надпись.
+fn drawAnnotationTicks(dc: c.HDC, width: i32) void {
+    for (ed.project.annotations.list(), 0..) |a, i| {
+        const x0 = @max(ed.view.timeToX(a.at_ns), view_mod.header_w);
+        const x1 = @min(ed.view.timeToX(a.endsAt()), width);
+        if (x1 <= x0) continue;
+        const h: i32 = if (ed.sel_ann == i) 4 else 2;
+        solid(dc, .{ .left = x0, .top = view_mod.ruler_h - 1 - h, .right = x1, .bottom = view_mod.ruler_h - 1 }, a.colour.rgb());
+    }
+}
+
+/// Попала ли точка в кадр предпросмотра.
+fn insideFrame(x: i32, y: i32) bool {
+    const f = ed.frame_box;
+    return f.width > 0 and x >= f.left and x < f.left + f.width and y >= f.top and y < f.top + f.height;
+}
+
+/// Щелчок по кадру: выбрать аннотацию под мышью и начать тянуть.
+fn onFrameDown(x: i32, y: i32) void {
+    const m = ed.frame_box.mille(x, y);
+    // Сорок тысячных — около двадцати точек на кадре в полтысячи.
+    const hit = ed.project.annotations.nearestAt(ed.playhead_ns, m.x, m.y, 40) orelse {
+        ed.sel_ann = null;
+        refresh();
+        return;
+    };
+    ed.sel_ann = hit.index;
+    ed.ann_drag_end = hit.end;
+    ed.ann_drag_remembered = false;
+    ed.drag = .annotation;
+    _ = c.SetCapture(ed.hwnd);
+    sayAnnotation(hit.index);
+    refresh();
+}
+
+fn onFrameDrag(x: i32, y: i32) void {
+    const index = ed.sel_ann orelse return;
+    const m = ed.frame_box.mille(x, y);
+    ed.project.placeAnnotation(index, ed.ann_drag_end, m.x, m.y, !ed.ann_drag_remembered) catch return;
+    ed.ann_drag_remembered = true;
+    refreshStage();
+}
+
+fn sayAnnotation(index: usize) void {
+    if (index >= ed.project.annotations.count) return;
+    const a = ed.project.annotations.list()[index];
+    var buf: [200]u8 = undefined;
+    var t0: [32]u8 = undefined;
+    var t1: [32]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "{s} «{s}» с {s} по {s}; тяните мышью, правая кнопка — меню, Delete — убрать", .{
+        a.kind.label(),
+        a.title(),
+        view_mod.lengthLabel(&t0, a.at_ns),
+        view_mod.lengthLabel(&t1, a.endsAt()),
+    }) catch "аннотация");
+}
+
+/// Правая кнопка по кадру: меню — добавить или править аннотацию.
+fn onFrameRightDown(x: i32, y: i32) void {
+    const m = ed.frame_box.mille(x, y);
+    const hit = ed.project.annotations.nearestAt(ed.playhead_ns, m.x, m.y, 40);
+    if (hit) |h| ed.sel_ann = h.index;
+
+    const menu = c.CreatePopupMenu();
+    if (menu == null) return;
+    defer _ = c.DestroyMenu(menu);
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 0, ui.wide("Текст здесь…"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 1, ui.wide("Стрелка отсюда"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 2, ui.wide("Выноска здесь…"));
+    if (hit != null) {
+        _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 3, ui.wide("Изменить текст…"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 4, ui.wide("Держать дольше (+1 с)"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 5, ui.wide("Держать меньше (−1 с)"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 6, ui.wide("Начать отсюда (с указателя)"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 7, ui.wide("Убрать"));
+    }
+    var at: c.POINT = undefined;
+    _ = c.GetCursorPos(&at);
+    _ = c.SetForegroundWindow(ed.hwnd);
+    const chosen = c.TrackPopupMenu(menu, c.TPM_LEFTBUTTON | c.TPM_RETURNCMD | c.TPM_NONOTIFY, at.x, at.y, 0, ed.hwnd, null);
+    if (chosen < id_ann_menu) return;
+    switch (chosen - id_ann_menu) {
+        0 => addAnnotationAt(.text, m),
+        1 => addAnnotationAt(.arrow, m),
+        2 => addAnnotationAt(.callout, m),
+        3 => if (ed.sel_ann) |i| startAnnotationEdit(i),
+        4 => if (ed.sel_ann) |i| stretchAnnotation(i, true),
+        5 => if (ed.sel_ann) |i| stretchAnnotation(i, false),
+        6 => if (ed.sel_ann) |i| {
+            ed.sel_ann = ed.project.moveAnnotation(i, ed.playhead_ns) catch i;
+            sayAnnotation(ed.sel_ann.?);
+            refresh();
+        },
+        7 => removeSelectedAnnotation(),
+        else => {},
+    }
+}
+
+/// Новая аннотация: с указателя, на три секунды, там, куда ткнули.
+/// У стрелки и выноски конец — чуть правее и ниже, чтобы было за что взять.
+fn addAnnotationAt(kind: annot_mod.Kind, m: annot_paint.Point) void {
+    const made = annot_mod.Annotation{
+        .at_ns = ed.playhead_ns,
+        .len_ns = annot_mod.default_len_ns,
+        .kind = kind,
+        .x = m.x,
+        .y = m.y,
+        .x2 = @min(m.x + 150, annot_mod.per_mille),
+        .y2 = @min(m.y + 120, annot_mod.per_mille),
+        .colour = if (kind == .arrow) .red else .yellow,
+    };
+    const index = ed.project.addAnnotation(made) catch {
+        ed.say("аннотаций больше не помещается: уберите ненужные");
+        refresh();
+        return;
+    };
+    ed.sel_ann = index;
+    refresh();
+    if (kind != .arrow) startAnnotationEdit(index) else sayAnnotation(index);
+}
+
+fn stretchAnnotation(index: usize, longer: bool) void {
+    if (index >= ed.project.annotations.count) return;
+    const a = ed.project.annotations.list()[index];
+    const sec: u64 = std.time.ns_per_s;
+    const len = if (longer) a.len_ns + sec else a.len_ns -| sec;
+    ed.project.setAnnotationLength(index, len) catch return;
+    sayAnnotation(index);
+    refresh();
+}
+
+fn removeSelectedAnnotation() void {
+    const index = ed.sel_ann orelse return;
+    ed.project.removeAnnotation(index) catch return;
+    ed.sel_ann = null;
+    ed.say("аннотация убрана");
+    refresh();
+}
+
+/// Поле ввода текста аннотации — над кадром, там, где она стоит.
+fn startAnnotationEdit(index: usize) void {
+    if (ed.name_box != null) return;
+    if (index >= ed.project.annotations.count) return;
+    const a = ed.project.annotations.list()[index];
+    const p = ed.frame_box.at(a.x, a.y);
+    const box = ui.editBox(ed.hwnd, id_rename_box, p.x, p.y, 220, 22);
+    if (box == null) return;
+    ed.name_box = box;
+    ed.name_of_mark = false;
+    ed.name_of_take = false;
+    ed.name_of_ann = true;
+    ed.name_ann = index;
+    ed.name_prev_proc = @bitCast(c.SetWindowLongPtrW(box, gwlp_wndproc, @bitCast(@intFromPtr(&renameProc))));
+    ui.setText(box, a.title());
+    _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
+    _ = c.SetFocus(box);
+    ed.say("текст аннотации, затем Enter; Esc — оставить как было");
+    refresh();
+}
+
+/// Шаблоны из слоя записи (#28): текст, поставленный горячей клавишей при
+/// записи, становится аннотацией проекта, когда файл кладут на дорожку.
+fn importLayerAnnotations(source: u16, at_ns: u64) void {
+    if (source >= ed.layers.len) return;
+    const layer = ed.layers[source] orelse return;
+    var added: usize = 0;
+    for (layer.list()) |e| {
+        if (e.kind != .text) continue;
+        const made = annot_mod.Annotation{
+            .at_ns = at_ns + e.at_ns,
+            .len_ns = @as(u64, @intCast(@max(e.w, 250))) * std.time.ns_per_ms,
+            .kind = .text,
+            .x = e.x,
+            .y = e.y,
+            .colour = @enumFromInt(@as(u8, @intCast(std.math.clamp(e.h, 0, 7)))),
+        };
+        var with_text = made;
+        with_text.setText(e.text());
+        _ = ed.project.addAnnotation(with_text) catch break;
+        added += 1;
+    }
+    if (added > 0) {
+        var buf: [96]u8 = undefined;
+        ed.say(std.fmt.bufPrint(&buf, "из слоя записи взято аннотаций: {d}", .{added}) catch "аннотации из слоя");
+    }
 }
 
 // ------------------------------------------------------ слой событий (#90)
@@ -3264,6 +3496,7 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
     if (source < ed.frame_ns.len) ed.frame_ns[source] = frameNsOf(&info);
     if (source < ed.keys.len) replaceKeys(source, loadKeys(path));
     if (source < ed.layers.len) replaceLayer(source, loadLayer(path));
+    importLayerAnnotations(source, at_ns);
     // Исходников стало больше — звук для игры читается заново.
     dropAudio();
 
@@ -3425,6 +3658,10 @@ fn laneAreaTop() i32 {
 }
 
 fn onDown(x: i32, y: i32) void {
+    if (insideFrame(x, y)) {
+        onFrameDown(x, y);
+        return;
+    }
     if (onMarksPanelEdge(x, y)) {
         ed.drag = .panel_edge;
         _ = c.SetCapture(ed.hwnd);
@@ -3649,6 +3886,10 @@ fn onMove(x: i32, y: i32) void {
         moveSplitter(y);
         return;
     }
+    if (ed.drag == .annotation) {
+        onFrameDrag(x, y);
+        return;
+    }
     if (ed.drag == .panel_edge) {
         var rect: c.RECT = undefined;
         if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
@@ -3759,7 +4000,7 @@ fn onMove(x: i32, y: i32) void {
         },
         // Ползунок громкости и точку кривой обработали выше: им не нужно
         // время под курсором, им нужна высота.
-        .gain, .curve_point, .mark, .mark_edge, .splitter, .scroll, .panel_edge, .pan, .none => {},
+        .gain, .curve_point, .mark, .mark_edge, .splitter, .scroll, .panel_edge, .pan, .annotation, .none => {},
     }
 }
 
@@ -3780,6 +4021,10 @@ fn moveSplitter(y: i32) void {
 /// Точку надо уметь не только поставить, но и снять, а левая кнопка занята
 /// перетаскиванием: тянуть и удалять одним и тем же нажатием нельзя.
 fn onRightDown(x: i32, y: i32) void {
+    if (insideFrame(x, y)) {
+        onFrameRightDown(x, y);
+        return;
+    }
     if (y < laneAreaTop()) return;
     const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
 
@@ -4067,6 +4312,11 @@ fn writeWholeFile(path: []const u8, bytes: []const u8) bool {
 
 /// Двойной щелчок по имени дорожки открывает поле ввода прямо на месте имени.
 fn onDoubleClick(x: i32, y: i32) void {
+    if (insideFrame(x, y)) {
+        const m = ed.frame_box.mille(x, y);
+        if (ed.project.annotations.nearestAt(ed.playhead_ns, m.x, m.y, 40)) |h| startAnnotationEdit(h.index);
+        return;
+    }
     if (insideMarksPanel(x, y)) |at| {
         onMarksPanelDouble(at);
         return;
@@ -4157,6 +4407,16 @@ fn finishRename(accept: bool) void {
     ed.name_prev_proc = 0;
     _ = c.SetFocus(ed.hwnd);
 
+    const of_ann = ed.name_of_ann;
+    ed.name_of_ann = false;
+    if (of_ann) {
+        if (accept) {
+            ed.project.setAnnotationText(ed.name_ann, typed) catch {};
+            sayAnnotation(ed.name_ann);
+        }
+        refresh();
+        return;
+    }
     const of_take = ed.name_of_take;
     ed.name_of_take = false;
     if (accept and of_take) {
@@ -4574,7 +4834,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                     saveProject()
                 else
                     splitAtPlayhead(),
-                c.VK_DELETE => deleteSelected(),
+                c.VK_DELETE => if (ed.sel_ann != null and ed.project.annotations.visibleCount(ed.playhead_ns) > 0) removeSelectedAnnotation() else deleteSelected(),
                 c.VK_HOME => {
                     ed.playhead_ns = 0;
                     showFrame();

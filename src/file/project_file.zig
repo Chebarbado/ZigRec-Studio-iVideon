@@ -64,6 +64,14 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer, base_dir: []co
         if (m.comment().len > 0) try w.print("note {s}\n", .{m.comment()});
     }
 
+    // Аннотации (#28) — тоже до дорожек, по той же причине, что метки.
+    // Текст — остаток строки.
+    for (project.annotations.list()) |a| {
+        try w.print("ann {d} {d} {s} {d} {d} {d} {d} {s} {s}\n", .{
+            a.at_ns, a.len_ns, @tagName(a.kind), a.x, a.y, a.x2, a.y2, @tagName(a.colour), a.title(),
+        });
+    }
+
     for (project.trackList()) |track| {
         try w.print("track {s} {d} {s}\n", .{
             @tagName(track.kind),
@@ -171,6 +179,22 @@ pub fn read(project: *timeline.Project, data: []const u8, base_dir: []const u8) 
             continue;
         }
 
+        if (std.mem.eql(u8, word, "ann")) {
+            var a = timeline.Annotations.Annotation{};
+            a.at_ns = parseU64(parts.next()) orelse return Error.Malformed;
+            a.len_ns = parseU64(parts.next()) orelse return Error.Malformed;
+            // Незнакомый вид или цвет — не повод не открыть проект.
+            a.kind = std.meta.stringToEnum(timeline.Annotations.Kind, parts.next() orelse "") orelse .text;
+            a.x = parseI32(parts.next()) orelse return Error.Malformed;
+            a.y = parseI32(parts.next()) orelse return Error.Malformed;
+            a.x2 = parseI32(parts.next()) orelse return Error.Malformed;
+            a.y2 = parseI32(parts.next()) orelse return Error.Malformed;
+            a.colour = std.meta.stringToEnum(timeline.Marks.Colour, parts.next() orelse "") orelse .yellow;
+            a.setText(parts.rest());
+            _ = project.annotations.add(a) catch return Error.TooBig;
+            continue;
+        }
+
         if (std.mem.eql(u8, word, "icon")) {
             // Относится к последней прочитанной метке, как `note` и `span`.
             if (project.marks.count == 0) continue;
@@ -274,6 +298,10 @@ fn trim(text: []const u8) []const u8 {
     var out = text;
     while (out.len > 0 and (out[out.len - 1] == '\r' or out[out.len - 1] == ' ')) out.len -= 1;
     return out;
+}
+
+fn parseI32(maybe: ?[]const u8) ?i32 {
+    return std.fmt.parseInt(i32, maybe orelse return null, 10) catch null;
 }
 
 fn parseU64(maybe: ?[]const u8) ?u64 {
@@ -395,6 +423,28 @@ test "проект с относительным путём переезжает
     var moved = timeline.Project{};
     try read(&moved, w.buffered(), "E:\\архив");
     try std.testing.expectEqualStrings("E:\\архив\\запись.mp4", moved.sourceList()[0].fullPath());
+}
+
+test "аннотация пишется одной строкой и читается обратно" {
+    var p = timeline.Project{};
+    _ = try p.addAnnotation(.{ .at_ns = 1_500_000_000, .len_ns = 3_000_000_000, .kind = .callout, .x = 250, .y = 300, .x2 = 600, .y2 = 700, .colour = .red });
+    try p.setAnnotationText(0, "вот эта кнопка");
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&p, &w, "");
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "ann 1500000000 3000000000 callout 250 300 600 700 red вот эта кнопка") != null);
+
+    var back = timeline.Project{};
+    try read(&back, w.buffered(), "");
+    try std.testing.expectEqual(@as(usize, 1), back.annotations.count);
+    const a = back.annotations.list()[0];
+    try std.testing.expectEqual(timeline.Annotations.Kind.callout, a.kind);
+    try std.testing.expectEqual(@as(i32, 600), a.x2);
+    try std.testing.expectEqualStrings("вот эта кнопка", a.title());
+    // Старый файл без ann читается как прежде.
+    var old = timeline.Project{};
+    try read(&old, "zigrec-project 1\n", "");
+    try std.testing.expectEqual(@as(usize, 0), old.annotations.count);
 }
 
 test "записанное читается обратно до последнего числа" {

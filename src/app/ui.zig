@@ -34,6 +34,7 @@ const settings_mod = @import("settings.zig");
 const paths = @import("paths.zig");
 const recent_mod = @import("recent.zig");
 const events_mod = @import("../file/events.zig");
+const annotations = @import("../edit/annotations.zig");
 const hotkey_mod = @import("hotkey.zig");
 const tray_menu = @import("tray_menu.zig");
 const listen = @import("listen.zig");
@@ -180,6 +181,8 @@ const hotkey_record = 1;
 const hotkey_pause = 2;
 /// Сочетание «обвёл область и пишешь».
 const hotkey_area = 3;
+/// Шаблоны аннотаций при записи (#28): Ctrl+Alt+1, 2, 3.
+const hotkey_template_base = 10;
 
 // Числа модификаторов мы держим у себя, чтобы разбор сочетания оставался
 // чистым. Здесь они встречаются с настоящими — и обязаны совпасть.
@@ -836,6 +839,11 @@ var hotkey_note: []const u8 = "";
 /// человек нажмёт и решит, что запись идёт.
 fn registerHotkeys(hwnd: c.HWND) void {
     registerAreaHotkey(hwnd);
+    // Шаблоны аннотаций: Ctrl+Alt+1..3. Не взялись — не беда, запись важнее.
+    var i: c_int = 0;
+    while (i < 3) : (i += 1) {
+        _ = c.RegisterHotKey(hwnd, hotkey_template_base + i, c.MOD_CONTROL | c.MOD_ALT, '1' + @as(c_uint, @intCast(i)));
+    }
     const mod_ctrl_alt: c.UINT = c.MOD_CONTROL | c.MOD_ALT;
     const plain_rec = c.RegisterHotKey(hwnd, hotkey_record, 0, c.VK_F9) != 0;
     const plain_pause = c.RegisterHotKey(hwnd, hotkey_pause, 0, c.VK_F10) != 0;
@@ -2615,6 +2623,7 @@ fn serveCall(call: *control.Call) void {
                     .wheel => w.print("{d:.3} колесо {d} в {d},{d}\n", .{ secs, e.w, e.x, e.y }) catch {},
                     .key => w.print("{d:.3} клавиша {d}\n", .{ secs, e.w }) catch {},
                     .focus => w.print("{d:.3} окно «{s}»\n", .{ secs, e.text() }) catch {},
+                    .text => w.print("{d:.3} надпись «{s}» в {d},{d} на {d} мс\n", .{ secs, e.text(), e.x, e.y, e.w }) catch {},
                 }
             }
             w.print("событий {d}, показано {d}; файл {s}", .{ total, shown, side }) catch {};
@@ -3065,6 +3074,16 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 hotkey_record => if (app.rec.isBusy()) stopRecording() else startRecording(),
                 hotkey_pause => togglePause(),
                 hotkey_area => areaKeyPressed(),
+                hotkey_template_base, hotkey_template_base + 1, hotkey_template_base + 2 => {
+                    const index: usize = @intCast(wp - hotkey_template_base);
+                    if (app.rec.isBusy()) {
+                        app.rec.noteTemplate(index);
+                        var note: [96]u8 = undefined;
+                        setText(app.status, std.fmt.bufPrint(&note, "аннотация «{s}» — в слой записи", .{annotations.templates[index].text}) catch "аннотация в слой");
+                    } else {
+                        setText(app.status, "шаблоны аннотаций (Ctrl+Alt+1..3) кладутся в слой только во время записи");
+                    }
+                },
                 else => {},
             }
             return 0;

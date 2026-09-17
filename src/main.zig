@@ -54,6 +54,9 @@ const usage =
     \\        длина и кадры сверяются нашим читателем
     \\  zigrec pixel-check ФАЙЛ.bgra Ш В X Y
     \\        есть ли в 5x5 вокруг точки цвета курсора (белый и чёрный) — для кадра от ffmpeg
+    \\  zigrec pixel-color ФАЙЛ.bgra Ш В X Y R G B
+    \\        того ли цвета точка кадра от ffmpeg (с допуском на сжатие)
+    \\        есть ли в 5x5 вокруг точки цвета курсора (белый и чёрный) — для кадра от ffmpeg
     \\  zigrec keyframes-smoke ФАЙЛ.mp4 СПИСОК.txt
     \\        самопроверка ключевых кадров: наш список против I-кадров ffmpeg
     \\  zigrec clock-smoke
@@ -340,6 +343,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "pixel-color")) {
+        if (args.len < 10) {
+            try w.writeAll("нужны: файл BGRA, ширина, высота, x, y, R, G, B\n");
+            code = 2;
+        } else {
+            code = try pixelColor(init.io, arena, w, args[2], argInt(args, 3, 0), argInt(args, 4, 0), argInt(args, 5, 0), argInt(args, 6, 0), argInt(args, 7, 0), argInt(args, 8, 0), argInt(args, 9, 0));
+        }
     } else if (eq(cmd, "pixel-check")) {
         if (args.len < 7) {
             try w.writeAll("нужны: файл BGRA, ширина, высота, x, y\n");
@@ -361,7 +371,7 @@ pub fn main(init: std.process.Init) !void {
             try w.writeAll("нужны исходник mp4 и выходной файл\n");
             code = 2;
         } else {
-            code = try exportSmoke(arena, w, args[2], args[3], args.len > 4 and eq(args[4], "--offkey"), args.len > 4 and eq(args[4], "--burn"));
+            code = try exportSmoke(arena, w, args[2], args[3], args.len > 4 and eq(args[4], "--offkey"), args.len > 4 and eq(args[4], "--burn"), args.len > 4 and eq(args[4], "--annot"));
         }
     } else if (eq(cmd, "keyframes-smoke")) {
         if (args.len < 4) {
@@ -3478,7 +3488,7 @@ fn panSmoke(w: anytype) !u8 {
 /// начало на ключевом — ждём путь без перекодирования; с --offkey начало
 /// сдвинуто на полсекунды — ждём перекодирование. Длину и кадры готового
 /// файла сверяем нашим читателем; ffmpeg раскодирует его в check.cmd.
-fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, out_path: []const u8, off_key: bool, burn: bool) !u8 {
+fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, out_path: []const u8, off_key: bool, burn: bool, annot: bool) !u8 {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -3545,8 +3555,16 @@ fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, o
     }
     const layers = [_]?zigrec.events.Events{layer};
 
+    // Аннотация (#28): жёлтая надпись в середине кадра на всё время клипа —
+    // ffmpeg вынет кадр, pixel-color найдёт подложку.
+    if (annot) {
+        _ = try project.addAnnotation(.{ .at_ns = 0, .len_ns = len_ns, .kind = .text, .x = 500, .y = 500, .colour = .yellow });
+        try project.setAnnotationText(0, "Проверка");
+        try w.writeAll("[export] аннотация: жёлтая надпись «Проверка» в 500,500 тысячных\n");
+    }
+
     const decided = zigrec.export_mp4.planWith(project, &key_lists, &layers, burn);
-    const want: zigrec.export_mp4.Mode = if (off_key or burn) .reencode else .passthrough;
+    const want: zigrec.export_mp4.Mode = if (off_key or burn or annot) .reencode else .passthrough;
     try w.print("[export] план: {s}, клипов {d}, не с ключевого {d}\n", .{ decided.mode.label(), decided.clips, decided.off_key });
     if (decided.mode != want) {
         try w.print("[export] ПРОВАЛ: ждали путь «{s}»\n", .{want.label()});
@@ -3597,7 +3615,31 @@ fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, o
         try w.writeAll("[export] ПРОВАЛ: ни одного кадра не записано\n");
         return 1;
     }
-    try w.print("[export] ЭКСПОРТ {s} ПРОХОДИТ\n", .{if (burn) "С КУРСОРОМ ИЗ СЛОЯ" else if (off_key) "С ПЕРЕКОДИРОВАНИЕМ" else "БЕЗ ПЕРЕКОДИРОВАНИЯ"});
+    try w.print("[export] ЭКСПОРТ {s} ПРОХОДИТ\n", .{if (annot) "С АННОТАЦИЕЙ" else if (burn) "С КУРСОРОМ ИЗ СЛОЯ" else if (off_key) "С ПЕРЕКОДИРОВАНИЕМ" else "БЕЗ ПЕРЕКОДИРОВАНИЯ"});
+    return 0;
+}
+
+/// Того ли цвета точка сырого кадра BGRA от ffmpeg: допуск 40 на канал —
+/// сжатие H.264 и цветовое пространство красят на глаз так же, а по
+/// числам чуть иначе.
+fn pixelColor(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, width: u32, height: u32, x: u32, y: u32, r: u32, g: u32, b: u32) !u8 {
+    const data = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 28));
+    defer allocator.free(data);
+    if (data.len < @as(usize, width) * height * 4 or x >= width or y >= height) {
+        try w.writeAll("[pixel] ПРОВАЛ: кадр меньше, чем сказано, или точка за кадром\n");
+        return 1;
+    }
+    const at: usize = (@as(usize, y) * width + x) * 4;
+    const got_b: i32 = data[at];
+    const got_g: i32 = data[at + 1];
+    const got_r: i32 = data[at + 2];
+    try w.print("[pixel] в {d},{d}: R{d} G{d} B{d}, ждали R{d} G{d} B{d}\n", .{ x, y, got_r, got_g, got_b, r, g, b });
+    const tol: i32 = 40;
+    if (@abs(got_r - @as(i32, @intCast(r))) > tol or @abs(got_g - @as(i32, @intCast(g))) > tol or @abs(got_b - @as(i32, @intCast(b))) > tol) {
+        try w.writeAll("[pixel] ПРОВАЛ: цвет не тот\n");
+        return 1;
+    }
+    try w.writeAll("[pixel] ЦВЕТ СОШЁЛСЯ\n");
     return 0;
 }
 

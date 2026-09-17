@@ -16,6 +16,7 @@ const cursor = @import("../capture/cursor.zig");
 const pan = @import("../capture/pan.zig");
 const events = @import("../file/events.zig");
 const event_tap = @import("../capture/event_tap.zig");
+const annotations = @import("../edit/annotations.zig");
 const encode = @import("../file/encode.zig");
 const source = @import("../capture/source.zig");
 const mp4 = @import("../file/mp4.zig");
@@ -208,6 +209,9 @@ pub const Recorder = struct {
     area_y: std.atomic.Value(i32) = .init(0),
     audio_samples: std.atomic.Value(u64) = .init(0),
     sound_failed: std.atomic.Value(bool) = .init(false),
+    /// Шаблон аннотации, который просят положить в слой (#28): ноль —
+    /// ничего, иначе номер шаблона плюс один. Кладёт окно, забирает поток.
+    template_pending: std.atomic.Value(u8) = .init(0),
 
     message: [256]u8 = @splat(0),
     message_len: std.atomic.Value(usize) = .init(0),
@@ -225,6 +229,11 @@ pub const Recorder = struct {
 
     fn setState(self: *Recorder, s: State) void {
         self.state_raw.store(@intFromEnum(s), .release);
+    }
+
+    /// Положить шаблон аннотации в слой при следующем кадре.
+    pub fn noteTemplate(self: *Recorder, index: usize) void {
+        self.template_pending.store(@intCast(index + 1), .release);
     }
 
     pub fn isBusy(self: *Recorder) bool {
@@ -405,6 +414,17 @@ pub const Recorder = struct {
             }
             if (layer) |*ev| {
                 const cursor_at: ?events.Point = if (painter.position()) |p| .{ .x = p.x, .y = p.y } else null;
+                // Шаблон по горячей клавише: надпись там, где курсор,
+                // в тысячных долях области, на три секунды.
+                const pending = self.template_pending.swap(0, .acq_rel);
+                if (pending > 0 and pending - 1 < annotations.templates.len) {
+                    const t = annotations.templates[pending - 1];
+                    const cx: i32 = if (cursor_at) |p| p.x - (screen.x + current.x) else @intCast(current.width / 2);
+                    const cy: i32 = if (cursor_at) |p| p.y - (screen.y + current.y) else @intCast(current.height / 2);
+                    const mx = std.math.clamp(@divTrunc(cx * annotations.per_mille, @as(i32, @intCast(@max(current.width, 1)))), 0, annotations.per_mille);
+                    const my = std.math.clamp(@divTrunc(cy * annotations.per_mille, @as(i32, @intCast(@max(current.height, 1)))), 0, annotations.per_mille);
+                    ev.text(clock.frameTime(frame.timestamp_ns), mx, my, 3000, @intFromEnum(t.colour), t.text) catch {};
+                }
                 tap.sampleNow(ev, clock.frameTime(frame.timestamp_ns), cursor_at, .{
                     .x = screen.x + current.x,
                     .y = screen.y + current.y,

@@ -211,6 +211,20 @@ if defined FFMPEG (
     echo [check] ПРОВАЛ: в экспортированном кадре нет курсора из слоя
     exit /b 1
   )
+  rem Аннотации (#28): экспорт с жёлтой надписью в середине кадра; ffmpeg вынимает
+  rem кадр, pixel-color ждёт цвет подложки (жёлтый 0xE8C820 в BGR → R232 G200 B32)
+  rem чуть правее и ниже левого верхнего угла надписи (960+30, 540+12).
+  "zig-out\bin\zigrec.exe" export-smoke ".check\gate.mp4" ".check\export_annot.mp4" --annot
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: экспорт с аннотацией
+    exit /b 1
+  )
+  "%FFMPEG%" -v error -ss 0.5 -i ".check\export_annot.mp4" -frames:v 1 -f rawvideo -pix_fmt bgra -y ".check\annot_frame.bgra" > nul 2>&1
+  "zig-out\bin\zigrec.exe" pixel-color ".check\annot_frame.bgra" 1920 1080 990 552 232 200 32
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: в экспортированном кадре нет подложки аннотации
+    exit /b 1
+  )
   "%FFMPEG%" -v error -i ".check\export_pass.mp4" -f null - > ".check\export_errors.txt" 2>&1
   "%FFMPEG%" -v error -i ".check\export_re.mp4" -f null - >> ".check\export_errors.txt" 2>&1
   rem Пустой файл ошибок — ноль байт. Проверяем размер прямо в теле for:

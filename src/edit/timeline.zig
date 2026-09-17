@@ -18,11 +18,13 @@
 const std = @import("std");
 const volume = @import("../sound/volume.zig");
 const marks_mod = @import("marks.zig");
+const annot_mod = @import("annotations.zig");
 
 /// Громкость наружу, чтобы окно не тянуло звуковой модуль отдельно.
 pub const Volume = volume;
 /// Метки наружу — по той же причине.
 pub const Marks = marks_mod;
+pub const Annotations = annot_mod;
 
 pub const TrackKind = enum {
     video,
@@ -315,6 +317,8 @@ const Snapshot = struct {
     /// Метки отменяются наравне с резкой: поставленная не туда метка —
     /// такая же правка, как сдвинутый не туда клип.
     marks: marks_mod.Marks = .{},
+    /// Аннотации (#28) — тоже.
+    annotations: annot_mod.Annotations = .{},
 };
 
 /// Проект. **Заводится в куче, а не на стеке**: вместе с журналом отмен
@@ -334,6 +338,9 @@ pub const Project = struct {
     /// На времени проекта, а не на клипе: подвинул клип — метка осталась
     /// там, где поставлена. Так это работает в монтажных программах.
     marks: marks_mod.Marks = .{},
+
+    /// Аннотации поверх кадра (#28): текст, стрелки, выноски со временем.
+    annotations: annot_mod.Annotations = .{},
 
     /// Откуда берутся номера связок. Ноль означает «ещё ни одной»:
     /// первый же вызов `newLink` выдаст единицу.
@@ -412,7 +419,7 @@ pub const Project = struct {
             while (i + 1 < max_history) : (i += 1) self.history[i] = self.history[i + 1];
             self.past -= 1;
         }
-        var shot = Snapshot{ .track_count = self.track_count, .marks = self.marks };
+        var shot = Snapshot{ .track_count = self.track_count, .marks = self.marks, .annotations = self.annotations };
         @memcpy(shot.tracks[0..self.track_count], self.tracks[0..self.track_count]);
         self.history[self.past] = shot;
         self.past += 1;
@@ -429,7 +436,7 @@ pub const Project = struct {
     pub fn undo(self: *Project) bool {
         if (self.past == 0) return false;
         // Текущее состояние кладём вперёд, чтобы можно было вернуть.
-        var now = Snapshot{ .track_count = self.track_count, .marks = self.marks };
+        var now = Snapshot{ .track_count = self.track_count, .marks = self.marks, .annotations = self.annotations };
         @memcpy(now.tracks[0..self.track_count], self.tracks[0..self.track_count]);
 
         // Журнал — одна лента: слева от `past` лежит прошлое, справа —
@@ -444,13 +451,14 @@ pub const Project = struct {
 
         self.track_count = shot.track_count;
         self.marks = shot.marks;
+        self.annotations = shot.annotations;
         @memcpy(self.tracks[0..shot.track_count], shot.tracks[0..shot.track_count]);
         return true;
     }
 
     pub fn redo(self: *Project) bool {
         if (self.future == 0) return false;
-        var now = Snapshot{ .track_count = self.track_count, .marks = self.marks };
+        var now = Snapshot{ .track_count = self.track_count, .marks = self.marks, .annotations = self.annotations };
         @memcpy(now.tracks[0..self.track_count], self.tracks[0..self.track_count]);
 
         const shot = self.history[self.past];
@@ -460,6 +468,7 @@ pub const Project = struct {
 
         self.track_count = shot.track_count;
         self.marks = shot.marks;
+        self.annotations = shot.annotations;
         @memcpy(self.tracks[0..shot.track_count], shot.tracks[0..shot.track_count]);
         return true;
     }
@@ -1012,6 +1021,59 @@ pub const Project = struct {
         self.remember();
         self.marks = probe;
         return where;
+    }
+
+    // ------------------------------------------------------ аннотации (#28)
+
+    pub fn addAnnotation(self: *Project, made: annot_mod.Annotation) Error!usize {
+        var probe = self.annotations;
+        const where = probe.add(made) catch return Error.TooManyClips;
+        self.remember();
+        self.annotations = probe;
+        return where;
+    }
+
+    pub fn removeAnnotation(self: *Project, index: usize) Error!void {
+        if (index >= self.annotations.count) return Error.NoSuchThing;
+        self.remember();
+        self.annotations.removeAt(index) catch unreachable;
+    }
+
+    /// Передвинуть по времени; возвращает новый номер.
+    pub fn moveAnnotation(self: *Project, index: usize, at_ns: u64) Error!usize {
+        if (index >= self.annotations.count) return Error.NoSuchThing;
+        if (self.annotations.items[index].at_ns == at_ns) return index;
+        var probe = self.annotations;
+        const where = probe.moveTo(index, at_ns) catch return Error.NoSuchThing;
+        self.remember();
+        self.annotations = probe;
+        return where;
+    }
+
+    pub fn setAnnotationLength(self: *Project, index: usize, len_ns: u64) Error!void {
+        if (index >= self.annotations.count) return Error.NoSuchThing;
+        self.remember();
+        self.annotations.setLength(index, len_ns) catch unreachable;
+    }
+
+    pub fn setAnnotationText(self: *Project, index: usize, text: []const u8) Error!void {
+        if (index >= self.annotations.count) return Error.NoSuchThing;
+        const clean = std.mem.trim(u8, text, " ");
+        if (std.mem.eql(u8, self.annotations.items[index].title(), clean)) return;
+        self.remember();
+        self.annotations.setText(index, clean) catch unreachable;
+    }
+
+    /// Поставить в кадре. Каждое движение мыши — не снимок: снимок берётся
+    /// один раз, когда тянуть начали (`remember_now`).
+    pub fn placeAnnotation(self: *Project, index: usize, end: bool, x: i32, y: i32, remember_now: bool) Error!void {
+        if (index >= self.annotations.count) return Error.NoSuchThing;
+        if (remember_now) self.remember();
+        if (end) {
+            self.annotations.placeEnd(index, x, y) catch unreachable;
+        } else {
+            self.annotations.place(index, x, y) catch unreachable;
+        }
     }
 
     pub fn removeMark(self: *Project, index: usize) Error!void {
@@ -2170,4 +2232,19 @@ test "чужой номер при постановке значка — отк�
     try std.testing.expectError(Error.NoSuchThing, p.setMarkIcon(0, .star));
     try std.testing.expectError(Error.NoSuchThing, p.setTrackIcon(9, .star));
     try std.testing.expectError(Error.NoSuchThing, p.setClipIcon(0, 0, .star));
+}
+
+test "аннотации отменяются наравне с резкой" {
+    const p = try std.testing.allocator.create(Project);
+    defer std.testing.allocator.destroy(p);
+    p.* = .{};
+    const i = try p.addAnnotation(.{ .at_ns = std.time.ns_per_s, .len_ns = 2 * std.time.ns_per_s, .kind = .text, .x = 100, .y = 200 });
+    try p.setAnnotationText(i, "смотри");
+    try std.testing.expectEqual(@as(usize, 1), p.annotations.count);
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqualStrings("", p.annotations.list()[0].title());
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(@as(usize, 0), p.annotations.count);
+    try std.testing.expect(p.redo());
+    try std.testing.expectEqual(@as(usize, 1), p.annotations.count);
 }
