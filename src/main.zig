@@ -51,7 +51,7 @@ const usage =
     \\        самопроверка хранения: Portable и Classic
     \\  zigrec shot-smoke ФАЙЛ.png [НОМЕР]
     \\        самопроверка снимка: эталонный кадр записывается картинкой
-    \\  zigrec frame-smoke ФАЙЛ [СЕКУНДЫ]
+    \\  zigrec frame-smoke ФАЙЛ [СЕКУНДЫ] [МАКС_ШИРИНА]
     \\        самопроверка кадра: размер, шаг строки, длина буфера
     \\  zigrec pack-smoke ФАЙЛ.zigrec
     \\        самопроверка архива проекта: собрать, прочитать, сверить
@@ -233,7 +233,7 @@ pub fn main(init: std.process.Init) !void {
             try w.writeAll("нужен путь к файлу\n");
             code = 2;
         } else {
-            code = try frameSmoke(arena, w, args[2], argInt(args, 3, 1));
+            code = try frameSmoke(arena, w, args[2], argInt(args, 3, 1), argInt(args, 4, 0));
         }
     } else if (eq(cmd, "pack-smoke")) {
         if (args.len < 3) {
@@ -1082,7 +1082,13 @@ fn frameIgnored(userdata: ?*anyopaque) void {
 /// останавливал его на десятки миллисекунд, а перетаскивание указателя —
 /// на всё время перетаскивания.
 fn navSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, asks: u32) !u8 {
-    var service = zigrec.frames.Service{ .allocator = allocator };
+    // Просим кадр такого размера, какой показывает окно редактора:
+    // именно это и меряем.
+    var service = zigrec.frames.Service{
+        .allocator = allocator,
+        .max_width = 960,
+        .max_height = 540,
+    };
     service.start(frameIgnored, null) catch |err| {
         try w.print("[nav] ПРОВАЛ: служба кадров не завелась: {s}\n", .{@errorName(err)});
         return 1;
@@ -1126,17 +1132,18 @@ fn navSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const 
     const Peek = struct {
         got: *bool,
         at: *u64,
+        size: *[2]u32,
         fn look(self: @This(), pixels: []const u8, width: u32, height: u32, at_ns: u64) void {
             _ = pixels;
-            _ = width;
-            _ = height;
             self.got.* = true;
             self.at.* = at_ns;
+            self.size.* = .{ width, height };
         }
     };
     var at_ns: u64 = 0;
+    var size: [2]u32 = .{ 0, 0 };
     while (zigrec.win32.nowNs() -| started < 10 * std.time.ns_per_s) {
-        if (service.withFrame(Peek, .{ .got = &arrived, .at = &at_ns }, Peek.look)) break;
+        if (service.withFrame(Peek, .{ .got = &arrived, .at = &at_ns, .size = &size }, Peek.look)) break;
         io.sleep(.fromMilliseconds(10), .awake) catch break;
     }
     const waited_ms = @as(f64, @floatFromInt(zigrec.win32.nowNs() -| started)) / @as(f64, std.time.ns_per_ms);
@@ -1150,9 +1157,11 @@ fn navSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const 
         return 1;
     }
 
-    try w.print("[nav] кадр пришёл через {d:.0} мс, время кадра {d:.2} с\n", .{
+    try w.print("[nav] кадр пришёл через {d:.0} мс, время кадра {d:.2} с, размер {d}x{d}\n", .{
         waited_ms,
         @as(f64, @floatFromInt(at_ns)) / @as(f64, std.time.ns_per_s),
+        size[0],
+        size[1],
     });
     try w.print("[nav] просьб в очереди осталось {d}\n", .{service.behind()});
     try w.writeAll("[nav] ОКНО НЕ ЖДЁТ ДЕКОДЕР\n");
@@ -1651,20 +1660,34 @@ fn shotSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const
 /// Появился после того, как кадр с камеры расползся косыми полосами,
 /// а два предположения о шаге строки подряд оказались неверными. Мерить
 /// надо, а не догадываться.
-fn frameSmoke(allocator: std.mem.Allocator, w: anytype, path: []const u8, seconds: u32) !u8 {
-    var p = zigrec.player.Player.open(allocator, path) catch |err| {
+fn frameSmoke(allocator: std.mem.Allocator, w: anytype, path: []const u8, seconds: u32, max_width: u32) !u8 {
+    const started = zigrec.win32.nowNs();
+    // Высоту не задаём отдельно: просим уместиться в квадрат по ширине,
+    // а соотношение сторон сохранит сам пересчёт.
+    var p = zigrec.player.Player.openScaled(allocator, path, max_width, max_width) catch |err| {
         try w.print("[frame] ПРОВАЛ: {s} — {s}\n", .{ std.fs.path.basename(path), @errorName(err) });
         return 1;
     };
     defer p.close();
 
+    const opened_ns = zigrec.win32.nowNs() -| started;
     try w.print("[frame] {s}: кадр {d}x{d}, длительность {d:.2} с\n", .{
         std.fs.path.basename(path),
         p.width,
         p.height,
         @as(f64, @floatFromInt(p.duration_ns)) / @as(f64, std.time.ns_per_s),
     });
+    if (max_width > 0) {
+        try w.print("[frame] просили не шире {d}: {s}\n", .{
+            max_width,
+            if (p.scaled) "декодер согласился уменьшать" else "декодер отказался, кадр как в файле",
+        });
+    }
+    try w.print("[frame] открытие {d:.0} мс\n", .{
+        @as(f64, @floatFromInt(opened_ns)) / @as(f64, std.time.ns_per_ms),
+    });
 
+    const before_show = zigrec.win32.nowNs();
     p.showAt(@as(u64, seconds) * std.time.ns_per_s) catch |err| {
         try w.print("[frame] ПРОВАЛ на кадре: {s}\n", .{@errorName(err)});
         return 1;
@@ -1673,6 +1696,9 @@ fn frameSmoke(allocator: std.mem.Allocator, w: anytype, path: []const u8, second
         try w.writeAll("[frame] ПРОВАЛ: кадр не получен\n");
         return 1;
     }
+    try w.print("[frame] перемотка и раскодирование {d:.0} мс\n", .{
+        @as(f64, @floatFromInt(zigrec.win32.nowNs() -| before_show)) / @as(f64, std.time.ns_per_ms),
+    });
 
     const row_bytes = @as(usize, p.width) * 4;
     const measured = if (p.height > 0) p.last_length / p.height else 0;

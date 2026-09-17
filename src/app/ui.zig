@@ -33,6 +33,7 @@ const hotkey_mod = @import("hotkey.zig");
 const tray_menu = @import("tray_menu.zig");
 const listen = @import("listen.zig");
 const corner = @import("mcp_corner.zig");
+const boost_mod = @import("boost.zig");
 
 pub const Rect = capture_types.Rect;
 
@@ -55,9 +56,11 @@ const id_menu_open_dir = 300;
 const id_menu_exit = 301;
 const id_menu_settings = 310;
 const id_menu_about = 320;
+const id_menu_boost = 321;
 const id_set_portable = 340;
 const id_set_area_key = 341;
 const id_set_listen = 342;
+const id_set_boost = 343;
 /// Номера строк меню значка в трее. Далеко от прочих: они приходят тем же
 /// путём, что и нажатия кнопок.
 const id_tray_base = 800;
@@ -1098,6 +1101,7 @@ const SettingsWindow = struct {
     home_label: c.HWND = null,
     area_key_box: c.HWND = null,
     listen_box: c.HWND = null,
+    boost_box: c.HWND = null,
     /// Нажали «Сохранить», а не «Отмена».
     accepted: bool = false,
 };
@@ -1208,6 +1212,7 @@ fn collectSettings() void {
     }
 
     app.prefs.serve_at_start = c.SendMessageW(settings_win.serve_box, c.BM_GETCHECK, 0, 0) != 0;
+    app.prefs.boost_off = c.SendMessageW(settings_win.boost_box, c.BM_GETCHECK, 0, 0) == 0;
 
     // Сначала способ хранения: от него зависит, куда лягут настройки.
     const want: paths.Mode = if (c.SendMessageW(settings_win.portable_box, c.BM_GETCHECK, 0, 0) != 0)
@@ -1292,7 +1297,7 @@ fn showSettings(owner: c.HWND) void {
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         520,
-        378,
+        404,
         owner,
         null,
         hinst,
@@ -1317,22 +1322,33 @@ fn showSettings(owner: c.HWND) void {
 
     settings_win.serve_box = button(hwnd, "Поднимать сервер при запуске", id_set_serve, 14, 200, 300, 24, c.BS_AUTOCHECKBOX);
 
+    settings_win.boost_box = button(
+        hwnd,
+        "Разгон: включить все ускорения (ultra-speed)",
+        id_set_boost,
+        14,
+        228,
+        380,
+        24,
+        c.BS_AUTOCHECKBOX,
+    );
+
     settings_win.portable_box = button(
         hwnd,
         "Portable: хранить своё рядом с программой",
         id_set_portable,
         14,
-        228,
+        256,
         360,
         24,
         c.BS_AUTOCHECKBOX,
     );
     // Прямо говорим, где программа оставляет следы: это её решение,
     // но знать о нём должен владелец машины.
-    settings_win.home_label = label(hwnd, "", 14, 256, 490, 20);
+    settings_win.home_label = label(hwnd, "", 14, 284, 490, 20);
 
-    _ = button(hwnd, "Сохранить", id_set_ok, 300, 292, 100, 30, 0);
-    _ = button(hwnd, "Отмена", id_set_cancel, 408, 292, 90, 30, 0);
+    _ = button(hwnd, "Сохранить", id_set_ok, 300, 316, 100, 30, 0);
+    _ = button(hwnd, "Отмена", id_set_cancel, 408, 316, 90, 30, 0);
 
     // Показываем то, что есть сейчас.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1349,6 +1365,7 @@ fn showSettings(owner: c.HWND) void {
 
     const mode = paths.currentMode();
     _ = c.SendMessageW(settings_win.portable_box, c.BM_SETCHECK, if (mode == .portable) 1 else 0, 0);
+    _ = c.SendMessageW(settings_win.boost_box, c.BM_SETCHECK, if (app.prefs.boost()) 1 else 0, 0);
     var home_text: [640]u8 = undefined;
     setText(settings_win.home_label, std.fmt.bufPrint(&home_text, "Своё лежит в: {s}", .{app.home}) catch app.home);
 
@@ -1359,6 +1376,7 @@ fn showSettings(owner: c.HWND) void {
         settings_win.serve_box,
         settings_win.area_key_box,
         settings_win.listen_box,
+        settings_win.boost_box,
     }) |h| applyFont(h);
     var child = c.GetWindow(hwnd, c.GW_CHILD);
     while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) applyFont(child);
@@ -1394,6 +1412,8 @@ fn buildMenu(hwnd: c.HWND) void {
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(tools_menu), wide("Настройки"));
 
     const help_menu = c.CreatePopupMenu();
+    _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_boost, wide("Чем ускорено…"));
+    _ = c.AppendMenuW(help_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_about, wide("О программе"));
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(help_menu), wide("Справка"));
 
@@ -1578,6 +1598,42 @@ fn openOutputDir() void {
     const n = std.unicode.utf8ToUtf16Le(&wide_buf, app.out_dir) catch return;
     wide_buf[n] = 0;
     _ = c.ShellExecuteW(null, wide("open"), @ptrCast(&wide_buf), null, null, c.SW_SHOWNORMAL);
+}
+
+/// Окно «Чем ускорено».
+///
+/// Показывает не обещания, а то, что работает в этом сеансе, и отдельной
+/// строкой — версию программы с датой сборки. Когда человек говорит
+/// «тормозит», первый вопрос — что именно у него включилось.
+fn showBoost(hwnd: c.HWND) void {
+    var items: [boost_mod.max_items]boost_mod.Speedup = undefined;
+    const list = boost_mod.list(.{ .boost = app.prefs.boost() }, &items);
+    const counted = boost_mod.tally(list);
+
+    var text: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&text);
+    w.print("Zig-Rec Studio {s}, собрана {s}\r\n", .{
+        version.VERSION,
+        version.VERSION_DATE,
+    }) catch {};
+    w.print("Разгон {s}. Включено {d} из {d}{s}.\r\n\r\n", .{
+        if (app.prefs.boost()) "включён" else "выключен",
+        counted.on,
+        counted.total,
+        if (counted.failed > 0) ", из них не завелось: 1" else "",
+    }) catch {};
+
+    for (list) |it| {
+        w.print("• {s} — {s}\r\n", .{ it.name, it.state() }) catch {};
+        w.print("   {s}\r\n", .{it.what}) catch {};
+        if (it.cost.len > 0) w.print("   цена: {s}\r\n", .{it.cost}) catch {};
+        w.print("   чем сделано: {s}\r\n\r\n", .{it.made_by}) catch {};
+    }
+
+    var wide_buf: [8192]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, w.buffered()) catch return;
+    wide_buf[n] = 0;
+    _ = c.MessageBoxW(hwnd, @ptrCast(&wide_buf), wide("Чем ускорено"), c.MB_OK | c.MB_ICONINFORMATION);
 }
 
 fn showAbout(hwnd: c.HWND) void {
@@ -2095,6 +2151,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_exit => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_menu_settings => showSettings(hwnd),
                 id_menu_about => showAbout(hwnd),
+                id_menu_boost => showBoost(hwnd),
                 id_cursor => {
                     const checked = c.SendMessageW(app.chk_cursor, c.BM_GETCHECK, 0, 0) != 0;
                     app.settings.cursor = checked;

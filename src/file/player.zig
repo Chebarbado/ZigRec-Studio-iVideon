@@ -63,6 +63,9 @@ pub const Player = struct {
     /// 3 — шаг из типа. Нужно для замеров: без этого приходится гадать,
     /// какая ветка сработала.
     route: u8 = 0,
+    /// Кадр приходит уменьшенным: декодер отдаёт ровно тот размер,
+    /// какой мы показываем.
+    scaled: bool = false,
     /// Строки идут снизу вверх.
     ///
     /// Направление спрашиваем у самого типа — по знаку шага строки, —
@@ -72,6 +75,24 @@ pub const Player = struct {
     bottom_up: bool = false,
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) Error!Player {
+        return openScaled(allocator, path, 0, 0);
+    }
+
+    /// Открыть файл, попросив кадр не больше заданного.
+    ///
+    /// Ускорение из «Разгона», и крупное. Кадр 4K весит 33 мегабайта,
+    /// и раскодировать его целиком, чтобы показать в окошке шириной меньше
+    /// тысячи точек, — работа впустую. Media Foundation умеет отдавать
+    /// уменьшенный кадр сама, своим преобразователем.
+    ///
+    /// Ноль в пределах означает «как в файле»: так открывают для снимка,
+    /// где нужен настоящий размер.
+    pub fn openScaled(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        max_width: u32,
+        max_height: u32,
+    ) Error!Player {
         if (builtin.os.tag != .windows) return Error.Unsupported;
         if (openGif(allocator, path)) |from_gif| return from_gif else |_| {}
 
@@ -86,7 +107,17 @@ pub const Player = struct {
         var attrs: ?*c.IMFAttributes = null;
         if (win32.failed(c.MFCreateAttributes(&attrs, 2))) return Error.NoVideo;
         defer _ = attrs.?.lpVtbl.*.Release.?(@ptrCast(attrs.?));
-        _ = attrs.?.lpVtbl.*.SetUINT32.?(attrs.?, &c.MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1);
+        // Две настройки видеообработки взаимно исключают друг друга: если
+        // поставить обе, читатель не создастся вовсе. Проверено дорого —
+        // кадр перестал приходить с ошибкой «нет картинки».
+        //
+        // Когда нужен уменьшенный кадр, берём продвинутую: простая умеет
+        // только менять цветовое пространство, а уменьшать отказывается.
+        if (max_width > 0 and max_height > 0) {
+            _ = attrs.?.lpVtbl.*.SetUINT32.?(attrs.?, &c.MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1);
+        } else {
+            _ = attrs.?.lpVtbl.*.SetUINT32.?(attrs.?, &c.MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1);
+        }
 
         var reader: ?*c.IMFSourceReader = null;
         if (win32.failed(c.MFCreateSourceReaderFromURL(@ptrCast(&wide), attrs, &reader))) return Error.NoVideo;
@@ -103,7 +134,28 @@ pub const Player = struct {
         const w = want.?;
         _ = w.lpVtbl.*.SetGUID.?(w, &c.MF_MT_MAJOR_TYPE, &c.MFMediaType_Video);
         _ = w.lpVtbl.*.SetGUID.?(w, &c.MF_MT_SUBTYPE, &c.MFVideoFormat_RGB32);
-        if (win32.failed(r.lpVtbl.*.SetCurrentMediaType.?(r, c.MF_SOURCE_READER_FIRST_VIDEO_STREAM, null, w))) {
+
+        // Сначала просим размер, какой нам нужен. Если Media Foundation
+        // откажется — просим без размера: лучше медленно, чем никак.
+        var scaled = false;
+        if (max_width > 0 and max_height > 0) {
+            const native = nativeSize(r);
+            const want_size = fitDown(native.width, native.height, max_width, max_height);
+            if (want_size.width > 0 and want_size.width < native.width) {
+                _ = w.lpVtbl.*.SetUINT64.?(w, &c.MF_MT_FRAME_SIZE, win32.pack2(want_size.width, want_size.height));
+                scaled = !win32.failed(r.lpVtbl.*.SetCurrentMediaType.?(
+                    r,
+                    c.MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                    null,
+                    w,
+                ));
+                if (!scaled) {
+                    // Размер не взяли — убираем просьбу и пробуем как есть.
+                    _ = w.lpVtbl.*.DeleteItem.?(w, &c.MF_MT_FRAME_SIZE);
+                }
+            }
+        }
+        if (!scaled and win32.failed(r.lpVtbl.*.SetCurrentMediaType.?(r, c.MF_SOURCE_READER_FIRST_VIDEO_STREAM, null, w))) {
             return Error.NoVideo;
         }
 
@@ -135,6 +187,7 @@ pub const Player = struct {
         return .{
             .allocator = allocator,
             .reader = r,
+            .scaled = scaled,
             .width = width,
             .height = height,
             .duration_ns = durationOf(r),
@@ -328,6 +381,43 @@ fn durationOf(r: *c.IMFSourceReader) u64 {
     ))) return 0;
     defer _ = c.PropVariantClear(&value);
     return @as(u64, @intCast(value.unnamed_0.unnamed_0.unnamed_0.uhVal.QuadPart)) * 100;
+}
+
+pub const Size = struct { width: u32 = 0, height: u32 = 0 };
+
+/// Какой кадр лежит в файле на самом деле.
+fn nativeSize(r: *c.IMFSourceReader) Size {
+    var native: ?*c.IMFMediaType = null;
+    if (win32.failed(r.lpVtbl.*.GetNativeMediaType.?(r, c.MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &native))) {
+        return .{};
+    }
+    defer _ = native.?.lpVtbl.*.Release.?(@ptrCast(native.?));
+    var packed_size: u64 = 0;
+    _ = native.?.lpVtbl.*.GetUINT64.?(native.?, &c.MF_MT_FRAME_SIZE, &packed_size);
+    return .{
+        .width = @intCast(packed_size >> 32),
+        .height = @intCast(packed_size & 0xFFFF_FFFF),
+    };
+}
+
+/// Ужать размер кадра под пределы, сохранив соотношение сторон.
+///
+/// Только вниз: растягивать кадр ради показа незачем — это работа впустую
+/// и потеря резкости. Чётные числа: кодеки и преобразователи не любят
+/// нечётных сторон.
+pub fn fitDown(width: u32, height: u32, max_width: u32, max_height: u32) Size {
+    if (width == 0 or height == 0 or max_width == 0 or max_height == 0) return .{};
+    if (width <= max_width and height <= max_height) return .{ .width = width, .height = height };
+
+    const by_width = @as(u64, max_width) * 1000 / width;
+    const by_height = @as(u64, max_height) * 1000 / height;
+    const scale = @min(by_width, by_height);
+
+    var out_w: u32 = @intCast(@as(u64, width) * scale / 1000);
+    var out_h: u32 = @intCast(@as(u64, height) * scale / 1000);
+    out_w = @max(out_w & ~@as(u32, 1), 2);
+    out_h = @max(out_h & ~@as(u32, 1), 2);
+    return .{ .width = out_w, .height = out_h };
 }
 
 /// Шаг строки, выведенный из длины буфера.
@@ -542,4 +632,52 @@ test "пустые числа не роняют и не делят на ноль
 test "буфер короче кадра не даёт шага больше строки" {
     // Если длина явно мала, лучше честная ширина, чем чтение за границей.
     try std.testing.expectEqual(@as(usize, 2568), strideFor(642, 362, 1000));
+}
+
+test "кадр ужимается под окно, сохраняя соотношение сторон" {
+    // 4K в окошко 960 по ширине.
+    const got = fitDown(3840, 2160, 960, 960);
+    try std.testing.expectEqual(@as(u32, 960), got.width);
+    try std.testing.expectEqual(@as(u32, 540), got.height);
+}
+
+test "маленький кадр не растягивается" {
+    // Растягивать ради показа незачем: работа впустую и потеря резкости.
+    const got = fitDown(640, 480, 1920, 1080);
+    try std.testing.expectEqual(@as(u32, 640), got.width);
+    try std.testing.expectEqual(@as(u32, 480), got.height);
+}
+
+test "высокий кадр ужимается по высоте" {
+    const got = fitDown(1080, 1920, 960, 540);
+    try std.testing.expect(got.height <= 540);
+    try std.testing.expect(got.width <= 960);
+    // Соотношение сторон сохранилось с точностью до чётности.
+    const want_w = 540 * 1080 / 1920;
+    try std.testing.expect(@abs(@as(i64, got.width) - @as(i64, want_w)) <= 2);
+}
+
+test "стороны выходят чётными" {
+    // Кодеки и преобразователи не любят нечётных сторон.
+    for ([_][2]u32{ .{ 1999, 1111 }, .{ 3841, 2161 }, .{ 777, 333 } }) |pair| {
+        const got = fitDown(pair[0], pair[1], 500, 500);
+        try std.testing.expectEqual(@as(u32, 0), got.width % 2);
+        try std.testing.expectEqual(@as(u32, 0), got.height % 2);
+        try std.testing.expect(got.width >= 2 and got.height >= 2);
+    }
+}
+
+test "нулевые размеры не роняют счёт" {
+    try std.testing.expectEqual(@as(u32, 0), fitDown(0, 100, 50, 50).width);
+    try std.testing.expectEqual(@as(u32, 0), fitDown(100, 0, 50, 50).width);
+    try std.testing.expectEqual(@as(u32, 0), fitDown(100, 100, 0, 50).width);
+}
+
+test "ужатый кадр заметно меньше исходного" {
+    // Ради этого всё и затевалось: 4K весит 33 МБ, а показываем мы его
+    // в окошке, где помещается меньше миллиона точек.
+    const big = @as(u64, 3840) * 2160;
+    const got = fitDown(3840, 2160, 960, 540);
+    const small = @as(u64, got.width) * got.height;
+    try std.testing.expect(small * 10 < big);
 }

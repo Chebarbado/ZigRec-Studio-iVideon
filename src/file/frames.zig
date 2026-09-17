@@ -111,6 +111,14 @@ pub const Service = struct {
     /// Последняя беда, о которой стоит сказать человеку.
     trouble: ?anyerror = null,
 
+    /// Каким просить кадр у декодера. Ноль — как в файле.
+    ///
+    /// Показываем мы кадр в окошке, и раскодировать ради этого 4K — работа
+    /// впустую. Предел ставит тот, кто показывает: он один знает, сколько
+    /// у него места.
+    max_width: u32 = 0,
+    max_height: u32 = 0,
+
     notify: ?Notify = null,
     userdata: ?*anyopaque = null,
 
@@ -198,7 +206,12 @@ pub const Service = struct {
                 open = null;
                 open_len = 0;
 
-                open = player_mod.Player.open(self.allocator, ask.file()) catch |err| {
+                open = player_mod.Player.openScaled(
+                    self.allocator,
+                    ask.file(),
+                    self.max_width,
+                    self.max_height,
+                ) catch |err| {
                     self.report(err, ask.number);
                     continue;
                 };

@@ -24,6 +24,7 @@ pub const hotkey = @import("app/hotkey.zig");
 pub const tray_menu = @import("app/tray_menu.zig");
 pub const listen = @import("app/listen.zig");
 pub const mcp_corner = @import("app/mcp_corner.zig");
+pub const boost = @import("app/boost.zig");
 pub const recent = @import("app/recent.zig");
 pub const capture_types = @import("capture/capture_types.zig");
 pub const capture = @import("capture/capture.zig");

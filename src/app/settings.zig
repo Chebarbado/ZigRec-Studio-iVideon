@@ -54,6 +54,20 @@ pub const Settings = struct {
     /// Поднимать сервер сразу при запуске окна.
     serve_at_start: bool = false,
 
+    /// «Разгон»: включить все ускорения.
+    ///
+    /// Записан наоборот — как «разгон выключен», — чтобы умолчание вышло
+    /// нулевым. Иначе настройки целиком легли бы в .exe готовыми байтами:
+    /// это уже случалось и стоило восьмисот килобайт.
+    boost_off: bool = false,
+
+    /// Включён ли разгон. По умолчанию да: медленный редактор по умолчанию —
+    /// не то, чем стоит гордиться, а выключатель нужен, чтобы разобраться,
+    /// когда что-то ведёт себя странно.
+    pub fn boost(self: *const Settings) bool {
+        return !self.boost_off;
+    }
+
     pub const default_template = "zigrec-%d-%t.mp4";
     /// Пределы высоты кадра. Те же, что у правила в `editor_view.zig`,
     /// но проверяются и здесь: файл настроек правят руками.
@@ -159,6 +173,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("preview {d}\n", .{s.preview_h});
     try w.print("port {d}\n", .{s.port});
     try w.print("listen {s}\n", .{s.listenAddress()});
+    try w.print("boost {d}\n", .{@intFromBool(s.boost())});
     try w.print("serve {d}\n", .{@intFromBool(s.serve_at_start)});
 }
 
@@ -192,6 +207,8 @@ pub fn read(data: []const u8) Error!Settings {
             _ = out.setAreaKey(rest);
         } else if (std.mem.eql(u8, word, "preview")) {
             _ = out.setPreviewH(rest);
+        } else if (std.mem.eql(u8, word, "boost")) {
+            out.boost_off = std.mem.eql(u8, rest, "0");
         } else if (std.mem.eql(u8, word, "listen")) {
             _ = out.setListenAddress(rest);
         } else if (std.mem.eql(u8, word, "port")) {
@@ -425,4 +442,21 @@ test "адрес переживает запись и чтение" {
 test "файл прежнего выпуска без строки об адресе даёт умолчание" {
     const back = try read("zigrec-settings 1\r\nport 15599\r\n");
     try std.testing.expectEqualStrings(listen_mod.default_text, back.listenAddress());
+}
+
+test "разгон включён по умолчанию и переживает запись" {
+    var s = Settings.init();
+    try std.testing.expect(s.boost());
+
+    s.boost_off = true;
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&s, &w);
+    const back = try read(w.buffered());
+    try std.testing.expect(!back.boost());
+}
+
+test "файл прежнего выпуска без строки о разгоне даёт разгон включённым" {
+    const back = try read("zigrec-settings 1\r\nport 15599\r\n");
+    try std.testing.expect(back.boost());
 }

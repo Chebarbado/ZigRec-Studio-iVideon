@@ -1645,7 +1645,7 @@ fn onWheel(delta: i16, screen_x: i32) void {
 
 // ----------------------------------------------------------- снимок кадра
 
-/// Копия кадра, взятая у службы.
+/// Копия кадра.
 const Shot = struct {
     pixels: []u8,
     width: u32,
@@ -1653,29 +1653,46 @@ const Shot = struct {
     at_ns: u64,
 };
 
+/// Взять кадр под указателем в настоящем размере.
+///
+/// Открываем файл заново и на один кадр: служба держит его ужатым ради
+/// скорости показа, а снимок должен быть таким, каким он в файле.
+fn fullFrame() ?Shot {
+    const found = clipUnderPlayhead() orelse return null;
+    const clip = found.clip;
+    const sources = ed.project.sourceList();
+    if (clip.source >= sources.len) return null;
+
+    ed.say("снимаю в полном размере…");
+    refresh();
+
+    var p = player_mod.Player.open(ed.allocator, sources[clip.source].fullPath()) catch return null;
+    defer p.close();
+
+    const inside = clip.in_ns + (ed.playhead_ns -| clip.at_ns);
+    p.showAt(inside) catch return null;
+    if (!p.ready) return null;
+
+    const copy = ed.allocator.alloc(u8, p.pixels.len) catch return null;
+    @memcpy(copy, p.pixels);
+    return .{ .pixels = copy, .width = p.width, .height = p.height, .at_ns = p.at_ns };
+}
+
 /// Сохранить то, что сейчас в окне кадра, отдельной картинкой.
 ///
 /// Кладём рядом с записями: снимок делают из той же работы, что и запись,
 /// и искать его человек пойдёт туда же. Имя — по времени кадра: два снимка
 /// подряд не затрут друг друга, а по имени видно, откуда кадр.
 fn saveFrame() void {
-    // Берём копию кадра под замком: пока мы его сжимаем, служба может
-    // положить следующий.
-    var shot: ?Shot = null;
-    const Grab = struct {
-        out: *?Shot,
-        allocator: std.mem.Allocator,
-
-        fn grab(self: @This(), pixels: []const u8, w: u32, h: u32, at_ns: u64) void {
-            const copy = self.allocator.alloc(u8, pixels.len) catch return;
-            @memcpy(copy, pixels);
-            self.out.* = .{ .pixels = copy, .width = w, .height = h, .at_ns = at_ns };
-        }
-    };
-    _ = ed.frames.withFrame(Grab, .{ .out = &shot, .allocator = ed.allocator }, Grab.grab);
-
-    const frame = shot orelse {
-        ed.say("снимать нечего: кадра пока нет");
+    // Снимок берём в НАСТОЯЩЕМ размере, а не тот уменьшенный кадр, что
+    // показан в окне. Для показа кадр ужат нарочно — это ускорение, —
+    // но снимок делают, чтобы его потом смотреть, и отдавать вместо
+    // четырёх тысяч точек девятьсот значило бы молча подменить товар.
+    //
+    // Поэтому файл открывается заново, на один кадр. Это дольше, и об этом
+    // сказано в строке состояния.
+    const frame = fullFrame() orelse {
+        ed.say("снимать нечего: поставьте указатель на клип");
         refresh();
         return;
     };
@@ -2261,7 +2278,25 @@ fn runInner(allocator: std.mem.Allocator, path: ?[]const u8, report: ?*ui.Layout
     project.* = .{};
 
     ed = .{ .allocator = allocator, .project = project };
-    ed.frames = .{ .allocator = allocator };
+    // Просим у декодера кадр не больше, чем помещается в окно кадра.
+    // Раскодировать 4K, чтобы показать его в окошке шириной меньше тысячи
+    // точек, — работа впустую: на настоящем файле это шесть секунд против
+    // одной. Предел взят с запасом на распахнутое окно и не меняется
+    // на ходу: смена размера заставляла бы переоткрывать файл.
+    // С выключенным разгоном просим кадр как есть: так можно посмотреть,
+    // не в ускорении ли дело, когда что-то выглядит странно.
+    var home_buf: [paths.max_path]u8 = undefined;
+    const boost_on = blk: {
+        const dir = paths.base(&home_buf) catch break :blk true;
+        var threaded: std.Io.Threaded = .init(allocator, .{});
+        defer threaded.deinit();
+        break :blk settings_mod.load(threaded.io(), allocator, dir).boost();
+    };
+    ed.frames = .{
+        .allocator = allocator,
+        .max_width = if (boost_on) 1280 else 0,
+        .max_height = if (boost_on) 720 else 0,
+    };
     // Верх таймлайна опускаем под панель кнопок.
     ed.view = .{};
     // Высота окна кадра — та, на которой её оставили в прошлый раз.
