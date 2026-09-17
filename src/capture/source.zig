@@ -142,6 +142,96 @@ pub fn listMonitors(allocator: std.mem.Allocator) Error![]Monitor {
     return list.toOwnedSlice(allocator) catch Error.OutOfMemory;
 }
 
+// ------------------------------------------------------- список окон
+
+/// Сколько окон показываем. Больше сорока — это уже не список, а свалка,
+/// и нужное в нём ищут дольше, чем набирают часть заголовка руками.
+pub const max_windows = 40;
+
+/// Самое маленькое окно, которое имеет смысл предлагать для записи.
+///
+/// Мельче — это всплывающие подсказки, пустые окна служб и невидимые
+/// окна-помощники, которых на рабочем столе десятки. Показать их значит
+/// утопить в них те три окна, которые человек ищет.
+pub const min_window_side: u32 = 100;
+
+/// Одно окно в списке.
+pub const WindowInfo = struct {
+    /// Само окно. Держим указателем, а не числом.
+    ///
+    /// Обратное превращение числа в указатель здесь невозможно: указатели
+    /// окон Windows не выровнены, и Zig на проверке выравнивания честно
+    /// падает. Число нужно только наружу — в ответ сервера, — и обратно
+    /// оно не возвращается: снаружи окно называют заголовком, а не адресом.
+    handle: c.HWND = null,
+    title: [256]u8 = @splat(0),
+    title_len: usize = 0,
+    area: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+
+    pub fn name(self: *const WindowInfo) []const u8 {
+        return self.title[0..self.title_len];
+    }
+
+    /// Окно числом — для ответа наружу.
+    pub fn number(self: *const WindowInfo) usize {
+        return @intFromPtr(self.handle);
+    }
+};
+
+/// Стоит ли показывать такое окно в списке.
+///
+/// Отдельным чистым правилом: это единственное место, где решается,
+/// что человек увидит, а чего не увидит вовсе, — и ошибка здесь выглядит
+/// как «моего окна нет в списке», без всякого объяснения.
+pub fn worthShowing(title_len: usize, visible: bool, area: Rect) bool {
+    if (!visible) return false;
+    if (title_len == 0) return false;
+    return area.width >= min_window_side and area.height >= min_window_side;
+}
+
+/// Видимые окна с заголовками, сверху вниз по порядку перекрытия.
+///
+/// Порядок не случаен: сверху лежит то, на что человек смотрит сейчас,
+/// и его окно чаще всего оказывается первым или вторым в списке.
+pub fn listWindows(out: []WindowInfo) []const WindowInfo {
+    if (builtin.os.tag != .windows) return out[0..0];
+    var count: usize = 0;
+    var hwnd = c.GetTopWindow(null);
+    while (hwnd != null and count < out.len) : (hwnd = c.GetWindow(hwnd, c.GW_HWNDNEXT)) {
+        var title_buf: [1024]u8 = undefined;
+        const title = windowTitle(hwnd, &title_buf);
+        const area = windowArea(hwnd) catch continue;
+        if (!worthShowing(title.len, c.IsWindowVisible(hwnd) != 0, area)) continue;
+
+        var item = WindowInfo{ .handle = hwnd, .area = area };
+        const n = fitTitle(title, item.title.len);
+        @memcpy(item.title[0..n], title[0..n]);
+        item.title_len = n;
+        out[count] = item;
+        count += 1;
+    }
+    return out[0..count];
+}
+
+/// Обрезать заголовок по букве, а не по байту: русская буква занимает
+/// два байта, и обрезка ровно по границе места оставила бы половину буквы.
+fn fitTitle(text: []const u8, room: usize) usize {
+    if (text.len <= room) return text.len;
+    var n = room;
+    while (n > 0 and (text[n] & 0xC0) == 0x80) n -= 1;
+    return n;
+}
+
+/// Живо ли ещё это окно.
+///
+/// Окно могло закрыться между тем, как список показали, и тем, как в нём
+/// выбрали строку, — и писать в пустоту вместо закрытого окна нельзя.
+pub fn stillThere(hwnd: c.HWND) bool {
+    if (builtin.os.tag != .windows) return false;
+    if (hwnd == null) return false;
+    return c.IsWindow(hwnd) != 0;
+}
+
 /// Заголовок окна в UTF-8. Только широкая версия: `GetWindowTextA` отдаёт
 /// текст в кодировке системы, и русские заголовки превращаются в мусор.
 pub fn windowTitle(hwnd: c.HWND, out: []u8) []const u8 {
@@ -301,4 +391,42 @@ test "поиск подстроки в широких строках" {
         std.unicode.utf8ToUtf16LeStringLiteral("abcd"),
     ));
     try std.testing.expect(!containsW(hay, &[_]u16{}));
+}
+
+test "в список не попадает то, что нельзя записать" {
+    const big = Rect{ .x = 0, .y = 0, .width = 800, .height = 600 };
+    const tiny = Rect{ .x = 0, .y = 0, .width = 40, .height = 40 };
+
+    try std.testing.expect(worthShowing(10, true, big));
+    // Невидимое окно записывать нечего.
+    try std.testing.expect(!worthShowing(10, false, big));
+    // Без заголовка его не отличить от соседнего такого же.
+    try std.testing.expect(!worthShowing(0, true, big));
+    // Крошечные окна — это подсказки и служебные окна, их десятки.
+    try std.testing.expect(!worthShowing(10, true, tiny));
+}
+
+test "граница размера проходит там, где написано" {
+    const exact = Rect{ .x = 0, .y = 0, .width = min_window_side, .height = min_window_side };
+    try std.testing.expect(worthShowing(1, true, exact));
+
+    const narrow = Rect{ .x = 0, .y = 0, .width = min_window_side - 1, .height = min_window_side };
+    try std.testing.expect(!worthShowing(1, true, narrow));
+
+    const low = Rect{ .x = 0, .y = 0, .width = min_window_side, .height = min_window_side - 1 };
+    try std.testing.expect(!worthShowing(1, true, low));
+}
+
+test "длинный заголовок обрезается по букве, а не по байту" {
+    // Русская буква занимает два байта. Обрезка по границе места оставила бы
+    // половину буквы, то есть ромб с вопросительным знаком вместо имени.
+    const text = "ааааа";
+    try std.testing.expectEqual(@as(usize, 10), fitTitle(text, 10));
+    try std.testing.expectEqual(@as(usize, 8), fitTitle(text, 9));
+    try std.testing.expectEqual(@as(usize, 8), fitTitle(text, 8));
+    try std.testing.expectEqual(@as(usize, 0), fitTitle(text, 1));
+}
+
+test "пустое окно живым не считается" {
+    try std.testing.expect(!stillThere(null));
 }

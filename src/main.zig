@@ -41,6 +41,8 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec window-smoke
+    \\        самопроверка захвата окна: окно находится и съёмка едет за ним
     \\  zigrec remote-smoke
     \\        самопроверка пульта: подписи влезают, пульт не в кадре
     \\  zigrec hotkey-smoke [СОЧЕТАНИЕ]
@@ -207,6 +209,8 @@ pub fn main(init: std.process.Init) !void {
         } else {
             code = try mixSmoke(init.io, arena, w, args[2], args[3]);
         }
+    } else if (eq(cmd, "window-smoke")) {
+        code = try windowSmoke(init.io, w);
     } else if (eq(cmd, "remote-smoke")) {
         code = try remoteSmoke(w);
     } else if (eq(cmd, "hotkey-smoke")) {
@@ -635,26 +639,21 @@ fn listMonitors(allocator: std.mem.Allocator, w: anytype) !u8 {
 }
 
 fn listWindows(w: anytype) !u8 {
-    const c = zigrec.win32.c;
-    var count: u32 = 0;
-    var hwnd = c.GetTopWindow(null);
-    while (hwnd != null and count < 40) : (hwnd = c.GetWindow(hwnd, c.GW_HWNDNEXT)) {
-        if (c.IsWindowVisible(hwnd) == 0) continue;
-        var title_buf: [1024]u8 = undefined;
-        const title = zigrec.source.windowTitle(hwnd, &title_buf);
-        if (title.len == 0) continue;
-        const area = zigrec.source.windowArea(hwnd) catch continue;
-        if (area.width < 100 or area.height < 100) continue;
+    // Сам список считает `source`: он же отдаёт его окну записи и серверу,
+    // и три разных списка окон в одной программе разошлись бы на первой же
+    // правке правила «какое окно показывать».
+    var buf: [zigrec.source.max_windows]zigrec.source.WindowInfo = undefined;
+    const list = zigrec.source.listWindows(&buf);
+    for (list) |it| {
         try w.print("{d}x{d} в точке ({d},{d})  {s}\n", .{
-            area.width,
-            area.height,
-            area.x,
-            area.y,
-            title,
+            it.area.width,
+            it.area.height,
+            it.area.x,
+            it.area.y,
+            it.name(),
         });
-        count += 1;
     }
-    if (count == 0) try w.writeAll("видимых окон не нашлось\n");
+    if (list.len == 0) try w.writeAll("видимых окон не нашлось\n");
     return 0;
 }
 
@@ -1297,6 +1296,156 @@ fn checkWindow(w: anytype, name: []const u8, got: anyerror!zigrec.ui.Layout) !bo
     }
     try w.print("[ui] {s}: всё поместилось, под кнопками не рисуем\n", .{name});
     return false;
+}
+
+/// Самопроверка захвата окна.
+///
+/// Задача #77. Съёмка окна обещает две вещи: окно найдётся по части
+/// заголовка и область поедет за ним. Вторую глазами не проверить —
+/// надо двигать окно и смотреть, что снимается, — поэтому здесь окно
+/// заводится своё, двигается и спрашивается заново.
+fn windowSmoke(io: std.Io, w: anytype) !u8 {
+    const c = zigrec.win32.c;
+    const source = zigrec.source;
+    if (@import("builtin").os.tag != .windows) {
+        try w.writeAll("[window] пропущено: не Windows\n");
+        return 0;
+    }
+
+    // Без этого Windows отдаёт растянутые координаты при масштабе больше
+    // ста процентов, и сравнение размеров разъезжается на ровном месте.
+    _ = c.SetProcessDPIAware();
+
+    const class_name = "ZigRecWindowSmoke";
+    const title = "Стенд захвата окна · ZigRec";
+    const want_w: i32 = 640;
+    const want_h: i32 = 360;
+
+    const hinst: c.HINSTANCE = @ptrCast(c.GetModuleHandleW(null));
+    var wc = std.mem.zeroes(c.WNDCLASSEXW);
+    wc.cbSize = @sizeOf(c.WNDCLASSEXW);
+    wc.lpfnWndProc = smokeWindowProc;
+    wc.hInstance = hinst;
+    wc.lpszClassName = std.unicode.utf8ToUtf16LeStringLiteral(class_name);
+    wc.hbrBackground = @ptrFromInt(@as(usize, c.COLOR_BTNFACE) + 1);
+    _ = c.RegisterClassExW(&wc);
+
+    const hwnd = c.CreateWindowExW(
+        c.WS_EX_TOPMOST | c.WS_EX_TOOLWINDOW | c.WS_EX_NOACTIVATE,
+        std.unicode.utf8ToUtf16LeStringLiteral(class_name),
+        std.unicode.utf8ToUtf16LeStringLiteral(title),
+        c.WS_POPUP | c.WS_BORDER,
+        120,
+        120,
+        want_w,
+        want_h,
+        null,
+        null,
+        hinst,
+        null,
+    ) orelse {
+        try w.writeAll("[window] ПРОВАЛ: своё окно не создалось\n");
+        return 1;
+    };
+    defer _ = c.DestroyWindow(hwnd);
+    _ = c.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
+    _ = c.UpdateWindow(hwnd);
+    // Окну надо дать проявиться: список окон читает то, что показано,
+    // а показ происходит не в тот же миг, когда об этом попросили.
+    io.sleep(.fromMilliseconds(200), .awake) catch {};
+
+    var bad: u8 = 0;
+
+    // 1. Окно есть в списке, и с теми размерами, какие заказаны.
+    var seen: [zigrec.source.max_windows]source.WindowInfo = undefined;
+    const list = source.listWindows(&seen);
+    try w.print("[window] видимых окон в списке: {d}\n", .{list.len});
+
+    var found: ?source.WindowInfo = null;
+    for (list) |it| {
+        if (std.mem.indexOf(u8, it.name(), "Стенд захвата окна") != null) found = it;
+    }
+    const mine = found orelse {
+        try w.writeAll("[window] ПРОВАЛ: своего же окна нет в списке\n");
+        return 1;
+    };
+    try w.print("[window] нашлось: «{s}» {d}x{d} в точке ({d},{d})\n", .{
+        mine.name(),
+        mine.area.width,
+        mine.area.height,
+        mine.area.x,
+        mine.area.y,
+    });
+    if (mine.area.width != want_w or mine.area.height != want_h) {
+        try w.print("[window] ПРОВАЛ: заказывали {d}x{d}, а в списке {d}x{d}\n", .{
+            want_w, want_h, mine.area.width, mine.area.height,
+        });
+        bad = 1;
+    }
+
+    // 2. Поиск по части заголовка приводит к тому же окну.
+    const by_title = source.findWindow("Стенд захвата") catch {
+        try w.writeAll("[window] ПРОВАЛ: по части заголовка окно не находится\n");
+        return 1;
+    };
+    if (by_title != mine.handle) {
+        try w.writeAll("[window] ПРОВАЛ: по заголовку нашлось другое окно\n");
+        bad = 1;
+    } else {
+        try w.writeAll("[window] по части заголовка нашлось то же самое окно\n");
+    }
+
+    // 3. Окно из списка считается живым, и его номер годится для ответа.
+    if (!source.stillThere(mine.handle)) {
+        try w.writeAll("[window] ПРОВАЛ: окно из списка считается закрытым\n");
+        bad = 1;
+    }
+    if (mine.number() == 0) {
+        try w.writeAll("[window] ПРОВАЛ: у окна из списка нулевой номер\n");
+        bad = 1;
+    }
+
+    // 4. Главное обещание: область едет за окном.
+    const moved_to_x: i32 = 400;
+    const moved_to_y: i32 = 260;
+    _ = c.SetWindowPos(hwnd, null, moved_to_x, moved_to_y, 0, 0, c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    io.sleep(.fromMilliseconds(200), .awake) catch {};
+
+    const after = source.windowArea(hwnd) catch {
+        try w.writeAll("[window] ПРОВАЛ: после переноса размеры окна не читаются\n");
+        return 1;
+    };
+    try w.print("[window] подвинули на ({d},{d}) — снимаемая область стала ({d},{d}) {d}x{d}\n", .{
+        moved_to_x, moved_to_y, after.x, after.y, after.width, after.height,
+    });
+    // Прямоугольник берётся без невидимой рамки тени, поэтому он не обязан
+    // совпасть с заказанным пиксель в пиксель; важно, что он поехал.
+    if (after.x == mine.area.x and after.y == mine.area.y) {
+        try w.writeAll("[window] ПРОВАЛ: окно подвинули, а область осталась на месте\n");
+        bad = 1;
+    }
+    if (after.width != mine.area.width or after.height != mine.area.height) {
+        try w.writeAll("[window] ПРОВАЛ: от переноса изменился размер области\n");
+        bad = 1;
+    }
+
+    // 5. Закрытое окно должно опознаваться как закрытое, а не писаться в пустоту.
+    _ = c.DestroyWindow(hwnd);
+    io.sleep(.fromMilliseconds(100), .awake) catch {};
+    if (source.stillThere(mine.handle)) {
+        try w.writeAll("[window] ПРОВАЛ: закрытое окно всё ещё считается живым\n");
+        bad = 1;
+    } else {
+        try w.writeAll("[window] закрытое окно опознано как закрытое\n");
+    }
+
+    if (bad != 0) return 1;
+    try w.writeAll("[window] ЗАХВАТ ОКНА В ПОРЯДКЕ\n");
+    return 0;
+}
+
+fn smokeWindowProc(hwnd: zigrec.win32.c.HWND, msg: zigrec.win32.c.UINT, wp: zigrec.win32.c.WPARAM, lp: zigrec.win32.c.LPARAM) callconv(.winapi) zigrec.win32.c.LRESULT {
+    return zigrec.win32.c.DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 /// Самопроверка громкости и кривой громкости.
@@ -2508,6 +2657,14 @@ fn mcpSmoke(allocator: std.mem.Allocator, w: anytype, port: u32) !u8 {
         .{
             .what = "список мониторов",
             .line = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"list_monitors\"}}",
+            .expect = "точке",
+        },
+        .{
+            // Список окон — то же, что показывает кнопка «Выбрать окно…».
+            // Если сервер о нём не знает, «найди и запиши моё окно» через
+            // MCP становится невозможным, а обещано оно в описании.
+            .what = "список окон",
+            .line = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"list_windows\"}}",
             .expect = "точке",
         },
         .{

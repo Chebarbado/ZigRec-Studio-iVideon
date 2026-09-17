@@ -42,6 +42,9 @@ pub const Rect = capture_types.Rect;
 const id_record = 101;
 const id_pause = 102;
 const id_area = 103;
+const id_window = 114;
+/// С этого номера идут строки списка окон во всплывающем меню.
+const id_window_base = 900;
 const id_full = 104;
 const id_cursor = 105;
 const id_open = 106;
@@ -112,6 +115,12 @@ const App = struct {
     /// Что снимаем. `null` — весь экран.
     area: ?Rect = null,
     window_title: ?[]const u8 = null,
+
+    /// Выбранное окно. `null` — окно не выбрано, снимаем экран или область.
+    window_handle: c.HWND = null,
+    /// Заголовок выбранного окна — для надписи в окне.
+    window_name: [128]u8 = @splat(0),
+    window_name_len: usize = 0,
     out_dir: []const u8 = "",
     last_path: [std.fs.max_path_bytes]u8 = undefined,
     last_path_len: usize = 0,
@@ -420,7 +429,7 @@ fn startRecording() void {
     @memcpy(app.last_path[0..path.len], path);
     app.last_path_len = path.len;
 
-    const src: source.Source = if (app.area) |a| .{ .area = a } else .{ .monitor = app.settings.monitor };
+    const src: source.Source = chosenSource();
     // Файл проверяем до захвата: занятый плеером файл — частая причина,
     // и узнать о ней надо сразу, а не в конце записи.
     errors.ensureWritable(path) catch |err| {
@@ -441,7 +450,9 @@ fn startRecording() void {
     setText(app.btn_record, "Стоп");
     _ = c.EnableWindow(app.btn_pause, 1);
     // Рамка нужна только для куска экрана: весь экран обводить нечего.
-    if (app.area) |a| frame_overlay.show(a);
+    // Для выбранного окна она тоже нужна — по ней видно, что пишется
+    // именно оно, а не то, что под ним.
+    if (chosenRect()) |a| frame_overlay.show(a);
     // Пунктиру нужен свой такт, чаще, чем обновление строки состояния.
     _ = c.SetTimer(app.hwnd, timer_frame, 50, null);
 }
@@ -514,11 +525,11 @@ fn updateStatus() void {
     const p = app.rec.snapshot();
     var buf: [512]u8 = undefined;
     const secs = @as(f64, @floatFromInt(p.elapsed_ns)) / @as(f64, std.time.ns_per_s);
-    var src_buf: [64]u8 = undefined;
-    const source_text = if (app.area) |a|
-        std.fmt.bufPrint(&src_buf, "область {d}x{d}", .{ a.width, a.height }) catch "область"
-    else
-        "весь экран";
+    // Что снимаем — пишем словами, а не только рисуем рамкой: рамка видна
+    // на экране, а подпись читают, когда рамки уже не видно. Считает это
+    // одно место на всех: окно, ответ серверу и пульт.
+    var src_buf: [400]u8 = undefined;
+    const source_text = sourceWords(&src_buf);
 
     const text = if (p.state == .idle) blk: {
         if (p.message_len > 0) {
@@ -1604,6 +1615,118 @@ fn onDrop(drop: usize) void {
     setText(app.status, std.fmt.bufPrint(&note, "открываю в редакторе: файлов {d}", .{opened}) catch "открываю в редакторе");
 }
 
+/// Что снимаем прямо сейчас.
+///
+/// Три вида съёмки в одном месте: иначе «а что будет, если выбрано и окно,
+/// и область» решалось бы по-разному в записи, в подписи и на пульте.
+/// Окно главнее области: его выбрали последним.
+fn chosenSource() source.Source {
+    if (source.stillThere(app.window_handle)) return .{ .window = app.window_handle };
+    if (app.area) |a| return .{ .area = a };
+    return .{ .monitor = app.settings.monitor };
+}
+
+/// Что снимаем — словами. Одно место на всех: строку состояния, ответ
+/// серверу и подпись на пульте.
+fn sourceWords(buf: []u8) []const u8 {
+    if (chosenWindowName().len > 0) {
+        return std.fmt.bufPrint(buf, "окно «{s}»", .{chosenWindowName()}) catch "окно";
+    }
+    if (app.area) |a| return areaText(buf, a);
+    return "весь экран";
+}
+
+/// Прямоугольник того, что снимаем. `null` — весь экран, обводить нечего.
+fn chosenRect() ?Rect {
+    if (source.stillThere(app.window_handle)) {
+        return source.windowArea(app.window_handle) catch null;
+    }
+    return app.area;
+}
+
+/// Имя выбранного окна. Пусто — окно не выбрано.
+fn chosenWindowName() []const u8 {
+    if (!source.stillThere(app.window_handle)) return "";
+    return app.window_name[0..app.window_name_len];
+}
+
+/// Выбрать окно для записи.
+///
+/// Всплывающим списком, а не отдельным окном со списком: окон на рабочем
+/// столе десяток, выбор занимает одно движение, и заводить ради него окно
+/// с кнопками «ОК» и «Отмена» — это три лишних нажатия на каждую запись.
+fn showWindowPicker(hwnd: c.HWND) void {
+    var buf: [source.max_windows]source.WindowInfo = undefined;
+    const list = source.listWindows(&buf);
+    if (list.len == 0) {
+        setText(app.status, "подходящих окон не нашлось: слишком маленькие или без заголовка");
+        return;
+    }
+
+    const menu = c.CreatePopupMenu();
+    if (menu == null) return;
+    defer _ = c.DestroyMenu(menu);
+
+    // Первая строка снимает выбор: раз окно выбрали, должен быть и путь
+    // обратно, иначе «весь экран» приходится искать среди кнопок.
+    var wide_none: [64]u16 = undefined;
+    if (std.unicode.utf8ToUtf16Le(&wide_none, "— не снимать окно, весь экран —")) |n| {
+        wide_none[n] = 0;
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_window_base, @ptrCast(&wide_none));
+        _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+    } else |_| {}
+
+    for (list, 0..) |it, i| {
+        var line: [320]u8 = undefined;
+        const text = std.fmt.bufPrint(&line, "{s}  —  {d}x{d}", .{
+            it.name(),
+            it.area.width,
+            it.area.height,
+        }) catch it.name();
+        var wide_buf: [512]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch continue;
+        wide_buf[n] = 0;
+        const flags: c.UINT = if (it.handle == app.window_handle)
+            c.MF_STRING | c.MF_CHECKED
+        else
+            c.MF_STRING;
+        _ = c.AppendMenuW(menu, flags, @intCast(id_window_base + 1 + @as(c_int, @intCast(i))), @ptrCast(&wide_buf));
+    }
+
+    var at: c.POINT = undefined;
+    _ = c.GetCursorPos(&at);
+    _ = c.SetForegroundWindow(hwnd);
+    const chosen = c.TrackPopupMenu(
+        menu,
+        c.TPM_LEFTBUTTON | c.TPM_RETURNCMD | c.TPM_NONOTIFY,
+        at.x,
+        at.y,
+        0,
+        hwnd,
+        null,
+    );
+    if (chosen == 0) return;
+
+    if (chosen == id_window_base) {
+        app.window_handle = null;
+        app.window_name_len = 0;
+        updateStatus();
+        return;
+    }
+
+    const index: usize = @intCast(chosen - id_window_base - 1);
+    if (index >= list.len) return;
+    const picked = list[index];
+
+    app.window_handle = picked.handle;
+    const n = @min(picked.name().len, app.window_name.len);
+    @memcpy(app.window_name[0..n], picked.name()[0..n]);
+    app.window_name_len = n;
+    // Окно и область — разный выбор, и держать оба значит гадать, что важнее.
+    app.area = null;
+    updateStatus();
+}
+
 /// Поднять пульт управления съёмкой.
 ///
 /// Пульт встаёт за пределами снимаемой области — куда именно, решает
@@ -1611,13 +1734,14 @@ fn onDrop(drop: usize) void {
 /// и пульт честно об этом пишет.
 fn showRemote() void {
     const screen = screenRect();
-    const area: remote.Rect = if (app.area) |a| .{
+    const spot = chosenRect();
+    const area: remote.Rect = if (spot) |a| .{
         .x = a.x,
         .y = a.y,
         .w = @intCast(a.width),
         .h = @intCast(a.height),
     } else screen;
-    remote_win.show(app.hwnd, screen, area, app.area == null);
+    remote_win.show(app.hwnd, screen, area, spot == null);
 }
 
 /// Прямоугольник того монитора, с которого пишем.
@@ -1849,6 +1973,8 @@ fn serveCall(call: *control.Call) void {
                     return;
                 };
                 app.area = rect;
+                app.window_handle = null;
+                app.window_name_len = 0;
             } else if (req.window) |title| {
                 const hwnd = source.findWindow(title) catch {
                     call.failed = true;
@@ -1856,14 +1982,26 @@ fn serveCall(call: *control.Call) void {
                     call.say(w.buffered());
                     return;
                 };
-                const rect = source.windowArea(hwnd) catch {
+                _ = source.windowArea(hwnd) catch {
                     call.failed = true;
                     call.say("окно нашлось, но его размеры не читаются: возможно, оно свёрнуто");
                     return;
                 };
-                app.area = rect;
+                // Запоминаем само окно, а не его сегодняшний прямоугольник.
+                // Прямоугольником область осталась бы стоять там, где окно
+                // было в момент просьбы, — а в описании инструмента обещано,
+                // что съёмка едет за окном.
+                app.window_handle = hwnd;
+                var name_buf: [512]u8 = undefined;
+                const name = source.windowTitle(hwnd, &name_buf);
+                const n = @min(name.len, app.window_name.len);
+                @memcpy(app.window_name[0..n], name[0..n]);
+                app.window_name_len = n;
+                app.area = null;
             } else {
                 app.area = null;
+                app.window_handle = null;
+                app.window_name_len = 0;
                 if (req.monitor) |n| app.settings.monitor = n;
             }
             if (req.fps) |n| app.settings.fps = n;
@@ -1878,8 +2016,15 @@ fn serveCall(call: *control.Call) void {
                 return;
             }
             const p = app.rec.snapshot();
+            var src_words: [400]u8 = undefined;
             w.print("запись пошла: {s}, {d} кадров в секунду, звук {s}", .{
-                if (app.area) |a| areaText(&buf, a) else "весь экран",
+                // Что пишем на самом деле, а не что записано в поле области:
+                // при съёмке окна область пуста, и ответ «весь экран»
+                // был бы прямой неправдой о том, что сейчас снимается.
+                //
+                // Свой буфер, а не `buf`: в `buf` пишет сам писатель, и текст
+                // подписи затёрся бы прямо во время сборки строки.
+                sourceWords(&src_words),
                 app.settings.fps,
                 if (req.sound) "пишется" else "выключен",
             }) catch {};
@@ -1934,19 +2079,23 @@ fn serveCall(call: *control.Call) void {
             call.say(w.buffered());
         },
         .windows => {
-            var count: u32 = 0;
-            var hwnd = c.GetTopWindow(null);
-            while (hwnd != null and count < 40) : (hwnd = c.GetWindow(hwnd, c.GW_HWNDNEXT)) {
-                if (c.IsWindowVisible(hwnd) == 0) continue;
-                var title_buf: [512]u8 = undefined;
-                const title = source.windowTitle(hwnd, &title_buf);
-                if (title.len == 0) continue;
-                const area = source.windowArea(hwnd) catch continue;
-                if (area.width < 100 or area.height < 100) continue;
-                w.print("{d}x{d}  {s}\n", .{ area.width, area.height, title }) catch break;
-                count += 1;
+            // Тот же список, что показывает кнопка «Выбрать окно…» и команда
+            // `zigrec windows`. Три разных списка окон в одной программе
+            // разошлись бы на первой же правке правила «какое показывать».
+            var seen: [source.max_windows]source.WindowInfo = undefined;
+            const list = source.listWindows(&seen);
+            for (list) |it| {
+                // Положение тоже пишем: по нему видно, на каком мониторе
+                // окно и не уехало ли оно за край.
+                w.print("{d}x{d} в точке ({d},{d})  {s}\n", .{
+                    it.area.width,
+                    it.area.height,
+                    it.area.x,
+                    it.area.y,
+                    it.name(),
+                }) catch break;
             }
-            if (count == 0) call.say("видимых окон не нашлось") else call.say(w.buffered());
+            if (list.len == 0) call.say("видимых окон не нашлось") else call.say(w.buffered());
         },
         else => {
             call.failed = true;
@@ -2119,10 +2268,14 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             app.btn_area_rec = button(hwnd, "Записать область", id_area_rec, 192, 66, 186, 32, c.BS_OWNERDRAW);
             app.btn_pause = button(hwnd, "Пауза", id_pause, 404, 66, 106, 32, c.BS_OWNERDRAW);
 
+            // Что снимаем — одним рядом: экран целиком, кусок экрана,
+            // одно окно. Это один выбор, и разводить его по разным местам
+            // окна значит заставлять человека искать, где он сделан.
             _ = button(hwnd, "Выбрать область…", id_area, 14, 106, 176, 30, 0);
-            _ = button(hwnd, "Весь экран", id_full, 198, 106, 160, 30, 0);
-            app.chk_cursor = button(hwnd, "Курсор и клики", id_cursor, 370, 106, 140, 30, c.BS_AUTOCHECKBOX);
+            _ = button(hwnd, "Весь экран", id_full, 198, 106, 122, 30, 0);
+            _ = button(hwnd, "Выбрать окно…", id_window, 328, 106, 182, 30, 0);
             app.chk_sound = button(hwnd, "Звук", id_sound, 14, 232, 90, 24, c.BS_AUTOCHECKBOX);
+            app.chk_cursor = button(hwnd, "Курсор и клики", id_cursor, 120, 232, 150, 24, c.BS_AUTOCHECKBOX);
             // Галочка не должна врать: пока звук слышно, но в файл он не идёт.
             app.lbl_gain = label(hwnd, "Усиление", 14, 328, 90, 20);
             app.slider_gain = gainSlider(hwnd, 106, 322, 320, 30);
@@ -2156,7 +2309,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
 
             for ([_]c.HWND{ app.status, app.btn_record, app.btn_pause, app.btn_open, app.chk_cursor, app.cb_fps, app.cb_preset, app.lbl_file, app.chk_sound, app.lbl_sound_note, app.lbl_gain, app.btn_server, app.lbl_server }) |h| applyFont(h);
             setGainEnabled(false);
-            for ([_]c_int{ id_area, id_full, id_area_rec }) |id| applyFont(c.GetDlgItem(hwnd, id));
+            for ([_]c_int{ id_area, id_full, id_window, id_area_rec }) |id| applyFont(c.GetDlgItem(hwnd, id));
 
             buildMenu(hwnd);
             app.refresh_hz = screenRefresh();
@@ -2173,10 +2326,14 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_open => openLastFile(),
                 id_full => {
                     app.area = null;
+                    app.window_handle = null;
                     updateStatus();
                 },
+                id_window => showWindowPicker(hwnd),
+                id_window_base...id_window_base + source.max_windows - 1 => {},
                 id_area => {
                     if (selectArea()) |r| {
+                        app.window_handle = null;
                         app.area = r;
                         updateStatus();
                     }
