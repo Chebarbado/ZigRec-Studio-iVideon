@@ -915,6 +915,18 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
     var follower = zigrec.pan.Follower.init(area);
     var last_pan_ns = zigrec.win32.nowNs();
     var panned: u32 = 0;
+
+    // Слой событий (#89): курсор, кнопки, клавиши, окна — в файл рядом
+    // с записью. Пишется всегда: это данные, а не картинка, и весят
+    // килобайты; курсор в кадр — отдельная галочка, как и было.
+    var layer_path_buf: [1024]u8 = undefined;
+    const layer_path = zigrec.events.sidecarPath(&layer_path_buf, path);
+    var layer_buf: [1 << 14]u8 = undefined;
+    var layer_file = std.Io.Dir.cwd().createFile(io, layer_path, .{}) catch null;
+    defer if (layer_file) |*f| f.close(io);
+    var layer_fw = if (layer_file) |*f| f.writer(io, &layer_buf) else null;
+    var layer = if (layer_fw) |*fw| (zigrec.events.Writer.init(&fw.interface) catch null) else null;
+    var tap = zigrec.event_tap.Tap{};
     while (zigrec.win32.nowNs() < until) {
         const frame = cap.next(200) catch |err| {
             try w.print("[rec] ПРОВАЛ на захвате: {s}\n", .{@errorName(err)});
@@ -936,6 +948,19 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
                 }
             } else |_| {}
         }
+        if (layer) |*ev| {
+            const cursor_at: ?zigrec.events.Point = if (painter.position()) |p| .{ .x = p.x, .y = p.y } else null;
+            tap.sampleNow(ev, frame.timestamp_ns -| started, cursor_at, .{
+                .x = screen.x + current.x,
+                .y = screen.y + current.y,
+                .width = current.width,
+                .height = current.height,
+            }) catch {
+                // Слой — не запись: если диск кончился, кадры важнее.
+                layer = null;
+            };
+        }
+
         // Автопанорама (#29): область едет за курсором, как в окне записи.
         if (opt.follow and src == .area) {
             if (painter.position()) |pos| {
@@ -1048,6 +1073,12 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
 
     const outcome: zigrec.errors.Outcome = if (stats.dropped > 0) .recorded_with_drops else .recorded;
     if (opt.follow) try w.print("[rec] область ехала за курсором: сдвигов {d}\n", .{panned});
+    if (layer) |*ev| {
+        if (layer_fw) |*fw| fw.interface.flush() catch {};
+        try w.print("[rec] слой событий: {d} в {s}\n", .{ ev.count, layer_path });
+    } else {
+        try w.writeAll("[rec] слой событий не записан: файл рядом с записью не создался\n");
+    }
     try w.print("[rec] итог: {s}\n", .{outcome.label()});
     return outcome.exitCode();
 }

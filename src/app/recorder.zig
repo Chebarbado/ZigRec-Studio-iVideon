@@ -14,6 +14,8 @@ const capture = @import("../capture/capture.zig");
 const capture_types = @import("../capture/capture_types.zig");
 const cursor = @import("../capture/cursor.zig");
 const pan = @import("../capture/pan.zig");
+const events = @import("../file/events.zig");
+const event_tap = @import("../capture/event_tap.zig");
 const encode = @import("../file/encode.zig");
 const source = @import("../capture/source.zig");
 const mp4 = @import("../file/mp4.zig");
@@ -355,6 +357,20 @@ pub const Recorder = struct {
         var follower = pan.Follower.init(area);
         var last_pan_ns = origin_ns;
 
+        // Слой событий (#89) — рядом с записью; см. `record` в main.zig.
+        var layer_threaded: std.Io.Threaded = .init(self.allocator, .{});
+        defer layer_threaded.deinit();
+        const io = layer_threaded.io();
+        var layer_path_buf: [1024]u8 = undefined;
+        const layer_path = events.sidecarPath(&layer_path_buf, path);
+        var layer_buf: [1 << 14]u8 = undefined;
+        var layer_file = std.Io.Dir.cwd().createFile(io, layer_path, .{}) catch null;
+        defer if (layer_file) |*f| f.close(io);
+        var layer_fw = if (layer_file) |*f| f.writer(io, &layer_buf) else null;
+        var layer = if (layer_fw) |*fw| (events.Writer.init(&fw.interface) catch null) else null;
+        defer if (layer_fw) |*fw| fw.interface.flush() catch {};
+        var tap = event_tap.Tap{};
+
         self.backend_raw.store(@intFromEnum(cap.backend()), .monotonic);
         self.area_w.store(area.width, .monotonic);
         self.area_h.store(area.height, .monotonic);
@@ -387,6 +403,18 @@ pub const Recorder = struct {
                     }
                 } else |_| {}
             }
+            if (layer) |*ev| {
+                const cursor_at: ?events.Point = if (painter.position()) |p| .{ .x = p.x, .y = p.y } else null;
+                tap.sampleNow(ev, clock.frameTime(frame.timestamp_ns), cursor_at, .{
+                    .x = screen.x + current.x,
+                    .y = screen.y + current.y,
+                    .width = current.width,
+                    .height = current.height,
+                }) catch {
+                    layer = null;
+                };
+            }
+
             // Автопанорама (#29): область записи едет за курсором.
             if (settings.follow and src == .area) {
                 if (painter.position()) |pos| {
