@@ -198,6 +198,19 @@ if defined FFMPEG (
     echo [check] ПРОВАЛ: экспорт с перекодированием
     exit /b 1
   )
+  rem Курсор из слоя (#91): экспорт с впечатыванием, ffmpeg вынимает кадр
+  rem на полсекунде сырым BGRA, pixel-check ищет стрелку в 300,200.
+  "zig-out\bin\zigrec.exe" export-smoke ".check\gate.mp4" ".check\export_burn.mp4" --burn
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: экспорт с курсором из слоя
+    exit /b 1
+  )
+  "%FFMPEG%" -v error -ss 0.5 -i ".check\export_burn.mp4" -frames:v 1 -f rawvideo -pix_fmt bgra -y ".check\burn_frame.bgra" > nul 2>&1
+  "zig-out\bin\zigrec.exe" pixel-check ".check\burn_frame.bgra" 1920 1080 302 206
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: в экспортированном кадре нет курсора из слоя
+    exit /b 1
+  )
   "%FFMPEG%" -v error -i ".check\export_pass.mp4" -f null - > ".check\export_errors.txt" 2>&1
   "%FFMPEG%" -v error -i ".check\export_re.mp4" -f null - >> ".check\export_errors.txt" 2>&1
   rem Пустой файл ошибок — ноль байт. Проверяем размер прямо в теле for:

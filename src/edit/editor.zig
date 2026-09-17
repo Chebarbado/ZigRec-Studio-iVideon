@@ -2882,13 +2882,17 @@ fn exportTo(where: []const u8) void {
     loadAudio();
     var keys: [timeline.max_sources][]const u64 = undefined;
     for (&keys, 0..) |*k, i| k.* = ed.keys[i];
-    const decided = export_mod.plan(ed.project, &keys);
+    const decided = export_mod.planWith(ed.project, &keys, &ed.layers, ed.cursor_layer_on);
     var note: [200]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&note, "экспорт {s}: {d} клип(ов)… окно подождёт", .{ decided.mode.label(), decided.clips }) catch "экспорт…");
+    ed.say(std.fmt.bufPrint(&note, "экспорт {s}{s}: {d} клип(ов)… окно подождёт", .{
+        decided.mode.label(),
+        if (decided.burns_cursor) ", курсор из слоя впечатывается" else "",
+        decided.clips,
+    }) catch "экспорт…");
     _ = c.UpdateWindow(ed.hwnd);
 
     const n = ed.project.sourceList().len;
-    const summary = export_mod.run(ed.allocator, ed.project, &keys, ed.audio_mix[0..n], where) catch |err| {
+    const summary = export_mod.runWith(ed.allocator, ed.project, &keys, ed.audio_mix[0..n], &ed.layers, ed.cursor_layer_on, where) catch |err| {
         var buf: [300]u8 = undefined;
         ed.say(std.fmt.bufPrint(&buf, "экспорт не удался: {s}", .{@errorName(err)}) catch "экспорт не удался");
         refresh();

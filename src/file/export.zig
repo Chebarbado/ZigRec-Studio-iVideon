@@ -20,6 +20,8 @@ const player = @import("player.zig");
 const encode = @import("encode.zig");
 const media = @import("media.zig");
 const mp4 = @import("mp4.zig");
+const events = @import("events.zig");
+const cursor_paint = @import("../capture/cursor_paint.zig");
 
 pub const Error = error{
     Unsupported,
@@ -54,6 +56,8 @@ pub const key_tolerance_ns: u64 = 16 * std.time.ns_per_ms;
 
 pub const Plan = struct {
     mode: Mode = .reencode,
+    /// Курсор из слоя впечатывается — значит, без перекодирования нельзя.
+    burns_cursor: bool = false,
     /// Сколько видеоклипов пойдёт в файл.
     clips: usize = 0,
     /// Сколько из них начинаются не с ключевого кадра.
@@ -73,9 +77,18 @@ pub fn videoTrack(project: *const timeline.Project) ?usize {
     return null;
 }
 
+/// Слои событий исходников: по ячейке на исходник, `null` — слоя нет.
+pub const Layers = []const ?events.Events;
+
 /// Решить, каким путём идти. `keys` — ключевые кадры каждого исходника
 /// (пустой список — ключевых не знаем, значит без перекодирования нельзя).
+/// `layers` и `burn` — впечатывать ли курсор из слоя (#91): если есть что
+/// впечатать, кадры придётся раскодировать.
 pub fn plan(project: *const timeline.Project, keys: []const []const u64) Plan {
+    return planWith(project, keys, &.{}, false);
+}
+
+pub fn planWith(project: *const timeline.Project, keys: []const []const u64, layers: Layers, burn: bool) Plan {
     var out = Plan{};
     const track_index = videoTrack(project) orelse return out;
     out.track = track_index;
@@ -89,8 +102,9 @@ pub fn plan(project: *const timeline.Project, keys: []const []const u64) Plan {
         }
         const list: []const u64 = if (clip.source < keys.len) keys[clip.source] else &.{};
         if (keyframes.nearest(list, clip.in_ns, key_tolerance_ns) == null) out.off_key += 1;
+        if (burn and clip.source < layers.len and layers[clip.source] != null) out.burns_cursor = true;
     }
-    out.mode = if (out.clips > 0 and out.off_key == 0 and out.sources == 1) .passthrough else .reencode;
+    out.mode = if (out.clips > 0 and out.off_key == 0 and out.sources == 1 and !out.burns_cursor) .passthrough else .reencode;
     return out;
 }
 
@@ -115,13 +129,45 @@ pub fn run(
     audio: AudioSources,
     out_path: []const u8,
 ) Error!Summary {
+    return runWith(allocator, project, keys, audio, &.{}, false, out_path);
+}
+
+/// То же, с курсором из слоя: `layers` по исходникам, `burn` — впечатывать.
+pub fn runWith(
+    allocator: std.mem.Allocator,
+    project: *const timeline.Project,
+    keys: []const []const u64,
+    audio: AudioSources,
+    layers: Layers,
+    burn: bool,
+    out_path: []const u8,
+) Error!Summary {
     if (builtin.os.tag != .windows) return Error.Unsupported;
-    const decided = plan(project, keys);
+    const decided = planWith(project, keys, layers, burn);
     const track_index = decided.track orelse return Error.NothingToExport;
     return switch (decided.mode) {
         .passthrough => passthrough(allocator, project, track_index, audio, out_path),
-        .reencode => reencode(allocator, project, track_index, audio, out_path),
+        .reencode => reencode(allocator, project, track_index, audio, if (burn) layers else &.{}, out_path),
     };
+}
+
+/// Впечатать курсор из слоя в кадр: стрелка и вспышка клика. Координаты
+/// стола переводятся в кадр по области, действовавшей в этот момент;
+/// кадр бывает чуть другого размера, чем область (чётные стороны у DXGI) —
+/// пересчитываем пропорцией.
+pub fn burnCursor(layer: *const events.Events, inside_ns: u64, pixels: []u8, stride: usize, width: u32, height: u32) void {
+    const at = layer.cursorAt(inside_ns) orelse return;
+    const area = layer.areaAt(inside_ns) orelse return;
+    if (area.w <= 0 or area.h <= 0) return;
+    const fx = @divTrunc((at.x - area.x) * @as(i32, @intCast(width)), area.w);
+    const fy = @divTrunc((at.y - area.y) * @as(i32, @intCast(height)), area.h);
+    const flash_life: u64 = 300 * std.time.ns_per_ms;
+    if (layer.recentDown(inside_ns, flash_life)) |d| {
+        const strength = cursor_paint.flashStrength(inside_ns - d.at_ns, flash_life);
+        const r: i32 = 10 + @as(i32, @intCast((255 - strength) / 20));
+        cursor_paint.ring(pixels, stride, width, height, fx, fy, r, .{ 0x40, 0x40, 0xFF, 0xFF }, strength);
+    }
+    cursor_paint.arrow(pixels, stride, width, height, fx, fy, 1);
 }
 
 // ------------------------------------------------------------ звук
@@ -153,6 +199,7 @@ fn reencode(
     project: *const timeline.Project,
     track_index: usize,
     audio: AudioSources,
+    layers: Layers,
     out_path: []const u8,
 ) Error!Summary {
     const track = project.tracks[track_index];
@@ -190,6 +237,9 @@ fn reencode(
         const end = clip.in_ns + clip.len_ns;
         while (inside < end) : (inside += frame_ns) {
             opened.showAt(inside) catch return Error.ReadFailed;
+            if (clip.source < layers.len) {
+                if (layers[clip.source]) |*layer| burnCursor(layer, inside, opened.pixels, opened.stride, opened.width, opened.height);
+            }
             const at_ns = clip.at_ns + (inside - clip.in_ns);
             writer.writeFrame(opened.pixels, @intCast(opened.stride), at_ns) catch return Error.WriteFailed;
             summary.frames += 1;
@@ -472,4 +522,41 @@ test "видеодорожка для экспорта — верхняя нез
 test "у каждого пути есть подпись" {
     try testing.expect(Mode.passthrough.label().len > 0);
     try testing.expect(Mode.reencode.label().len > 0);
+}
+
+test "курсор из слоя заставляет перекодировать, без слоя — как раньше" {
+    const p = try project2(true, false);
+    const keys_a = [_]u64{ 0, 2 * sec, 4 * sec, 6 * sec, 8 * sec, 10 * sec, 20 * sec };
+    const keys = [_][]const u64{ &keys_a, &.{} };
+    var layer = try events.read(testing.allocator, "zigrec-events 1\n0 area 0 0 100 100\n0 move 5 5\n");
+    defer layer.deinit(testing.allocator);
+    const layers = [_]?events.Events{ layer, null };
+    try testing.expectEqual(Mode.passthrough, planWith(&p, &keys, &layers, false).mode);
+    try testing.expectEqual(Mode.reencode, planWith(&p, &keys, &layers, true).mode);
+    try testing.expect(planWith(&p, &keys, &layers, true).burns_cursor);
+    // Слоя нет — впечатывать нечего, путь прежний.
+    const none = [_]?events.Events{ null, null };
+    try testing.expectEqual(Mode.passthrough, planWith(&p, &keys, &none, true).mode);
+}
+
+test "впечатанный курсор оказывается в кадре там, где был в слое" {
+    var layer = try events.read(testing.allocator, "zigrec-events 1\n0 area 100 50 200 100\n0 move 150 80\n500000000 down L 150 80\n");
+    defer layer.deinit(testing.allocator);
+    // Кадр вдвое больше области: курсор (150,80) → (100,60).
+    var buf: [400 * 200 * 4]u8 = @splat(0);
+    burnCursor(&layer, 100 * std.time.ns_per_ms, &buf, 400 * 4, 400, 200);
+    var white_near = false;
+    var y: usize = 60;
+    while (y < 70) : (y += 1) {
+        var x: usize = 100;
+        while (x < 108) : (x += 1) {
+            if (buf[(y * 400 + x) * 4] == 255) white_near = true;
+        }
+    }
+    try testing.expect(white_near);
+    // Сразу после клика — кольцо: красное на радиусе ~10 слева от курсора,
+    // где стрелка его не закрывает (справа и снизу лежит сама стрелка).
+    var buf2: [400 * 200 * 4]u8 = @splat(0);
+    burnCursor(&layer, 510 * std.time.ns_per_ms, &buf2, 400 * 4, 400, 200);
+    try testing.expect(buf2[(60 * 400 + 90) * 4 + 2] > 200);
 }

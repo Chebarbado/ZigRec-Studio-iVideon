@@ -48,9 +48,12 @@ const usage =
     \\        самопроверка слоя событий: записать известный путь курсора и прочитать обратно
     \\  zigrec pan-smoke
     \\        самопроверка автопанорамы: область едет за курсором плавно и не за край
-    \\  zigrec export-smoke ИСХОДНИК.mp4 ВЫХОД.mp4 [--offkey]
+    \\  zigrec export-smoke ИСХОДНИК.mp4 ВЫХОД.mp4 [--offkey|--burn]
     \\        самопроверка экспорта: клип с ключевого кадра — без перекодирования,
-    \\        с --offkey — с перекодированием; длина и кадры сверяются нашим читателем
+    \\        с --offkey — с перекодированием, с --burn — курсор из слоя в кадр;
+    \\        длина и кадры сверяются нашим читателем
+    \\  zigrec pixel-check ФАЙЛ.bgra Ш В X Y
+    \\        есть ли в 5x5 вокруг точки цвета курсора (белый и чёрный) — для кадра от ffmpeg
     \\  zigrec keyframes-smoke ФАЙЛ.mp4 СПИСОК.txt
     \\        самопроверка ключевых кадров: наш список против I-кадров ffmpeg
     \\  zigrec clock-smoke
@@ -337,6 +340,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "pixel-check")) {
+        if (args.len < 7) {
+            try w.writeAll("нужны: файл BGRA, ширина, высота, x, y\n");
+            code = 2;
+        } else {
+            code = try pixelCheck(init.io, arena, w, args[2], argInt(args, 3, 0), argInt(args, 4, 0), argInt(args, 5, 0), argInt(args, 6, 0));
+        }
     } else if (eq(cmd, "events-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу .events\n");
@@ -351,7 +361,7 @@ pub fn main(init: std.process.Init) !void {
             try w.writeAll("нужны исходник mp4 и выходной файл\n");
             code = 2;
         } else {
-            code = try exportSmoke(arena, w, args[2], args[3], args.len > 4 and eq(args[4], "--offkey"));
+            code = try exportSmoke(arena, w, args[2], args[3], args.len > 4 and eq(args[4], "--offkey"), args.len > 4 and eq(args[4], "--burn"));
         }
     } else if (eq(cmd, "keyframes-smoke")) {
         if (args.len < 4) {
@@ -3468,7 +3478,7 @@ fn panSmoke(w: anytype) !u8 {
 /// начало на ключевом — ждём путь без перекодирования; с --offkey начало
 /// сдвинуто на полсекунды — ждём перекодирование. Длину и кадры готового
 /// файла сверяем нашим читателем; ffmpeg раскодирует его в check.cmd.
-fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, out_path: []const u8, off_key: bool) !u8 {
+fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, out_path: []const u8, off_key: bool, burn: bool) !u8 {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -3507,8 +3517,36 @@ fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, o
     const sources = [_]zigrec.mixdown.SourceAudio{.{ .rate = audio.rate, .samples = audio.samples }};
 
     const key_lists = [_][]const u64{keys};
-    const decided = zigrec.export_mp4.plan(project, &key_lists);
-    const want: zigrec.export_mp4.Mode = if (off_key) .reencode else .passthrough;
+
+    // Курсор из слоя (#91): рядом с исходником кладём слой с курсором
+    // в известной точке — потом ffmpeg вынет кадр, и pixel-check найдёт
+    // там стрелку. Область — весь кадр исходника с нуля.
+    var layer: ?zigrec.events.Events = null;
+    defer if (layer) |*l| l.deinit(allocator);
+    if (burn) {
+        // Размер кадра — у декодера: быстрое чтение заголовка его не знает
+        // (первый заход стенда положил область 0x0, и курсор не впечатался —
+        // молча; теперь область без размера — тоже провал).
+        var probe = zigrec.player.Player.openScaled(allocator, src_path, 0, 0) catch |err| {
+            try w.print("[export] ПРОВАЛ: кадр исходника не открылся: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        const fw: u32 = probe.width;
+        const fh: u32 = probe.height;
+        probe.close();
+        if (fw == 0 or fh == 0) {
+            try w.writeAll("[export] ПРОВАЛ: размер кадра исходника неизвестен\n");
+            return 1;
+        }
+        var text_buf: [512]u8 = undefined;
+        const text = try std.fmt.bufPrint(&text_buf, "zigrec-events 1\n0 area 0 0 {d} {d}\n0 move 300 200\n{d} down L 300 200\n", .{ fw, fh, in_ns + 500 * std.time.ns_per_ms });
+        layer = try zigrec.events.read(allocator, text);
+        try w.print("[export] слой для впечатывания: курсор в 300,200 на кадре {d}x{d}\n", .{ fw, fh });
+    }
+    const layers = [_]?zigrec.events.Events{layer};
+
+    const decided = zigrec.export_mp4.planWith(project, &key_lists, &layers, burn);
+    const want: zigrec.export_mp4.Mode = if (off_key or burn) .reencode else .passthrough;
     try w.print("[export] план: {s}, клипов {d}, не с ключевого {d}\n", .{ decided.mode.label(), decided.clips, decided.off_key });
     if (decided.mode != want) {
         try w.print("[export] ПРОВАЛ: ждали путь «{s}»\n", .{want.label()});
@@ -3516,7 +3554,7 @@ fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, o
     }
 
     const started = zigrec.win32.nowNs();
-    const summary = zigrec.export_mp4.run(allocator, project, &key_lists, if (audio.samples.len > 0) &sources else &.{}, out_path) catch |err| {
+    const summary = zigrec.export_mp4.runWith(allocator, project, &key_lists, if (audio.samples.len > 0) &sources else &.{}, &layers, burn, out_path) catch |err| {
         try w.print("[export] ПРОВАЛ: экспорт не удался: {s}\n", .{@errorName(err)});
         return 1;
     };
@@ -3559,7 +3597,43 @@ fn exportSmoke(allocator: std.mem.Allocator, w: anytype, src_path: []const u8, o
         try w.writeAll("[export] ПРОВАЛ: ни одного кадра не записано\n");
         return 1;
     }
-    try w.print("[export] ЭКСПОРТ {s} ПРОХОДИТ\n", .{if (off_key) "С ПЕРЕКОДИРОВАНИЕМ" else "БЕЗ ПЕРЕКОДИРОВАНИЯ"});
+    try w.print("[export] ЭКСПОРТ {s} ПРОХОДИТ\n", .{if (burn) "С КУРСОРОМ ИЗ СЛОЯ" else if (off_key) "С ПЕРЕКОДИРОВАНИЕМ" else "БЕЗ ПЕРЕКОДИРОВАНИЯ"});
+    return 0;
+}
+
+/// Есть ли в квадрате 5x5 вокруг точки цвета курсора — белый и чёрный
+/// (после кодирования H.264 — «почти»: не темнее 200 и не светлее 60).
+/// Кадр — сырой BGRA от ffmpeg: сторонний декодер, не наш.
+fn pixelCheck(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, width: u32, height: u32, x: u32, y: u32) !u8 {
+    const data = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 28));
+    defer allocator.free(data);
+    if (data.len < @as(usize, width) * height * 4) {
+        try w.print("[pixel] ПРОВАЛ: в файле {d} байт, для {d}x{d} нужно {d}\n", .{ data.len, width, height, @as(usize, width) * height * 4 });
+        return 1;
+    }
+    var white: u32 = 0;
+    var black: u32 = 0;
+    var dy: i32 = -2;
+    while (dy <= 2) : (dy += 1) {
+        var dx: i32 = -2;
+        while (dx <= 2) : (dx += 1) {
+            const px: i64 = @as(i64, x) + dx;
+            const py: i64 = @as(i64, y) + dy;
+            if (px < 0 or py < 0 or px >= width or py >= height) continue;
+            const at: usize = (@as(usize, @intCast(py)) * width + @as(usize, @intCast(px))) * 4;
+            const b = data[at];
+            const g = data[at + 1];
+            const r = data[at + 2];
+            if (b > 200 and g > 200 and r > 200) white += 1;
+            if (b < 60 and g < 60 and r < 60) black += 1;
+        }
+    }
+    try w.print("[pixel] вокруг {d},{d}: белых {d}, чёрных {d} из 25\n", .{ x, y, white, black });
+    if (white == 0 or black == 0) {
+        try w.writeAll("[pixel] ПРОВАЛ: стрелки курсора (белое с чёрной каймой) в этом месте нет\n");
+        return 1;
+    }
+    try w.writeAll("[pixel] КУРСОР В КАДРЕ\n");
     return 0;
 }
 
