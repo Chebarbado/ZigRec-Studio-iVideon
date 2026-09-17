@@ -31,12 +31,17 @@ pub const edge_grab: i32 = 6;
 
 // ------------------------------------------------- панель меток справа
 
-/// Ширина панели меток.
+/// Ширина панели меток по умолчанию.
 ///
 /// Триста точек: на время, имя и начало комментария. Шире — панель
 /// съедает таймлайн, ради которого окно и открыто; уже — комментарий
-/// обрезается на втором слове.
+/// обрезается на втором слове. Но это умолчание: край панели тянут
+/// мышью (#93), и ширина запоминается.
 pub const marks_panel_w: i32 = 300;
+/// Уже этого панель не бывает: столбец «t» и половина имени.
+pub const min_marks_panel_w: i32 = 180;
+/// Шире — панель перестаёт быть панелью.
+pub const max_marks_panel_w: i32 = 700;
 
 /// Уже этого таймлайн не сужаем.
 ///
@@ -49,15 +54,32 @@ pub const min_timeline_w: i32 = 420;
 ///
 /// Отдельным правилом, потому что «панель просто не влезла» — это то,
 /// о чём надо сказать словами, а не показать наполовину заехавшую панель.
-pub fn marksPanelWidth(window_w: i32, open: bool) i32 {
+///
+/// `want` — ширина, которую просят (ноль — умолчание). Если окно узкое,
+/// панель ужимается до того, что помещается рядом с минимальным
+/// таймлайном; не помещается даже минимум — ноль.
+pub fn marksPanelWidth(window_w: i32, open: bool, want: i32) i32 {
     if (!open) return 0;
-    if (window_w - marks_panel_w < min_timeline_w) return 0;
-    return marks_panel_w;
+    const wish = std.math.clamp(if (want <= 0) marks_panel_w else want, min_marks_panel_w, max_marks_panel_w);
+    const fits = window_w - min_timeline_w;
+    if (fits < min_marks_panel_w) return 0;
+    return @min(wish, fits);
 }
 
 /// Сколько места остаётся таймлайну.
-pub fn stageWidth(window_w: i32, open: bool) i32 {
-    return window_w - marksPanelWidth(window_w, open);
+pub fn stageWidth(window_w: i32, open: bool, want: i32) i32 {
+    return window_w - marksPanelWidth(window_w, open, want);
+}
+
+/// Ширина панели, когда её левый край тянут в точку `x`.
+pub fn panelWidthAt(window_w: i32, x: i32) i32 {
+    const most = @max(min_marks_panel_w, @min(max_marks_panel_w, window_w - min_timeline_w));
+    return std.math.clamp(window_w - x, min_marks_panel_w, most);
+}
+
+/// Попали ли в левый край панели: за него тянут.
+pub fn onPanelEdge(x: i32, panel_left: i32) bool {
+    return @abs(x - panel_left) <= edge_grab;
 }
 
 /// Высота строки списка и высота его заголовка.
@@ -218,10 +240,31 @@ pub fn curveDbAt(lane_top: i32, y: i32) volume.Db10 {
     return volume.clamp(@intCast(@as(i32, volume.max_db10) - @divTrunc(from_top * range, room)));
 }
 
+/// Сколько места занимает подпись деления линейки: «12:34» и зазор.
+pub const ruler_label_w: i32 = 40;
+
+/// Влезает ли подпись деления у точки `x` до правого края таймлайна.
+///
+/// Обрезанная подпись читается как другое число; лучше без неё.
+pub fn rulerLabelFits(x: i32, width: i32) bool {
+    return x + 3 + ruler_label_w <= width;
+}
+
 /// Высота полосы с ползунком под таймлайном.
-pub const bar_h: i32 = 14;
-/// Короче этого ползунок не делаем: за точку не ухватиться.
-pub const min_thumb: i32 = 24;
+/// Восемнадцать точек: прежние четырнадцать с ползунком в восемь точек
+/// высотой при сильном приближении промахивались на клип под ними (#94).
+pub const bar_h: i32 = 18;
+/// Короче этого ползунок не делаем: за точку не ухватиться. Сорок точек:
+/// при часовой записи и двух секундах в окне ползунок всё равно виден.
+pub const min_thumb: i32 = 40;
+
+/// Ползунок на минимуме: один его пиксель — десятки экранов. Тогда стоит
+/// подсказать другой способ: тянуть таймлайн средней кнопкой.
+pub fn thumbTooCoarse(span: i32, visible_ns: u64, total_ns: u64) bool {
+    if (total_ns == 0 or visible_ns >= total_ns) return false;
+    const shown = @as(u64, @intCast(@max(span, 1))) * visible_ns / total_ns;
+    return shown < @as(u64, @intCast(min_thumb));
+}
 
 /// Где стоит ползунок и какой он длины.
 pub const Thumb = struct {
@@ -1167,20 +1210,42 @@ test "флажок метки помещается в линейку" {
 }
 
 test "панель отнимает у таймлайна ровно свою ширину" {
-    try std.testing.expectEqual(@as(i32, 1000), stageWidth(1000, false));
-    try std.testing.expectEqual(@as(i32, 1000 - marks_panel_w), stageWidth(1000, true));
+    try std.testing.expectEqual(@as(i32, 1000), stageWidth(1000, false, 0));
+    try std.testing.expectEqual(@as(i32, 1000 - marks_panel_w), stageWidth(1000, true, 0));
+    // Просили другую ширину — столько и отняли.
+    try std.testing.expectEqual(@as(i32, 1000 - 420), stageWidth(1000, true, 420));
 }
 
-test "в узком окне панель не открывается вовсе" {
+test "в узком окне панель ужимается, а совсем в узком не открывается" {
     // Наполовину заехавшая панель хуже, чем её отсутствие: список меток,
-    // к которым не подойти мышью, не нужен никому.
-    const narrow = min_timeline_w + marks_panel_w - 1;
-    try std.testing.expectEqual(@as(i32, 0), marksPanelWidth(narrow, true));
-    try std.testing.expectEqual(narrow, stageWidth(narrow, true));
+    // к которым не подойти мышью, не нужен никому. Но между «триста» и
+    // «ничего» есть «сколько влезло»: до минимума панель ужимается.
+    const narrow = min_timeline_w + min_marks_panel_w - 1;
+    try std.testing.expectEqual(@as(i32, 0), marksPanelWidth(narrow, true, 0));
+    try std.testing.expectEqual(narrow, stageWidth(narrow, true, 0));
 
-    const just_enough = min_timeline_w + marks_panel_w;
-    try std.testing.expectEqual(marks_panel_w, marksPanelWidth(just_enough, true));
-    try std.testing.expectEqual(min_timeline_w, stageWidth(just_enough, true));
+    const tight = min_timeline_w + 200;
+    try std.testing.expectEqual(@as(i32, 200), marksPanelWidth(tight, true, 0));
+    try std.testing.expectEqual(min_timeline_w, stageWidth(tight, true, 0));
+
+    const roomy = min_timeline_w + marks_panel_w;
+    try std.testing.expectEqual(marks_panel_w, marksPanelWidth(roomy, true, 0));
+}
+
+test "ширина панели: просьба прижимается к пределам" {
+    try std.testing.expectEqual(min_marks_panel_w, marksPanelWidth(2000, true, 10));
+    try std.testing.expectEqual(max_marks_panel_w, marksPanelWidth(2000, true, 5000));
+    try std.testing.expectEqual(@as(i32, 0), marksPanelWidth(2000, false, 400));
+}
+
+test "край панели тянут мышью в пределах, а за край не пускают" {
+    // Окно 1000: край в 700 — панель 300; в 900 — минимум; в 100 — не
+    // уже минимального таймлайна (580).
+    try std.testing.expectEqual(@as(i32, 300), panelWidthAt(1000, 700));
+    try std.testing.expectEqual(min_marks_panel_w, panelWidthAt(1000, 900));
+    try std.testing.expectEqual(@as(i32, 1000 - min_timeline_w), panelWidthAt(1000, 100));
+    try std.testing.expect(onPanelEdge(703, 700));
+    try std.testing.expect(!onPanelEdge(720, 700));
 }
 
 test "строки списка меток считаются от заголовка" {
@@ -1318,4 +1383,19 @@ test "кусок учитывает начало клипа внутри исх�
     try std.testing.expect(last.to_ns <= 70 * sec);
     // За клипом — снова ничего.
     try std.testing.expect(waveSpanAt(view, clip, header_w + 30) == null);
+}
+
+test "подпись линейки у правого края не рисуется, если не влезает" {
+    try std.testing.expect(rulerLabelFits(100, 600));
+    try std.testing.expect(rulerLabelFits(557, 600));
+    try std.testing.expect(!rulerLabelFits(558, 600));
+    try std.testing.expect(!rulerLabelFits(590, 600));
+}
+
+test "ползунок на минимуме — грубый, во весь экран — нет" {
+    // Час записи, две секунды в окне из 600 точек — ползунок был бы в 0.3 точки.
+    try std.testing.expect(thumbTooCoarse(600, 2 * sec, 3600 * sec));
+    // Десять минут из часа — сто точек, тянуть можно.
+    try std.testing.expect(!thumbTooCoarse(600, 600 * sec, 3600 * sec));
+    try std.testing.expect(!thumbTooCoarse(600, 3600 * sec, 3600 * sec));
 }

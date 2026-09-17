@@ -72,6 +72,8 @@ const status_h: i32 = 22;
 /// Не постоянная величина: границу тянут мышью, и подогнанная высота
 /// переживает перезапуск — лежит в настройках.
 var preview_h: i32 = 260;
+/// Ширина панели меток: её край тянут мышью, ширина запоминается (#93).
+var marks_w: i32 = view_mod.marks_panel_w;
 /// Такт воспроизведения. Тридцать раз в секунду: чаще человек не заметит,
 /// реже — заметит рывки.
 const timer_play = 1;
@@ -132,7 +134,7 @@ fn apart() bool {
 const cs_dblclks: c.UINT = 0x0008;
 
 /// Что человек тянет мышью прямо сейчас.
-const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point, mark, mark_edge };
+const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point, mark, mark_edge, panel_edge, pan };
 
 const Editor = struct {
     allocator: std.mem.Allocator,
@@ -176,6 +178,9 @@ const Editor = struct {
     /// Смещение от начала клипа до точки захвата — чтобы клип не прыгал
     /// под курсор своим левым краем.
     drag_grab_ns: u64 = 0,
+    /// Откуда тянут таймлайн средней кнопкой (#94): точка и начало вида.
+    pan_x0: i32 = 0,
+    pan_at_ns: u64 = 0,
     drag_started: bool = false,
     /// Тянут ли врозь. Решается один раз, когда клип взят мышью: если
     /// спрашивать клавиатуру на каждом движении, половина перетаскивания
@@ -324,7 +329,7 @@ fn paint(hwnd: c.HWND, dc: c.HDC, window_w: i32, height: i32) void {
     // в оставшейся ширине, и правило «сколько осталось» одно на всех:
     // два разных счёта разъехались бы, и панель то наезжала бы на дорожки,
     // то оставляла полосу пустоты.
-    const width = view_mod.stageWidth(window_w, ed.marks_open);
+    const width = view_mod.stageWidth(window_w, ed.marks_open, marks_w);
     solid(dc, .{ .left = 0, .top = 0, .right = window_w, .bottom = height }, 0x00FFFFFF);
     // Полоса под кнопками: фон окна мы рисуем сами, иначе под ними останется
     // мусор от предыдущего кадра.
@@ -380,10 +385,10 @@ fn drawScrollBar(dc: c.HDC, width: i32, lane_height: i32) void {
     const t = scrollThumb(width);
     solid(dc, .{
         .left = view_mod.header_w + t.left,
-        .top = top + 3,
+        .top = top + 2,
         .right = view_mod.header_w + t.right(),
-        .bottom = top + view_mod.bar_h - 3,
-    }, 0x00B0B0B0);
+        .bottom = top + view_mod.bar_h - 2,
+    }, 0x00A0A0A0);
 }
 
 /// Сколько времени помещается в окно.
@@ -553,7 +558,9 @@ fn drawRuler(dc: c.HDC, width: i32) void {
             line(dc, x, view_mod.ruler_h - 8, x, view_mod.ruler_h - 1, col_lane_line, 1);
             // Деление, закрытое подписью метки, не пишем вовсе: недописанное
             // число читается как другое число, а это хуже, чем его отсутствие.
-            if (!markLabelCovers(x)) {
+            // И подпись, которой не хватает места до края таймлайна, — тоже:
+            // «0:1» вместо «0:10» у панели меток читается как другое число.
+            if (!markLabelCovers(x) and view_mod.rulerLabelFits(x, width)) {
                 var buf: [32]u8 = undefined;
                 drawText(dc, x + 3, 4, view_mod.timeLabel(&buf, when, step), col_text);
             }
@@ -2136,7 +2143,7 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
 /// а комментарий не влезает никогда. Список показывает всё сразу
 /// и позволяет править прямо в нём.
 fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
-    const panel_w = view_mod.marksPanelWidth(window_w, ed.marks_open);
+    const panel_w = view_mod.marksPanelWidth(window_w, ed.marks_open, marks_w);
     if (panel_w == 0) return;
 
     const left = window_w - panel_w;
@@ -2152,7 +2159,7 @@ fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
         .right = window_w,
         .bottom = top + view_mod.marks_head_h,
     }, 0x00F0F0F0);
-    drawText(dc, left + view_mod.marks_col_time, top + 4, "время", 0x00707070);
+    drawText(dc, left + view_mod.marks_col_time, top + 4, "t", 0x00707070);
     drawText(dc, left + view_mod.marks_col_name, top + 4, "метка", 0x00707070);
     drawText(dc, left + view_mod.marks_col_note, top + 4, "комментарий", 0x00707070);
     line(dc, left, top + view_mod.marks_head_h - 1, window_w, top + view_mod.marks_head_h - 1, col_lane_line, 1);
@@ -2224,7 +2231,7 @@ const PanelPoint = struct { x: i32, y: i32 };
 
 /// Подписи столбцов панели меток. Названы здесь, а не по месту: по ним
 /// считается, влезают ли они в свои столбцы.
-pub const marks_columns = [_][]const u8{ "время", "метка", "комментарий" };
+pub const marks_columns = [_][]const u8{ "t", "метка", "комментарий" };
 
 /// Влезла ли подпись столбца в свой столбец.
 pub const ColumnFit = struct {
@@ -2269,13 +2276,41 @@ pub fn marksColumnFits(out: *[marks_columns.len]ColumnFit) []const ColumnFit {
     return out[0..marks_columns.len];
 }
 
+/// Попали ли в левый край панели меток: за него тянут ширину.
+fn onMarksPanelEdge(x: i32, y: i32) bool {
+    if (!ed.marks_open) return false;
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) == 0) return false;
+    const panel_w = view_mod.marksPanelWidth(rect.right, true, marks_w);
+    if (panel_w == 0) return false;
+    if (y < toolbar_h or y >= rect.bottom - status_h) return false;
+    return view_mod.onPanelEdge(x, rect.right - panel_w);
+}
+
+/// Средняя кнопка: взяться за таймлайн и тянуть (#94).
+fn onMiddleDown(x: i32, y: i32) void {
+    if (y < laneAreaTop() - view_mod.ruler_h or insideMarksPanel(x, y) != null) return;
+    ed.drag = .pan;
+    ed.pan_x0 = x;
+    ed.pan_at_ns = ed.view.at_ns;
+    _ = c.SetCapture(ed.hwnd);
+}
+
+/// На страницу вбок: PageUp/PageDown.
+fn pageView(forward: bool) void {
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+    ed.view.at_ns = view_mod.pageBy(ed.view.at_ns, visibleNs(rect.right), totalNs(), forward);
+    refreshStage();
+}
+
 /// Открыть или закрыть панель меток.
 fn toggleMarksPanel() void {
     var rect: c.RECT = undefined;
     if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
 
     const want = !ed.marks_open;
-    if (want and view_mod.marksPanelWidth(rect.right, true) == 0) {
+    if (want and view_mod.marksPanelWidth(rect.right, true, marks_w) == 0) {
         // Наполовину заехавшая панель хуже, чем её отсутствие: об этом
         // надо сказать словами, а не показать обрезанный список.
         ed.say("окно слишком узкое для панели меток: расширьте его");
@@ -2286,7 +2321,7 @@ fn toggleMarksPanel() void {
     saveMarksPanel();
     // Галочка в меню должна сойтись с тем, что на экране.
     buildMenu(ed.hwnd);
-    ed.say(if (ed.marks_open) "панель меток открыта" else "панель меток закрыта");
+    ed.say(if (ed.marks_open) "панель меток открыта; её левый край можно тянуть" else "панель меток закрыта");
     refresh();
 }
 
@@ -2294,7 +2329,7 @@ fn toggleMarksPanel() void {
 fn insideMarksPanel(x: i32, y: i32) ?PanelPoint {
     var rect: c.RECT = undefined;
     if (c.GetClientRect(ed.hwnd, &rect) == 0) return null;
-    const panel_w = view_mod.marksPanelWidth(rect.right, ed.marks_open);
+    const panel_w = view_mod.marksPanelWidth(rect.right, ed.marks_open, marks_w);
     if (panel_w == 0) return null;
     const left = rect.right - panel_w;
     if (x < left or y < toolbar_h or y >= rect.bottom - status_h) return null;
@@ -2336,7 +2371,7 @@ fn startMarksPanelEdit(row: usize, is_note: bool) void {
     if (row >= ed.project.marks.count) return;
     var rect: c.RECT = undefined;
     if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
-    const panel_w = view_mod.marksPanelWidth(rect.right, ed.marks_open);
+    const panel_w = view_mod.marksPanelWidth(rect.right, ed.marks_open, marks_w);
     if (panel_w == 0) return;
 
     const left = rect.right - panel_w;
@@ -2397,6 +2432,7 @@ fn saveMarksPanel() void {
     _ = io;
     var prefs = settings_mod.load(threaded.io(), ed.allocator, dir);
     prefs.marks_panel_on = ed.marks_open;
+    prefs.marks_panel_w = marks_w;
     _ = settings_mod.save(&prefs, dir);
 }
 
@@ -2912,6 +2948,11 @@ fn laneAreaTop() i32 {
 }
 
 fn onDown(x: i32, y: i32) void {
+    if (onMarksPanelEdge(x, y)) {
+        ed.drag = .panel_edge;
+        _ = c.SetCapture(ed.hwnd);
+        return;
+    }
     if (insideMarksPanel(x, y)) |at| {
         onMarksPanelDown(at);
         return;
@@ -2926,10 +2967,14 @@ fn onDown(x: i32, y: i32) void {
             ed.drag = .scroll;
             ed.drag_grab_ns = @intCast(@max(at - t.left, 0));
             _ = c.SetCapture(ed.hwnd);
+            // При сильном приближении точка ползунка — десятки экранов:
+            // говорим, чем ехать точнее.
+            if (view_mod.thumbTooCoarse(span, visibleNs(rect.right), totalNs())) {
+                ed.say("ползунок грубый при таком приближении: тяните таймлайн средней кнопкой, листайте PageUp/PageDown");
+            }
         } else {
             // Щёлкнули мимо — листаем на страницу в ту сторону.
             ed.view.at_ns = view_mod.pageBy(ed.view.at_ns, visibleNs(rect.right), totalNs(), at > t.left);
-            _ = span;
             refreshStage();
         }
         return;
@@ -3093,6 +3138,13 @@ fn moveCurvePoint(x: i32, y: i32) void {
 
 fn onMove(x: i32, y: i32) void {
     if (ed.drag == .none) {
+        if (onMarksPanelEdge(x, y)) {
+            // 32644 — курсор «тянуть влево-вправо».
+            var cursor: ?*anyopaque = null;
+            ui.setSystemCursor(&cursor, 32644);
+            _ = setCursorRaw(cursor);
+            return;
+        }
         if (view_mod.onSplitter(y, toolbar_h, preview_h)) {
             // 32645 — курсор «тянуть вверх-вниз».
             var cursor: ?*anyopaque = null;
@@ -3118,6 +3170,26 @@ fn onMove(x: i32, y: i32) void {
 
     if (ed.drag == .splitter) {
         moveSplitter(y);
+        return;
+    }
+    if (ed.drag == .panel_edge) {
+        var rect: c.RECT = undefined;
+        if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+        const want = view_mod.panelWidthAt(rect.right, x);
+        if (want != marks_w) {
+            marks_w = want;
+            refresh();
+        }
+        return;
+    }
+    if (ed.drag == .pan) {
+        // Таймлайн едет за рукой: сдвинули мышь на сто точек — вид уехал
+        // на сто точек, в каком бы масштабе он ни был. Так листают то,
+        // до чего ползунком при сильном приближении не дотянуться.
+        var rect: c.RECT = undefined;
+        if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+        ed.view.at_ns = view_mod.scrollBy(ed.pan_at_ns, ed.view.ns_per_px, ed.pan_x0 - x, visibleNs(rect.right), totalNs());
+        refreshStage();
         return;
     }
     if (ed.drag == .scroll) {
@@ -3210,7 +3282,7 @@ fn onMove(x: i32, y: i32) void {
         },
         // Ползунок громкости и точку кривой обработали выше: им не нужно
         // время под курсором, им нужна высота.
-        .gain, .curve_point, .mark, .mark_edge, .splitter, .scroll, .none => {},
+        .gain, .curve_point, .mark, .mark_edge, .splitter, .scroll, .panel_edge, .pan, .none => {},
     }
 }
 
@@ -3302,6 +3374,7 @@ fn onUp() void {
             // иначе файл переписывался бы сотню раз за одно перетаскивание.
             savePreviewHeight();
         }
+        if (ed.drag == .panel_edge) saveMarksPanel();
         ed.drag = .none;
         ed.drag_started = false;
         refresh();
@@ -3967,6 +4040,15 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             onUp();
             return 0;
         },
+        c.WM_MBUTTONDOWN => {
+            _ = c.SetFocus(hwnd);
+            onMiddleDown(loWord(lp), hiWord(lp));
+            return 0;
+        },
+        c.WM_MBUTTONUP => {
+            onUp();
+            return 0;
+        },
         c.WM_MOUSEWHEEL => {
             onWheel(@bitCast(@as(u16, @truncate(wp >> 16))), loWord(lp));
             return 0;
@@ -3995,6 +4077,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 c.VK_SPACE => togglePlay(),
                 c.VK_LEFT => stepFrame(-1, ctrl),
                 c.VK_RIGHT => stepFrame(1, ctrl),
+                c.VK_PRIOR => pageView(false),
+                c.VK_NEXT => pageView(true),
                 c.VK_F2 => if (ed.sel_mark) |i| startMarkRename(i) else startRename(ed.cur_track),
                 // M — «метка»: ставится там, где стоит указатель.
                 'M' => if (ctrl) toggleMarksPanel() else addMarkAtPlayhead(),
@@ -4077,6 +4161,7 @@ fn loadPreviewHeight(allocator: std.mem.Allocator) void {
     const prefs = settings_mod.load(threaded.io(), allocator, dir);
     preview_h = prefs.preview_h;
     ed.marks_open = prefs.marksPanel();
+    marks_w = prefs.marksPanelW();
 }
 
 /// Запомнить высоту кадра. Читаем весь файл заново и меняем одну строку:

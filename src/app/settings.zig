@@ -17,6 +17,7 @@ const win32 = @import("../win32.zig");
 const hotkey = @import("hotkey.zig");
 const listen_mod = @import("listen.zig");
 const devices_mod = @import("../sound/devices.zig");
+const view_mod = @import("../edit/editor_view.zig");
 const c = win32.c;
 
 pub const magic = "zigrec-settings";
@@ -53,6 +54,9 @@ pub const Settings = struct {
     /// именно это. Переворот нужен там, где умолчание — «включено»
     /// (как у разгона), а здесь он только запутал бы.
     marks_panel_on: bool = false,
+    /// Ширина панели меток (#93). Ноль — умолчание из правила вида:
+    /// так настройки остаются нулевыми по умолчанию.
+    marks_panel_w: i32 = 0,
 
     /// Порт, на котором слушает сервер для Claude Code.
     port: u16 = 15599,
@@ -84,6 +88,18 @@ pub const Settings = struct {
     /// а не всегда, и занимает треть окна.
     pub fn marksPanel(self: *const Settings) bool {
         return self.marks_panel_on;
+    }
+
+    pub fn marksPanelW(self: *const Settings) i32 {
+        return if (self.marks_panel_w <= 0) view_mod.marks_panel_w else self.marks_panel_w;
+    }
+
+    /// Ширину берём только в пределах правила вида; чепуха не портит прежнее.
+    pub fn setMarksPanelW(self: *Settings, text: []const u8) bool {
+        const value = std.fmt.parseInt(i32, std.mem.trim(u8, text, " "), 10) catch return false;
+        if (value < view_mod.min_marks_panel_w or value > view_mod.max_marks_panel_w) return false;
+        self.marks_panel_w = value;
+        return true;
     }
 
     pub const default_template = "zigrec-%d-%t.mp4";
@@ -201,6 +217,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("areakey {s}\n", .{s.areaKey()});
     try w.print("preview {d}\n", .{s.preview_h});
     try w.print("marks {d}\n", .{@intFromBool(s.marksPanel())});
+    try w.print("markswidth {d}\n", .{s.marksPanelW()});
     try w.print("port {d}\n", .{s.port});
     try w.print("listen {s}\n", .{s.listenAddress()});
     try w.print("micdev {s}\n", .{s.micDevice()});
@@ -240,6 +257,8 @@ pub fn read(data: []const u8) Error!Settings {
             _ = out.setPreviewH(rest);
         } else if (std.mem.eql(u8, word, "marks")) {
             out.marks_panel_on = std.mem.eql(u8, rest, "1");
+        } else if (std.mem.eql(u8, word, "markswidth")) {
+            _ = out.setMarksPanelW(rest);
         } else if (std.mem.eql(u8, word, "boost")) {
             out.boost_off = std.mem.eql(u8, rest, "0");
         } else if (std.mem.eql(u8, word, "listen")) {
@@ -525,4 +544,18 @@ test "микрофон: по умолчанию пусто, выбор пере�
 test "файл прежнего выпуска без строки о микрофоне даёт «по умолчанию»" {
     const back = try read("zigrec-settings 1\r\nport 15599\r\n");
     try std.testing.expectEqualStrings("", back.micDevice());
+}
+
+test "ширина панели меток: умолчание из правила вида, годная переживает запись" {
+    var s = Settings.init();
+    try std.testing.expectEqual(view_mod.marks_panel_w, s.marksPanelW());
+    try std.testing.expect(s.setMarksPanelW("420"));
+    try std.testing.expect(!s.setMarksPanelW("10"));
+    try std.testing.expect(!s.setMarksPanelW("чепуха"));
+    try std.testing.expectEqual(@as(i32, 420), s.marksPanelW());
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&s, &w);
+    const back = try read(w.buffered());
+    try std.testing.expectEqual(@as(i32, 420), back.marksPanelW());
 }
