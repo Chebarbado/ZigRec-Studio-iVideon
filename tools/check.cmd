@@ -209,6 +209,20 @@ if defined FFMPEG (
   )
 )
 
+rem Автопанорама (#29): правило без мыши и настоящая запись с --follow
+rem на две секунды — код пути должен хотя бы не падать.
+echo [check] самопроверка автопанорамы
+"zig-out\bin\zigrec.exe" pan-smoke
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: автопанорама дёргается или выходит за экран
+  exit /b 1
+)
+"zig-out\bin\zigrec.exe" record ".check\follow.mp4" --sec 2 --area 0,0,320,200 --follow > nul
+if errorlevel 4 (
+  echo [check] ПРОВАЛ: запись с --follow не удалась
+  exit /b 1
+)
+
 rem Часы плеера (#23): время идёт по отданным в колонки отсчётам.
 echo [check] самопроверка часов плеера
 "zig-out\bin\zigrec.exe" clock-smoke

@@ -13,6 +13,7 @@ const win32 = @import("../win32.zig");
 const capture = @import("../capture/capture.zig");
 const capture_types = @import("../capture/capture_types.zig");
 const cursor = @import("../capture/cursor.zig");
+const pan = @import("../capture/pan.zig");
 const encode = @import("../file/encode.zig");
 const source = @import("../capture/source.zig");
 const mp4 = @import("../file/mp4.zig");
@@ -51,6 +52,9 @@ pub const Settings = struct {
     system_sound: bool = false,
     /// Микрофон и систему — двумя дорожками, а не одной сведённой.
     separate_sound: bool = false,
+    /// Область едет за курсором (#29). Только для записи области:
+    /// у монитора ехать некуда, у окна область едет за окном.
+    follow: bool = false,
     /// Какой микрофон брать (#22): номер устройства у Windows. Пусто —
     /// по умолчанию. Массив, а не срез: настройки едут в поток записи
     /// копией и не должны смотреть в чужую память.
@@ -197,6 +201,9 @@ pub const Recorder = struct {
     backend_raw: std.atomic.Value(u8) = .init(0),
     area_w: std.atomic.Value(u32) = .init(0),
     area_h: std.atomic.Value(u32) = .init(0),
+    /// Где область сейчас: при автопанораме и слежении за окном она едет.
+    area_x: std.atomic.Value(i32) = .init(0),
+    area_y: std.atomic.Value(i32) = .init(0),
     audio_samples: std.atomic.Value(u64) = .init(0),
     sound_failed: std.atomic.Value(bool) = .init(false),
 
@@ -229,7 +236,12 @@ pub const Recorder = struct {
             .elapsed_ns = self.elapsed_ns.load(.monotonic),
             .dropped = self.dropped.load(.monotonic),
             .backend = @enumFromInt(self.backend_raw.load(.monotonic)),
-            .area = .{ .width = self.area_w.load(.monotonic), .height = self.area_h.load(.monotonic) },
+            .area = .{
+                .x = self.area_x.load(.monotonic),
+                .y = self.area_y.load(.monotonic),
+                .width = self.area_w.load(.monotonic),
+                .height = self.area_h.load(.monotonic),
+            },
             .audio_samples = self.audio_samples.load(.monotonic),
             .sound_failed = self.sound_failed.load(.monotonic),
         };
@@ -338,6 +350,8 @@ pub const Recorder = struct {
         var clock = Clock{};
         clock.start(origin_ns);
         var current = area;
+        var follower = pan.Follower.init(area);
+        var last_pan_ns = origin_ns;
 
         self.backend_raw.store(@intFromEnum(cap.backend()), .monotonic);
         self.area_w.store(area.width, .monotonic);
@@ -371,6 +385,16 @@ pub const Recorder = struct {
                     }
                 } else |_| {}
             }
+            // Автопанорама (#29): область записи едет за курсором.
+            if (settings.follow and src == .area) {
+                if (painter.position()) |pos| {
+                    const pan_now = win32.nowNs();
+                    current = follower.update(pos.x, pos.y, area.width, area.height, screen.width, screen.height, pan_now -| last_pan_ns);
+                    last_pan_ns = pan_now;
+                }
+            }
+            self.area_x.store(current.x, .monotonic);
+            self.area_y.store(current.y, .monotonic);
 
             const view = capture_types.cropView(frame.pixels, frame.stride, current);
             var pixels = view;

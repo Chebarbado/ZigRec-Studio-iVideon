@@ -49,6 +49,8 @@ pub const Request = union(enum) {
         system: bool = false,
         /// Микрофон и колонки двумя дорожками.
         separate: bool = false,
+        /// Область едет за курсором (#29); только с area.
+        follow: bool = false,
         fps: ?u32 = null,
     };
 };
@@ -183,6 +185,9 @@ fn parseValue(root: std.json.Value) Parsed {
             if (a.get("system")) |v| if (v == .bool) {
                 start.system = v.bool;
             };
+            if (a.get("follow")) |v| if (v == .bool) {
+                start.follow = v.bool;
+            };
             if (a.get("separate")) |v| if (v == .bool) {
                 start.separate = v.bool;
             };
@@ -239,6 +244,7 @@ pub const tools_json =
     \\   "sound":{"type":"boolean","description":"Писать ли звук с микрофона"},
     \\   "system":{"type":"boolean","description":"Писать ли системный звук — то, что идёт в колонки; сводится с микрофоном в одну дорожку"},
     \\   "separate":{"type":"boolean","description":"Микрофон и колонки — двумя дорожками в файле, а не одной сведённой"},
+    \\   "follow":{"type":"boolean","description":"Область записи едет за курсором (только вместе с area)"},
     \\   "fps":{"type":"integer","description":"Кадров в секунду"}}}},
     \\{"name":"stop_recording",
     \\ "description":"Остановить запись и вернуть путь к готовому файлу mp4.",

@@ -78,6 +78,7 @@ const id_set_area_key = 341;
 const id_set_listen = 342;
 const id_set_boost = 343;
 const id_set_pick = 344;
+const id_set_follow = 345;
 /// Микрофон и проба (#22).
 const id_mic = 118;
 const id_probe = 119;
@@ -274,6 +275,8 @@ const App = struct {
     probe_thread: ?std.Thread = null,
     /// Индикатор работал до пробы — после неё вернуть.
     meter_was_on: bool = false,
+    /// MCP попросил автопанораму на одну запись (#29).
+    follow_once: bool = false,
     tray_added: bool = false,
     tray_tip: [128]u8 = @splat(0),
 };
@@ -571,6 +574,9 @@ fn startRecording() void {
     app.settings.system_sound = app.system_on;
     app.settings.separate_sound = app.separate_on;
     app.settings.setMicDevice(app.prefs.micDevice());
+    // Автопанорама — из настроек или из просьбы MCP на эту запись.
+    app.settings.follow = app.prefs.follow_cursor or app.follow_once;
+    app.follow_once = false;
     app.rec.start(path, src, app.settings) catch |err| {
         setText(app.status, errors.explain(err));
         return;
@@ -1371,6 +1377,7 @@ const SettingsWindow = struct {
     area_key_box: c.HWND = null,
     listen_box: c.HWND = null,
     boost_box: c.HWND = null,
+    follow_box: c.HWND = null,
     /// Нажали «Сохранить», а не «Отмена».
     accepted: bool = false,
 };
@@ -1480,6 +1487,7 @@ fn collectSettings() void {
 
     app.prefs.serve_at_start = c.SendMessageW(settings_win.serve_box, c.BM_GETCHECK, 0, 0) != 0;
     app.prefs.boost_off = c.SendMessageW(settings_win.boost_box, c.BM_GETCHECK, 0, 0) == 0;
+    app.prefs.follow_cursor = c.SendMessageW(settings_win.follow_box, c.BM_GETCHECK, 0, 0) != 0;
 
     // Сначала способ хранения: от него зависит, куда лягут настройки.
     const want: paths.Mode = if (c.SendMessageW(settings_win.portable_box, c.BM_GETCHECK, 0, 0) != 0)
@@ -1592,7 +1600,7 @@ fn createSettings(owner: c.HWND) void {
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         520,
-        404,
+        432,
         owner,
         null,
         hinst,
@@ -1642,10 +1650,11 @@ fn createSettings(owner: c.HWND) void {
     );
     // Прямо говорим, где программа оставляет следы: это её решение,
     // но знать о нём должен владелец машины.
-    settings_win.home_label = label(hwnd, "", 14, 284, 490, 20);
+    settings_win.follow_box = button(hwnd, "Область записи едет за курсором", id_set_follow, 14, 284, 380, 24, c.BS_AUTOCHECKBOX);
+    settings_win.home_label = label(hwnd, "", 14, 312, 490, 20);
 
-    _ = button(hwnd, "Сохранить", id_set_ok, 300, 316, 100, 30, 0);
-    _ = button(hwnd, "Отмена", id_set_cancel, 408, 316, 90, 30, 0);
+    _ = button(hwnd, "Сохранить", id_set_ok, 300, 344, 100, 30, 0);
+    _ = button(hwnd, "Отмена", id_set_cancel, 408, 344, 90, 30, 0);
 
     // Показываем то, что есть сейчас.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1663,6 +1672,7 @@ fn createSettings(owner: c.HWND) void {
     const mode = paths.currentMode();
     _ = c.SendMessageW(settings_win.portable_box, c.BM_SETCHECK, if (mode == .portable) 1 else 0, 0);
     _ = c.SendMessageW(settings_win.boost_box, c.BM_SETCHECK, if (app.prefs.boost()) 1 else 0, 0);
+    _ = c.SendMessageW(settings_win.follow_box, c.BM_SETCHECK, if (app.prefs.follow_cursor) 1 else 0, 0);
     var home_text: [640]u8 = undefined;
     setText(settings_win.home_label, std.fmt.bufPrint(&home_text, "Своё лежит в: {s}", .{app.home}) catch app.home);
 
@@ -1674,6 +1684,7 @@ fn createSettings(owner: c.HWND) void {
         settings_win.area_key_box,
         settings_win.listen_box,
         settings_win.boost_box,
+        settings_win.follow_box,
     }) |h| applyFont(h);
     var child = c.GetWindow(hwnd, c.GW_CHILD);
     while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) applyFont(child);
@@ -2493,6 +2504,7 @@ fn serveCall(call: *control.Call) void {
             _ = c.SendMessageW(app.chk_system, c.BM_SETCHECK, if (req.system) 1 else 0, 0);
             app.separate_on = req.separate;
             _ = c.SendMessageW(app.chk_separate, c.BM_SETCHECK, if (req.separate) 1 else 0, 0);
+            app.follow_once = req.follow;
 
             startRecording();
             if (!app.rec.isBusy()) {

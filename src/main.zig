@@ -16,6 +16,7 @@ const usage =
     \\        --monitor N      номер монитора (по умолчанию 0)
     \\        --area x,y,ш,в   прямоугольник рабочего стола
     \\        --window ТЕКСТ   окно, найденное по части заголовка; область едет за окном
+    \\        --follow         область едет за курсором (только с --area)
     \\        --sound          писать звук с микрофона в ту же дорожку
     \\        --system         писать и то, что идёт в колонки (сводится с микрофоном)
     \\        --separate       микрофон и колонки — двумя дорожками, а не одной
@@ -43,6 +44,8 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec pan-smoke
+    \\        самопроверка автопанорамы: область едет за курсором плавно и не за край
     \\  zigrec export-smoke ИСХОДНИК.mp4 ВЫХОД.mp4 [--offkey]
     \\        самопроверка экспорта: клип с ключевого кадра — без перекодирования,
     \\        с --offkey — с перекодированием; длина и кадры сверяются нашим читателем
@@ -332,6 +335,8 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "pan-smoke")) {
+        code = try panSmoke(w);
     } else if (eq(cmd, "export-smoke")) {
         if (args.len < 4) {
             try w.writeAll("нужны исходник mp4 и выходной файл\n");
@@ -605,6 +610,8 @@ const RecordArgs = struct {
     window: ?[]const u8 = null,
     cursor: bool = true,
     clicks: bool = true,
+    /// Область едет за курсором (#29).
+    follow: bool = false,
     preset: zigrec.encode.Preset = .text_ui,
     bitrate_kbps: ?u32 = null,
     gop: u32 = 60,
@@ -665,6 +672,8 @@ fn parseRecordArgs(args: []const []const u8) ArgError!RecordArgs {
             out.system = true;
         } else if (eq(key, "--separate")) {
             out.separate = true;
+        } else if (eq(key, "--follow")) {
+            out.follow = true;
         } else if (eq(key, "--no-cursor")) {
             out.cursor = false;
         } else if (eq(key, "--no-clicks")) {
@@ -892,6 +901,9 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
     var written: u64 = 0;
     var moved: u64 = 0;
     var current = area;
+    var follower = zigrec.pan.Follower.init(area);
+    var last_pan_ns = zigrec.win32.nowNs();
+    var panned: u32 = 0;
     while (zigrec.win32.nowNs() < until) {
         const frame = cap.next(200) catch |err| {
             try w.print("[rec] ПРОВАЛ на захвате: {s}\n", .{@errorName(err)});
@@ -912,6 +924,16 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
                     current.height = area.height;
                 }
             } else |_| {}
+        }
+        // Автопанорама (#29): область едет за курсором, как в окне записи.
+        if (opt.follow and src == .area) {
+            if (painter.position()) |pos| {
+                const now = zigrec.win32.nowNs();
+                const next = follower.update(pos.x, pos.y, area.width, area.height, screen.width, screen.height, now -| last_pan_ns);
+                last_pan_ns = now;
+                if (next.x != current.x or next.y != current.y) panned += 1;
+                current = next;
+            }
         }
 
         const view = zigrec.capture_types.cropView(frame.pixels, frame.stride, current);
@@ -981,6 +1003,7 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
         if (enc.gif.full) {
             try w.writeAll("[rec] петля упёрлась в предел памяти: хвост записи в неё не вошёл\n");
         }
+        if (opt.follow) try w.print("[rec] область ехала за курсором: сдвигов {d}\n", .{panned});
         try w.print("[rec] итог: {s}\n", .{zigrec.errors.Outcome.recorded.label()});
         return zigrec.errors.Outcome.recorded.exitCode();
     }
@@ -1013,6 +1036,7 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
     if (try verifyMp4(io, allocator, w, path) != 0) return zigrec.errors.Outcome.failed.exitCode();
 
     const outcome: zigrec.errors.Outcome = if (stats.dropped > 0) .recorded_with_drops else .recorded;
+    if (opt.follow) try w.print("[rec] область ехала за курсором: сдвигов {d}\n", .{panned});
     try w.print("[rec] итог: {s}\n", .{outcome.label()});
     return outcome.exitCode();
 }
@@ -3265,6 +3289,62 @@ fn micCheck(w: anytype, seconds: u32) !u8 {
         return 1;
     }
     try w.print("[mic] СЛЫШНО: звук был в {d} замерах из {d}\n", .{ loud, i });
+    return 0;
+}
+
+/// Самопроверка автопанорамы (#29): прогоняем правило по нарисованному
+/// пути курсора — рывок вправо, пауза, уход в угол — и сверяем: в зоне
+/// покоя область стоит, за зоной едет не быстрее предела, у края экрана
+/// останавливается. Без настоящей мыши: дёргать её во время проверки
+/// нельзя, а правило от неё и не зависит.
+fn panSmoke(w: anytype) !u8 {
+    const pan = zigrec.pan;
+    const area = zigrec.capture_types.Rect{ .x = 100, .y = 100, .width = 640, .height = 360 };
+    var f = pan.Follower.init(area);
+    const dt: u64 = 33 * std.time.ns_per_ms;
+    var worst_step: f32 = 0;
+    var last = area;
+    var bad: u8 = 0;
+
+    // Курсор в центре области: полсекунды покоя.
+    var i: usize = 0;
+    while (i < 15) : (i += 1) {
+        const r = f.update(420, 280, 640, 360, 1920, 1080, dt);
+        if (r.x != area.x or r.y != area.y) bad = 1;
+    }
+    try w.print("[pan] курсор в центре: область {s}\n", .{if (bad == 0) "стоит" else "ДЁРНУЛАСЬ"});
+    if (bad != 0) return 1;
+
+    // Рывок вправо-вниз: область догоняет, но не быстрее предела.
+    i = 0;
+    while (i < 90) : (i += 1) {
+        const r = f.update(1700, 900, 640, 360, 1920, 1080, dt);
+        const dx: f32 = @floatFromInt(r.x - last.x);
+        const dy: f32 = @floatFromInt(r.y - last.y);
+        worst_step = @max(worst_step, @sqrt(dx * dx + dy * dy));
+        last = r;
+    }
+    const limit = f.max_speed * 0.033 + 1;
+    try w.print("[pan] самый большой шаг за кадр: {d:.1} точек при пределе {d:.1}; область пришла в {d},{d}\n", .{ worst_step, limit, last.x, last.y });
+    if (worst_step > limit) {
+        try w.writeAll("[pan] ПРОВАЛ: область прыгнула быстрее предела скорости\n");
+        return 1;
+    }
+    // Курсор 1700,900; зона — центральная половина: x от last.x+160 до last.x+480.
+    if (last.x + 480 < 1700 - 1 or last.y + 270 < 900 - 1) {
+        try w.writeAll("[pan] ПРОВАЛ: область не догнала курсор за три секунды\n");
+        return 1;
+    }
+
+    // В угол: область упирается в край экрана и не вылезает.
+    i = 0;
+    while (i < 90) : (i += 1) last = f.update(1919, 1079, 640, 360, 1920, 1080, dt);
+    try w.print("[pan] в углу экрана область стоит в {d},{d} (край {d},{d})\n", .{ last.x, last.y, 1920 - 640, 1080 - 360 });
+    if (last.x != 1920 - 640 or last.y != 1080 - 360) {
+        try w.writeAll("[pan] ПРОВАЛ: область вышла за край экрана или не дошла до него\n");
+        return 1;
+    }
+    try w.writeAll("[pan] АВТОПАНОРАМА ПЛАВНАЯ И В ПРЕДЕЛАХ ЭКРАНА\n");
     return 0;
 }
 

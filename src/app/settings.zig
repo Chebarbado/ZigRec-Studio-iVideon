@@ -77,6 +77,10 @@ pub const Settings = struct {
     /// это уже случалось и стоило восьмисот килобайт.
     boost_off: bool = false,
 
+    /// Область записи едет за курсором (#29). По умолчанию нет: ехать
+    /// за мышью — не всегда то, чего ждут от записи области.
+    follow_cursor: bool = false,
+
     /// Включён ли разгон. По умолчанию да: медленный редактор по умолчанию —
     /// не то, чем стоит гордиться, а выключатель нужен, чтобы разобраться,
     /// когда что-то ведёт себя странно.
@@ -222,6 +226,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("listen {s}\n", .{s.listenAddress()});
     try w.print("micdev {s}\n", .{s.micDevice()});
     try w.print("boost {d}\n", .{@intFromBool(s.boost())});
+    try w.print("follow {d}\n", .{@intFromBool(s.follow_cursor)});
     try w.print("serve {d}\n", .{@intFromBool(s.serve_at_start)});
 }
 
@@ -259,6 +264,8 @@ pub fn read(data: []const u8) Error!Settings {
             out.marks_panel_on = std.mem.eql(u8, rest, "1");
         } else if (std.mem.eql(u8, word, "markswidth")) {
             _ = out.setMarksPanelW(rest);
+        } else if (std.mem.eql(u8, word, "follow")) {
+            out.follow_cursor = std.mem.eql(u8, rest, "1");
         } else if (std.mem.eql(u8, word, "boost")) {
             out.boost_off = std.mem.eql(u8, rest, "0");
         } else if (std.mem.eql(u8, word, "listen")) {
@@ -558,4 +565,17 @@ test "ширина панели меток: умолчание из правил
     try write(&s, &w);
     const back = try read(w.buffered());
     try std.testing.expectEqual(@as(i32, 420), back.marksPanelW());
+}
+
+test "автопанорама по умолчанию выключена и переживает запись" {
+    var s = Settings.init();
+    try std.testing.expect(!s.follow_cursor);
+    s.follow_cursor = true;
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&s, &w);
+    const back = try read(w.buffered());
+    try std.testing.expect(back.follow_cursor);
+    const old = try read("zigrec-settings 1\r\nport 15599\r\n");
+    try std.testing.expect(!old.follow_cursor);
 }
