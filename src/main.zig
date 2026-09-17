@@ -39,6 +39,8 @@ const usage =
     \\        самопроверка открытия: быстрый путь и медленный дают одно
     \\  zigrec ui-smoke
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
+    \\  zigrec remote-smoke
+    \\        самопроверка пульта: подписи влезают, пульт не в кадре
     \\  zigrec hotkey-smoke [СОЧЕТАНИЕ]
     \\        самопроверка сочетания: Windows его принимает
     \\  zigrec gif-write-smoke ФАЙЛ.gif [N]
@@ -196,6 +198,8 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "ui-smoke")) {
         code = try uiSmoke(arena, w);
+    } else if (eq(cmd, "remote-smoke")) {
+        code = try remoteSmoke(w);
     } else if (eq(cmd, "hotkey-smoke")) {
         code = try hotkeySmoke(w, if (args.len > 2) args[2] else zigrec.hotkey.default_text);
     } else if (eq(cmd, "gif-write-smoke")) {
@@ -1284,6 +1288,95 @@ fn checkWindow(w: anytype, name: []const u8, got: anyerror!zigrec.ui.Layout) !bo
     }
     try w.print("[ui] {s}: всё поместилось, под кнопками не рисуем\n", .{name});
     return false;
+}
+
+/// Самопроверка пульта управления съёмкой.
+///
+/// Где пульту встать, проверено тестами: это чистый счёт. А вот влезут ли
+/// подписи в кнопки, чистый счёт знать не может — он меряет буквы прикидкой,
+/// не имея на руках шрифта. Разойдётся прикидка с делом — подпись обрежется
+/// молча, и на пульте окажется кнопка «⏸ Пауз». Здесь ширину меряет сама
+/// Windows тем шрифтом, которым пульт и рисуется.
+fn remoteSmoke(w: anytype) !u8 {
+    const remote = zigrec.remote;
+
+    var fits: [zigrec.remote_win.label_count]zigrec.remote_win.Fit = undefined;
+    const measured = zigrec.remote_win.measureLabels(&fits);
+    if (measured.len == 0) {
+        try w.writeAll("[remote] ПРОВАЛ: не удалось получить контекст рисования\n");
+        return 1;
+    }
+
+    var bad: u8 = 0;
+
+    // Сперва проверим саму проверку шрифта: если она не видит заведомо
+    // отсутствующего знака, то и настоящую дырку не увидит, и стенд будет
+    // молча зелёным.
+    if (zigrec.remote_win.probeMissing(zigrec.remote_win.absent_probe) == 0) {
+        try w.writeAll("[remote] ПРОВАЛ: проверка шрифта не видит даже заведомо отсутствующего знака\n");
+        bad = 1;
+    } else {
+        try w.writeAll("[remote] проверка шрифта жива: отсутствующий знак опознан\n");
+    }
+
+    for (measured) |fit| {
+        try w.print("[remote] «{s}»: надо {d}, есть {d}\n", .{ fit.label, fit.need, fit.have });
+        if (fit.need > fit.have) {
+            try w.print("[remote] ПРОВАЛ: подпись «{s}» не влезает, не хватает {d} точек\n", .{
+                fit.label,
+                fit.need - fit.have,
+            });
+            bad = 1;
+        }
+        if (fit.missing != 0) {
+            // Пустой квадратик вместо знака той же ширины: вёрстка сходится,
+            // а кнопка становится непонятной.
+            var one: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(fit.missing, &one) catch 0;
+            try w.print("[remote] ПРОВАЛ: в подписи «{s}» знака «{s}» нет в шрифте — будет пустой квадратик\n", .{
+                fit.label,
+                one[0..len],
+            });
+            bad = 1;
+        }
+    }
+
+    // Кнопки не должны налезать ни друг на друга, ни на полоску звука,
+    // ни на край пульта.
+    const stop = remote.stopButton();
+    const pause = remote.pauseButton();
+    const bar = remote.levelBar();
+    try w.print("[remote] пульт {d}x{d}: стоп {d}..{d}, пауза {d}..{d}, полоска до {d}\n", .{
+        remote.width,
+        remote.height,
+        stop.x,
+        stop.right(),
+        pause.x,
+        pause.right(),
+        bar.right(),
+    });
+    if (stop.overlaps(pause) or bar.overlaps(stop) or bar.overlaps(pause) or
+        pause.right() > remote.width or pause.bottom() > remote.height)
+    {
+        try w.writeAll("[remote] ПРОВАЛ: на пульте всё налезает друг на друга\n");
+        bad = 1;
+    }
+
+    // И пульт не должен вставать в снимаемую область.
+    const screen = remote.Rect{ .x = 0, .y = 0, .w = 1920, .h = 1080 };
+    const area = remote.Rect{ .x = 300, .y = 200, .w = 900, .h = 500 };
+    const spot = remote.place(screen, area, false);
+    try w.print("[remote] область {d},{d} {d}x{d} — пульт встал в {d},{d}\n", .{
+        area.x, area.y, area.w, area.h, spot.at.x, spot.at.y,
+    });
+    if (spot.in_frame or spot.at.overlaps(area)) {
+        try w.writeAll("[remote] ПРОВАЛ: пульт встал в кадр\n");
+        bad = 1;
+    }
+
+    if (bad != 0) return 1;
+    try w.writeAll("[remote] ПУЛЬТ В ПОРЯДКЕ\n");
+    return 0;
 }
 
 /// Самопроверка сочетания клавиш.

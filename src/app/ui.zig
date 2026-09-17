@@ -34,6 +34,8 @@ const tray_menu = @import("tray_menu.zig");
 const listen = @import("listen.zig");
 const corner = @import("mcp_corner.zig");
 const boost_mod = @import("boost.zig");
+const remote = @import("remote.zig");
+const remote_win = @import("remote_win.zig");
 
 pub const Rect = capture_types.Rect;
 
@@ -435,6 +437,7 @@ fn startRecording() void {
         return;
     };
     app.counter += 1;
+    showRemote();
     setText(app.btn_record, "Стоп");
     _ = c.EnableWindow(app.btn_pause, 1);
     // Рамка нужна только для куска экрана: весь экран обводить нечего.
@@ -446,6 +449,7 @@ fn startRecording() void {
 fn stopRecording() void {
     if (!app.rec.isBusy()) return;
     app.started_by_area_key = false;
+    remote_win.hide();
     _ = c.KillTimer(app.hwnd, timer_frame);
     frame_overlay.hide();
     app.rec.stop();
@@ -546,6 +550,14 @@ fn updateStatus() void {
     setText(app.status, text);
     setText(app.btn_pause, if (p.state == .paused) "Продолжить" else "Пауза");
     updateTrayTip(p, secs);
+    // Пульт показывает то же, что и окно: одно состояние, два места.
+    remote_win.update(
+        p.elapsed_ns,
+        p.frames,
+        p.dropped,
+        p.state == .paused,
+        if (app.sound_on) app.microphone.ring.level().peak else -1,
+    );
 
     // Значки на кнопках зависят от состояния записи. Когда запись кончилась
     // сама, такт пульсации уже выключен, и без этой перерисовки на кнопке
@@ -1592,6 +1604,74 @@ fn onDrop(drop: usize) void {
     setText(app.status, std.fmt.bufPrint(&note, "открываю в редакторе: файлов {d}", .{opened}) catch "открываю в редакторе");
 }
 
+/// Поднять пульт управления съёмкой.
+///
+/// Пульт встаёт за пределами снимаемой области — куда именно, решает
+/// чистый счёт в `remote.zig`. Если снимают весь экран, спрятать его негде,
+/// и пульт честно об этом пишет.
+fn showRemote() void {
+    const screen = screenRect();
+    const area: remote.Rect = if (app.area) |a| .{
+        .x = a.x,
+        .y = a.y,
+        .w = @intCast(a.width),
+        .h = @intCast(a.height),
+    } else screen;
+    remote_win.show(app.hwnd, screen, area, app.area == null);
+}
+
+/// Прямоугольник того монитора, с которого пишем.
+fn screenRect() remote.Rect {
+    const list = source.listMonitors(app.allocator) catch return wholeScreen();
+    defer app.allocator.free(list);
+    for (list) |m| {
+        if (m.index != app.settings.monitor) continue;
+        const whole = remote.Rect{
+            .x = m.area.x,
+            .y = m.area.y,
+            .w = @intCast(m.area.width),
+            .h = @intCast(m.area.height),
+        };
+        return workArea(whole);
+    }
+    return wholeScreen();
+}
+
+fn wholeScreen() remote.Rect {
+    return workArea(.{
+        .x = 0,
+        .y = 0,
+        .w = c.GetSystemMetrics(c.SM_CXSCREEN),
+        .h = c.GetSystemMetrics(c.SM_CYSCREEN),
+    });
+}
+
+/// Рабочая область монитора: экран без панели задач.
+///
+/// Пульт ставится по ней, а не по всему экрану. Панель задач тоже «поверх
+/// всех», и внизу справа она закрывает собой ровно тот угол, куда пульт
+/// просится, — кнопки оказываются под ней и не нажимаются.
+fn workArea(whole: remote.Rect) remote.Rect {
+    const at: c.POINT = .{ .x = whole.x + @divTrunc(whole.w, 2), .y = whole.y + @divTrunc(whole.h, 2) };
+    const mon = c.MonitorFromPoint(at, c.MONITOR_DEFAULTTONEAREST);
+    if (mon == null) return whole;
+
+    var info = std.mem.zeroes(c.MONITORINFO);
+    info.cbSize = @sizeOf(c.MONITORINFO);
+    if (c.GetMonitorInfoW(mon, &info) == 0) return whole;
+
+    const work = remote.Rect{
+        .x = info.rcWork.left,
+        .y = info.rcWork.top,
+        .w = info.rcWork.right - info.rcWork.left,
+        .h = info.rcWork.bottom - info.rcWork.top,
+    };
+    // Рабочая область бывает пустой на странных сборках Windows — тогда
+    // лучше весь экран, чем пульт нулевого размера.
+    if (work.w < remote.width or work.h < remote.height) return whole;
+    return work;
+}
+
 /// Показать папку с записями в проводнике.
 fn openOutputDir() void {
     var wide_buf: [std.fs.max_path_bytes]u16 = undefined;
@@ -2222,6 +2302,16 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             }
             return 0;
         },
+        remote_win.wm_remote => {
+            switch (@as(remote_win.Press, @enumFromInt(wp))) {
+                .stop => {
+                    stopRecording();
+                    updateStatus();
+                },
+                .pause => togglePause(),
+            }
+            return 0;
+        },
         wm_tray => {
             if (lp == c.WM_LBUTTONUP or lp == c.WM_LBUTTONDBLCLK) {
                 if (c.IsWindowVisible(hwnd) != 0) {
@@ -2242,6 +2332,12 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             // Esc убирает окно в трей: запись продолжается, состояние видно
             // по подсказке значка. Закрыть насовсем — крестик или Alt+F4.
             if (wp == c.VK_ESCAPE) {
+                // Пульт в кадре мешает записи — его Esc убирает первым:
+                // окно спрятать можно и потом, а испорченный кадр не вернёшь.
+                if (remote_win.inFrame()) {
+                    remote_win.hide();
+                    return 0;
+                }
                 _ = c.ShowWindow(hwnd, c.SW_HIDE);
                 return 0;
             }
