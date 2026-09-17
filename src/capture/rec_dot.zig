@@ -138,6 +138,82 @@ pub fn areaFrame(radius: u32) AreaFrame {
     return .{ .half_w = r + 7, .half_h = r + 4, .dash = 3 };
 }
 
+/// Значок «одно окно» на кнопке выбора окна.
+///
+/// Задача #78. Рисуем сами, а не берём знак из шрифта: системный шрифт
+/// знает не всякий знак, и вместо значка выходит пустой квадратик —
+/// на кнопках пульта это уже случалось.
+///
+/// Рамка с полосой заголовка и точкой закрытия: так окно рисуют везде,
+/// и объяснять это никому не надо — ровно как с красной точкой записи.
+pub const WindowGlyph = struct {
+    half_w: i32,
+    half_h: i32,
+    /// Высота полосы заголовка.
+    title_h: i32,
+    /// Сторона точки закрытия в правом углу заголовка.
+    dot: i32,
+
+    /// Влезает ли точка закрытия в полосу заголовка с просветом.
+    pub fn dotFits(self: WindowGlyph) bool {
+        return self.dot + 2 <= self.title_h and self.dot * 3 <= self.half_w * 2;
+    }
+};
+
+/// Значок под кнопку такой-то высоты.
+///
+/// Шире, чем выше: окно на экране шире, чем выше, и квадратный значок
+/// читался бы как кнопка, а не как окно.
+pub fn windowGlyph(button_h: i32) WindowGlyph {
+    // Значок занимает примерно половину высоты кнопки: больше выглядит
+    // тяжелее подписи, меньше — не читается.
+    const half_h = @max(@divTrunc(button_h, 4), 4);
+    // Заголовок считается первым, а точка — от него: точка должна влезть
+    // в заголовок с просветом, а не наоборот. Считая её отдельно, легко
+    // получить точку выше полосы, в которой она нарисована.
+    const title_h = @max(@divTrunc(half_h, 2), 4);
+    return .{
+        .half_w = half_h + @divTrunc(half_h, 2) + 1,
+        .half_h = half_h,
+        .title_h = title_h,
+        .dot = @max(title_h - 2, 2),
+    };
+}
+
+test "значок окна шире, чем выше" {
+    // Квадратный значок читался бы как кнопка, а не как окно.
+    var h: i32 = 20;
+    while (h <= 40) : (h += 2) {
+        const g = windowGlyph(h);
+        try std.testing.expect(g.half_w > g.half_h);
+    }
+}
+
+test "полоса заголовка не съедает всё окно" {
+    var h: i32 = 20;
+    while (h <= 40) : (h += 2) {
+        const g = windowGlyph(h);
+        // Под заголовком должно остаться хотя бы столько же места,
+        // сколько занял он сам, иначе значок читается как полоска.
+        try std.testing.expect(g.title_h * 2 <= g.half_h * 2);
+        try std.testing.expect(g.title_h >= 3);
+    }
+}
+
+test "точка закрытия влезает в заголовок при любом размере кнопки" {
+    var h: i32 = 20;
+    while (h <= 48) : (h += 1) {
+        try std.testing.expect(windowGlyph(h).dotFits());
+    }
+}
+
+test "на крошечной кнопке значок не схлопывается в ноль" {
+    const g = windowGlyph(4);
+    try std.testing.expect(g.half_h >= 4);
+    try std.testing.expect(g.half_w > 0);
+    try std.testing.expect(g.dot >= 2);
+}
+
 test "рамка области шире, чем выше — читается как кусок экрана" {
     const f = areaFrame(base_radius);
     try std.testing.expect(f.half_w > f.half_h);

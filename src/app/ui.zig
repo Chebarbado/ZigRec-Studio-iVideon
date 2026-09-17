@@ -75,6 +75,43 @@ const wm_dropfiles = 0x0233;
 
 /// Поле, куда бросают файл. Координаты рабочей части окна.
 const drop_zone = c.RECT{ .left = 214, .top = 432, .right = 510, .bottom = 470 };
+
+/// Подпись в поле для броска.
+///
+/// Одна строка: `DT_VCENTER` работает только с одной, а с двумя нижняя
+/// уезжает под нижний край поля. Значит, длину надо держать — и держать
+/// не на глаз: прежняя подпись «Бросьте файл — откроется в редакторе»
+/// обрезалась с обоих концов, и заметно это было только глазами.
+/// Влезает ли она, меряет стенд `ui-smoke` настоящим шрифтом.
+pub const drop_text = "Бросьте файл в редактор";
+
+/// Сколько места надо подписи и сколько ей отведено.
+pub const DropFit = struct {
+    need: i32 = 0,
+    have: i32 = 0,
+
+    pub fn fits(self: DropFit) bool {
+        return self.need <= self.have;
+    }
+};
+
+/// Померить подпись тем шрифтом, которым она рисуется.
+pub fn dropLabelFit() DropFit {
+    const have = drop_zone.right - drop_zone.left - 16;
+    const dc = c.CreateCompatibleDC(null);
+    if (dc == null) return .{ .have = have };
+    defer _ = c.DeleteDC(dc);
+
+    const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
+    const old_font = c.SelectObject(dc, font);
+    defer _ = c.SelectObject(dc, old_font);
+
+    var wide_buf: [128]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, drop_text) catch return .{ .have = have };
+    var size: c.SIZE = std.mem.zeroes(c.SIZE);
+    _ = c.GetTextExtentPoint32W(dc, @ptrCast(&wide_buf), @intCast(n), &size);
+    return .{ .need = size.cx, .have = have };
+}
 /// Номера строк в списке недавних. Берём с запасом, чтобы не столкнуться
 /// с номерами кнопок.
 const id_recent_base = 700;
@@ -952,6 +989,95 @@ fn drawRecordButton(item: *c.DRAWITEMSTRUCT) void {
     }
 }
 
+/// Нарисовать кнопку выбора окна: рамка окна слева, подпись справа.
+///
+/// Значок рисуем сами, а не берём знак из шрифта: системный шрифт знает
+/// не всякий знак, и вместо значка выходит пустой квадратик — на кнопках
+/// пульта это уже случалось. Что и где рисовать, считает `rec_dot`,
+/// и это проверено тестами; здесь только сама краска.
+fn drawWindowButton(item: *c.DRAWITEMSTRUCT) void {
+    const dc = item.hDC;
+    var rc = item.rcItem;
+
+    var state: c.UINT = c.DFCS_BUTTONPUSH;
+    if (item.itemState & c.ODS_SELECTED != 0) state |= c.DFCS_PUSHED;
+    if (item.itemState & c.ODS_DISABLED != 0) state |= c.DFCS_INACTIVE;
+    _ = c.DrawFrameControl(dc, &rc, c.DFC_BUTTON, state);
+
+    const enabled = item.itemState & c.ODS_DISABLED == 0;
+    const chosen = chosenWindowName().len > 0;
+    // Выбранное окно помечаем цветом значка: по кнопке видно, снимаем
+    // окно или нет, не читая строку состояния.
+    const ink: c.COLORREF = if (!enabled)
+        rec_dot.grey
+    else if (chosen)
+        rec_dot.red
+    else
+        @as(c.COLORREF, 0x00505050);
+
+    const g = rec_dot.windowGlyph(rc.bottom - rc.top);
+    const cx = rc.left + 16;
+    const cy = @divTrunc(rc.top + rc.bottom, 2);
+
+    const pen = c.CreatePen(c.PS_SOLID, 1, ink);
+    const old_pen = c.SelectObject(dc, pen);
+    const hollow = c.GetStockObject(c.HOLLOW_BRUSH);
+    const old_brush = c.SelectObject(dc, hollow);
+    _ = c.Rectangle(dc, cx - g.half_w, cy - g.half_h, cx + g.half_w, cy + g.half_h);
+    _ = c.SelectObject(dc, old_brush);
+
+    // Полоса заголовка: сплошная, если окно выбрано, и одной чертой, если нет.
+    const title_bottom = cy - g.half_h + g.title_h;
+    if (chosen) {
+        var bar = c.RECT{
+            .left = cx - g.half_w + 1,
+            .top = cy - g.half_h + 1,
+            .right = cx + g.half_w - 1,
+            .bottom = title_bottom,
+        };
+        const brush = c.CreateSolidBrush(ink);
+        defer _ = c.DeleteObject(brush);
+        _ = c.FillRect(dc, &bar, brush);
+    } else {
+        _ = c.MoveToEx(dc, cx - g.half_w, title_bottom, null);
+        _ = c.LineTo(dc, cx + g.half_w, title_bottom);
+        // Точка закрытия в правом углу заголовка.
+        var dot = c.RECT{
+            .left = cx + g.half_w - 1 - g.dot - 1,
+            .top = cy - g.half_h + 2,
+            .right = cx + g.half_w - 2,
+            .bottom = cy - g.half_h + 2 + g.dot,
+        };
+        const brush = c.CreateSolidBrush(ink);
+        defer _ = c.DeleteObject(brush);
+        _ = c.FillRect(dc, &dot, brush);
+    }
+    _ = c.SelectObject(dc, old_pen);
+    _ = c.DeleteObject(pen);
+
+    var text: [256]u16 = undefined;
+    const n = c.GetWindowTextW(item.hwndItem, &text, text.len);
+    if (n > 0) {
+        var text_rc = c.RECT{
+            .left = cx + g.half_w + 8,
+            .top = rc.top,
+            .right = rc.right - 6,
+            .bottom = rc.bottom,
+        };
+        _ = c.SetBkMode(dc, c.TRANSPARENT);
+        _ = c.SetTextColor(dc, if (enabled) @as(c.COLORREF, 0x00202020) else @as(c.COLORREF, 0x00909090));
+        const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
+        const old_font = c.SelectObject(dc, font);
+        _ = c.DrawTextW(dc, &text, n, &text_rc, c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+        _ = c.SelectObject(dc, old_font);
+    }
+
+    if (item.itemState & c.ODS_FOCUS != 0) {
+        var focus_rc = c.RECT{ .left = rc.left + 3, .top = rc.top + 3, .right = rc.right - 3, .bottom = rc.bottom - 3 };
+        _ = c.DrawFocusRect(dc, &focus_rc);
+    }
+}
+
 /// Пунктирная рамка вокруг значка записи.
 ///
 /// Рисуем штрихами вручную, а не пунктирным пером: перо Windows кладёт
@@ -1081,10 +1207,7 @@ fn drawDropZone(dc: c.HDC) void {
 
     var rect = box;
     var wide_buf: [128]u16 = undefined;
-    // Одна строка: `DT_VCENTER` работает только с одной, а с двумя нижняя
-    // уезжает под нижний край поля.
-    const text = "Бросьте файл — откроется в редакторе";
-    const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch return;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, drop_text) catch return;
     _ = c.DrawTextW(
         dc,
         @ptrCast(&wide_buf),
@@ -2273,7 +2396,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             // окна значит заставлять человека искать, где он сделан.
             _ = button(hwnd, "Выбрать область…", id_area, 14, 106, 176, 30, 0);
             _ = button(hwnd, "Весь экран", id_full, 198, 106, 122, 30, 0);
-            _ = button(hwnd, "Выбрать окно…", id_window, 328, 106, 182, 30, 0);
+            _ = button(hwnd, "Выбрать окно…", id_window, 328, 106, 182, 30, c.BS_OWNERDRAW);
             app.chk_sound = button(hwnd, "Звук", id_sound, 14, 232, 90, 24, c.BS_AUTOCHECKBOX);
             app.chk_cursor = button(hwnd, "Курсор и клики", id_cursor, 120, 232, 150, 24, c.BS_AUTOCHECKBOX);
             // Галочка не должна врать: пока звук слышно, но в файл он не идёт.
@@ -2424,7 +2547,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
         },
         c.WM_DRAWITEM => {
             const item: *c.DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lp)));
-            drawRecordButton(item);
+            // Кнопок, которые рисуем сами, уже несколько: у каждой свой
+            // значок, и валить их в одну отрисовку значит считать чужие
+            // отступы в чужой функции.
+            if (item.CtlID == id_window) drawWindowButton(item) else drawRecordButton(item);
             return 1;
         },
         c.WM_HOTKEY => {

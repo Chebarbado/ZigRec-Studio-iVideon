@@ -1257,6 +1257,23 @@ fn uiSmoke(allocator: std.mem.Allocator, w: anytype) !u8 {
     var bad: u8 = 0;
     if (try checkWindow(w, "запись", zigrec.ui.checkLayout(allocator))) bad = 1;
     if (try checkWindow(w, "редактор", zigrec.editor.checkLayout(allocator))) bad = 1;
+
+    // Поле для броска рисуется своим кодом, и его подпись не проходит
+    // через замер органов управления: обрезанную подпись там видно только
+    // глазами. Меряем её настоящим шрифтом.
+    const drop = zigrec.ui.dropLabelFit();
+    try w.print("[ui] подпись поля броска «{s}»: надо {d}, есть {d}\n", .{
+        zigrec.ui.drop_text,
+        drop.need,
+        drop.have,
+    });
+    if (!drop.fits()) {
+        try w.print("[ui] ПРОВАЛ: подпись поля броска не влезает, не хватает {d} точек\n", .{
+            drop.need - drop.have,
+        });
+        bad = 1;
+    }
+
     if (bad != 0) return 1;
     try w.writeAll("[ui] ОБА ОКНА В ПОРЯДКЕ\n");
     return 0;
