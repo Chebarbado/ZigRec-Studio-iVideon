@@ -54,6 +54,7 @@ const id_menu_save_as = 304;
 const id_menu_save_bundle = 305;
 const id_menu_close = 303;
 const id_menu_mixdown = 306;
+const id_menu_marks = 310;
 /// Номера строк в списках недавних. Два ряда подряд, по одному на список.
 const id_recent_rec = 700;
 const id_recent_view = 740;
@@ -148,6 +149,8 @@ const Editor = struct {
     curve_point: usize = 0,
     /// Выбранная метка. `null` — ни одна не выбрана.
     sel_mark: ?usize = null,
+    /// Открыта ли панель меток справа.
+    marks_open: bool = false,
     /// Каким цветом ставить следующую метку.
     ///
     /// Своё поле, а не «следующий за цветом последней в списке»: список
@@ -217,6 +220,8 @@ const Editor = struct {
     name_of_mark: bool = false,
     /// Номер метки при `name_of_mark`.
     name_mark: usize = 0,
+    /// Правим комментарий, а не имя.
+    name_is_note: bool = false,
     /// Чьё имя правим и какой обработчик у поля был до нас.
     name_track: usize = 0,
     name_prev_proc: usize = 0,
@@ -295,21 +300,28 @@ fn keepRoomForTracks(height: i32) void {
     if (fits != preview_h) preview_h = fits;
 }
 
-fn paint(hwnd: c.HWND, dc: c.HDC, width: i32, height: i32) void {
+fn paint(hwnd: c.HWND, dc: c.HDC, window_w: i32, height: i32) void {
     keepRoomForTracks(height);
-    solid(dc, .{ .left = 0, .top = 0, .right = width, .bottom = height }, 0x00FFFFFF);
+    // Панель меток отнимает место у таймлайна справа. Дальше всё рисуется
+    // в оставшейся ширине, и правило «сколько осталось» одно на всех:
+    // два разных счёта разъехались бы, и панель то наезжала бы на дорожки,
+    // то оставляла полосу пустоты.
+    const width = view_mod.stageWidth(window_w, ed.marks_open);
+    solid(dc, .{ .left = 0, .top = 0, .right = window_w, .bottom = height }, 0x00FFFFFF);
     // Полоса под кнопками: фон окна мы рисуем сами, иначе под ними останется
     // мусор от предыдущего кадра.
-    solid(dc, .{ .left = 0, .top = 0, .right = width, .bottom = toolbar_h }, 0x00F0F0F0);
-    line(dc, 0, toolbar_h - 1, width, toolbar_h - 1, col_lane_line, 1);
+    solid(dc, .{ .left = 0, .top = 0, .right = window_w, .bottom = toolbar_h }, 0x00F0F0F0);
+    line(dc, 0, toolbar_h - 1, window_w, toolbar_h - 1, col_lane_line, 1);
 
     const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
     const old_font = c.SelectObject(dc, font);
     defer _ = c.SelectObject(dc, old_font);
 
     // Сообщение снизу — там же, где у окна записи строка состояния.
-    solid(dc, .{ .left = 0, .top = height - status_h, .right = width, .bottom = height }, 0x00F5F5F5);
+    solid(dc, .{ .left = 0, .top = height - status_h, .right = window_w, .bottom = height }, 0x00F5F5F5);
     drawText(dc, 10, height - status_h + 3, ed.message(), col_text);
+
+    drawMarksPanel(dc, window_w, height);
 
     drawPreview(dc, width);
     drawSplitter(dc, width);
@@ -1529,6 +1541,7 @@ fn startMarkRename(index: usize) void {
     ed.name_box = box;
     ed.name_of_mark = true;
     ed.name_mark = index;
+    ed.name_is_note = false;
     ed.name_prev_proc = @bitCast(c.SetWindowLongPtrW(box, gwlp_wndproc, @bitCast(@intFromPtr(&renameProc))));
 
     ui.setText(box, m.title());
@@ -1588,6 +1601,247 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
     ed.project.setMarkColour(index, timeline.Marks.all_colours[which]) catch return;
     sayMark(index);
     refresh();
+}
+
+/// Панель меток справа: время — метка — комментарий.
+///
+/// Задача #79. На линейке видно, что метка есть и какого она цвета,
+/// но не видно, что в ней написано: подпись туда влезает не всегда,
+/// а комментарий не влезает никогда. Список показывает всё сразу
+/// и позволяет править прямо в нём.
+fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
+    const panel_w = view_mod.marksPanelWidth(window_w, ed.marks_open);
+    if (panel_w == 0) return;
+
+    const left = window_w - panel_w;
+    const top = toolbar_h;
+    const bottom = height - status_h;
+    solid(dc, .{ .left = left, .top = top, .right = window_w, .bottom = bottom }, 0x00FAFAFA);
+    line(dc, left, top, left, bottom, col_lane_line, 1);
+
+    // Заголовок столбцов.
+    solid(dc, .{
+        .left = left,
+        .top = top,
+        .right = window_w,
+        .bottom = top + view_mod.marks_head_h,
+    }, 0x00F0F0F0);
+    drawText(dc, left + view_mod.marks_col_time, top + 4, "время", 0x00707070);
+    drawText(dc, left + view_mod.marks_col_name, top + 4, "метка", 0x00707070);
+    drawText(dc, left + view_mod.marks_col_note, top + 4, "комментарий", 0x00707070);
+    line(dc, left, top + view_mod.marks_head_h - 1, window_w, top + view_mod.marks_head_h - 1, col_lane_line, 1);
+
+    if (ed.project.marks.count == 0) {
+        drawText(dc, left + 8, top + view_mod.marks_head_h + 8, "меток нет: правая кнопка по линейке", 0x00909090);
+        return;
+    }
+
+    for (ed.project.marks.list(), 0..) |m, i| {
+        const row_top = top + view_mod.marksRowTop(i);
+        if (row_top + view_mod.marks_row_h > bottom) break;
+
+        // Выбранная метка подсвечена и здесь, и на линейке: одно состояние,
+        // два места, и человек видит, о какой метке идёт речь.
+        if (ed.sel_mark == i) {
+            solid(dc, .{
+                .left = left + 1,
+                .top = row_top,
+                .right = window_w,
+                .bottom = row_top + view_mod.marks_row_h,
+            }, 0x00E8E8FF);
+        }
+
+        // Цветной язычок слева — тот же цвет, что у флажка на линейке.
+        solid(dc, .{
+            .left = left + 1,
+            .top = row_top + 3,
+            .right = left + 5,
+            .bottom = row_top + view_mod.marks_row_h - 3,
+        }, m.colour.rgb());
+
+        var when: [32]u8 = undefined;
+        drawText(dc, left + view_mod.marks_col_time, row_top + 3, view_mod.lengthLabel(&when, m.at_ns), col_text);
+
+        const name_room = view_mod.marks_col_note - view_mod.marks_col_name - 6;
+        const name_letters = @as(usize, @intCast(@divTrunc(name_room, 7)));
+        const name = m.title()[0..timeline.Marks.fitName(m.title(), name_letters)];
+        drawText(dc, left + view_mod.marks_col_name, row_top + 3, name, col_text);
+
+        const note_room = panel_w - view_mod.marks_col_note - 6;
+        const note_letters = @as(usize, @intCast(@divTrunc(note_room, 7)));
+        const note = m.comment()[0..timeline.Marks.fitName(m.comment(), note_letters)];
+        drawText(dc, left + view_mod.marks_col_note, row_top + 3, note, 0x00505050);
+
+        line(dc, left, row_top + view_mod.marks_row_h - 1, window_w, row_top + view_mod.marks_row_h - 1, 0x00E4E4E4, 1);
+    }
+}
+
+/// Куда попали внутри панели меток.
+const PanelPoint = struct { x: i32, y: i32 };
+
+/// Подписи столбцов панели меток. Названы здесь, а не по месту: по ним
+/// считается, влезают ли они в свои столбцы.
+pub const marks_columns = [_][]const u8{ "время", "метка", "комментарий" };
+
+/// Влезла ли подпись столбца в свой столбец.
+pub const ColumnFit = struct {
+    label: []const u8 = "",
+    need: i32 = 0,
+    have: i32 = 0,
+
+    pub fn fits(self: ColumnFit) bool {
+        return self.need <= self.have;
+    }
+};
+
+/// Померить подписи столбцов тем шрифтом, которым они рисуются.
+///
+/// Панель рисуется своим кодом, и её подписи не проходят через замер
+/// органов управления: обрезанный заголовок столбца видно только глазами.
+/// Эта же ошибка уже была у поля для броска.
+pub fn marksColumnFits(out: *[marks_columns.len]ColumnFit) []const ColumnFit {
+    const room = [_]i32{
+        view_mod.marks_col_name - view_mod.marks_col_time,
+        view_mod.marks_col_note - view_mod.marks_col_name,
+        view_mod.marks_panel_w - view_mod.marks_col_note,
+    };
+    const dc = c.CreateCompatibleDC(null);
+    if (dc == null) {
+        for (marks_columns, 0..) |label, i| out[i] = .{ .label = label, .have = room[i] };
+        return out[0..marks_columns.len];
+    }
+    defer _ = c.DeleteDC(dc);
+    const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
+    const old_font = c.SelectObject(dc, font);
+    defer _ = c.SelectObject(dc, old_font);
+
+    for (marks_columns, 0..) |label, i| {
+        var wide: [64]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&wide, label) catch 0;
+        var size: c.SIZE = std.mem.zeroes(c.SIZE);
+        _ = c.GetTextExtentPoint32W(dc, @ptrCast(&wide), @intCast(n), &size);
+        // Плюс отступ: подпись не должна упираться в соседний столбец.
+        out[i] = .{ .label = label, .need = size.cx + 6, .have = room[i] };
+    }
+    return out[0..marks_columns.len];
+}
+
+/// Открыть или закрыть панель меток.
+fn toggleMarksPanel() void {
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+
+    const want = !ed.marks_open;
+    if (want and view_mod.marksPanelWidth(rect.right, true) == 0) {
+        // Наполовину заехавшая панель хуже, чем её отсутствие: об этом
+        // надо сказать словами, а не показать обрезанный список.
+        ed.say("окно слишком узкое для панели меток: расширьте его");
+        refresh();
+        return;
+    }
+    ed.marks_open = want;
+    saveMarksPanel();
+    // Галочка в меню должна сойтись с тем, что на экране.
+    buildMenu(ed.hwnd);
+    ed.say(if (ed.marks_open) "панель меток открыта" else "панель меток закрыта");
+    refresh();
+}
+
+/// Попала ли точка в панель меток. Возвращает координаты внутри неё.
+fn insideMarksPanel(x: i32, y: i32) ?PanelPoint {
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) == 0) return null;
+    const panel_w = view_mod.marksPanelWidth(rect.right, ed.marks_open);
+    if (panel_w == 0) return null;
+    const left = rect.right - panel_w;
+    if (x < left or y < toolbar_h or y >= rect.bottom - status_h) return null;
+    return .{ .x = x - left, .y = y - toolbar_h };
+}
+
+/// Щелчок по списку меток: прыжок к метке.
+fn onMarksPanelDown(at: PanelPoint) void {
+    const row = view_mod.marksRowAt(at.y, ed.project.marks.count) orelse {
+        ed.sel_mark = null;
+        refresh();
+        return;
+    };
+    ed.sel_mark = row;
+    ed.playhead_ns = ed.project.marks.items[row].at_ns;
+    showFrame();
+    sayMark(row);
+    refresh();
+}
+
+/// Двойной щелчок по списку: правка имени или комментария на месте.
+fn onMarksPanelDouble(at: PanelPoint) void {
+    const row = view_mod.marksRowAt(at.y, ed.project.marks.count) orelse return;
+    switch (view_mod.marksColumnAt(at.x)) {
+        // Время правят не текстом, а перетаскиванием метки: набирать
+        // «0:07.34» руками — это не правка, а упражнение.
+        .time => {
+            ed.say("время метки меняется перетаскиванием флажка на линейке");
+            refresh();
+        },
+        .name => startMarksPanelEdit(row, false),
+        .note => startMarksPanelEdit(row, true),
+    }
+}
+
+/// Поле ввода прямо в строке списка.
+fn startMarksPanelEdit(row: usize, is_note: bool) void {
+    if (ed.name_box != null) return;
+    if (row >= ed.project.marks.count) return;
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+    const panel_w = view_mod.marksPanelWidth(rect.right, ed.marks_open);
+    if (panel_w == 0) return;
+
+    const left = rect.right - panel_w;
+    const col = if (is_note) view_mod.marks_col_note else view_mod.marks_col_name;
+    const room = if (is_note)
+        panel_w - view_mod.marks_col_note - 4
+    else
+        view_mod.marks_col_note - view_mod.marks_col_name - 4;
+
+    const box = ui.editBox(
+        ed.hwnd,
+        id_rename_box,
+        left + col,
+        toolbar_h + view_mod.marksRowTop(row) + 1,
+        room,
+        view_mod.marks_row_h - 2,
+    );
+    if (box == null) return;
+
+    ed.name_box = box;
+    ed.name_of_mark = true;
+    ed.name_mark = row;
+    ed.name_is_note = is_note;
+    ed.name_prev_proc = @bitCast(c.SetWindowLongPtrW(box, gwlp_wndproc, @bitCast(@intFromPtr(&renameProc))));
+
+    const m = ed.project.marks.items[row];
+    ui.setText(box, if (is_note) m.comment() else m.title());
+    _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
+    _ = c.SetFocus(box);
+    ed.say(if (is_note)
+        "что с этим местом делать, затем Enter; Esc — оставить как было"
+    else
+        "новое имя метки, затем Enter; Esc — оставить как было");
+    refresh();
+}
+
+/// Запомнить, открыта панель или нет: её открывают под задачу и ждут,
+/// что завтра она будет там же.
+fn saveMarksPanel() void {
+    const dir = settingsDir(ed.allocator) orelse return;
+    defer ed.allocator.free(dir);
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    _ = io;
+    var prefs = settings_mod.load(threaded.io(), ed.allocator, dir);
+    prefs.marks_panel_on = ed.marks_open;
+    _ = settings_mod.save(&prefs, dir);
 }
 
 /// Свести звук проекта в один WAV.
@@ -2097,6 +2351,10 @@ fn laneAreaTop() i32 {
 }
 
 fn onDown(x: i32, y: i32) void {
+    if (insideMarksPanel(x, y)) |at| {
+        onMarksPanelDown(at);
+        return;
+    }
     var rect: c.RECT = undefined;
     if (c.GetClientRect(ed.hwnd, &rect) != 0 and onScrollBar(y, rect.bottom)) {
         const span = rect.right - view_mod.header_w;
@@ -2649,6 +2907,10 @@ fn writeWholeFile(path: []const u8, bytes: []const u8) bool {
 
 /// Двойной щелчок по имени дорожки открывает поле ввода прямо на месте имени.
 fn onDoubleClick(x: i32, y: i32) void {
+    if (insideMarksPanel(x, y)) |at| {
+        onMarksPanelDouble(at);
+        return;
+    }
     if (y < laneAreaTop()) return;
     const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
     if (hit.target != .header_name) return;
@@ -2671,6 +2933,7 @@ fn startRename(track_index: usize) void {
     ed.name_box = box;
     ed.name_track = track_index;
     ed.name_of_mark = false;
+    ed.name_is_note = false;
 
     // Поле ввода само не отдаёт Enter и Esc: перехватываем их, подменив
     // его обработчик. Прежний держим числом — типизированный указатель
@@ -2735,6 +2998,16 @@ fn finishRename(accept: bool) void {
     _ = c.SetFocus(ed.hwnd);
 
     if (accept and typed.len > 0) {
+        if (ed.name_of_mark and ed.name_is_note) {
+            ed.project.setMarkComment(ed.name_mark, typed) catch {
+                ed.say("комментарий не принят");
+                refresh();
+                return;
+            };
+            sayMark(ed.name_mark);
+            refresh();
+            return;
+        }
         if (ed.name_of_mark) {
             ed.project.renameMark(ed.name_mark, typed) catch {
                 ed.say("имя не принято");
@@ -2885,6 +3158,18 @@ fn buildMenu(hwnd: c.HWND) void {
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_close, ui.wide("Закрыть"));
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(file_menu), ui.wide("Файл"));
 
+    // «Вид» — про то, что показано в окне, а не про то, что сделано
+    // с проектом. Класть панель меток в «Файл» значило бы смешать одно
+    // с другим и заставить её там искать.
+    const view_menu = c.CreatePopupMenu();
+    _ = c.AppendMenuW(
+        view_menu,
+        if (ed.marks_open) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
+        id_menu_marks,
+        ui.wide("Окно меток\tCtrl+M"),
+    );
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(view_menu), ui.wide("Вид"));
+
     const old = c.GetMenu(hwnd);
     _ = c.SetMenu(hwnd, bar);
     if (old != null) _ = c.DestroyMenu(old);
@@ -2971,6 +3256,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_save_as => saveProjectAs(),
                 id_menu_save_bundle => saveProjectBundle(),
                 id_menu_mixdown => mixdownToWav(),
+                id_menu_marks => toggleMarksPanel(),
                 id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_recent_rec...id_recent_rec + recent_mod.max_items - 1 => {
                     openFromRecent(&ed.recent.recorded, @intCast((wp & 0xFFFF) - id_recent_rec));
@@ -3056,7 +3342,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 c.VK_SPACE => togglePlay(),
                 c.VK_F2 => if (ed.sel_mark) |i| startMarkRename(i) else startRename(ed.cur_track),
                 // M — «метка»: ставится там, где стоит указатель.
-                'M' => addMarkAtPlayhead(),
+                'M' => if (ctrl) toggleMarksPanel() else addMarkAtPlayhead(),
                 // Прыжок по меткам: их и ставят затем, чтобы пройти подряд.
                 c.VK_OEM_4 => stepToMark(false),
                 c.VK_OEM_6 => stepToMark(true),
@@ -3121,7 +3407,10 @@ fn settingsDir(allocator: std.mem.Allocator) ?[]const u8 {
     return allocator.dupe(u8, dir) catch null;
 }
 
-/// Прочитать высоту кадра, подогнанную в прошлый раз.
+/// Прочитать то, что подогнано в прошлый раз: высоту кадра и панель меток.
+///
+/// Обе вещи человек ставит под себя один раз и ждёт, что завтра они будут
+/// там же. Забыть их — значит заставлять поправлять окно каждое утро.
 fn loadPreviewHeight(allocator: std.mem.Allocator) void {
     const dir = settingsDir(allocator) orelse return;
     defer allocator.free(dir);
@@ -3129,6 +3418,7 @@ fn loadPreviewHeight(allocator: std.mem.Allocator) void {
     defer threaded.deinit();
     const prefs = settings_mod.load(threaded.io(), allocator, dir);
     preview_h = prefs.preview_h;
+    ed.marks_open = prefs.marksPanel();
 }
 
 /// Запомнить высоту кадра. Читаем весь файл заново и меняем одну строку:

@@ -46,6 +46,13 @@ pub const Settings = struct {
     /// и при следующем запуске она там же.
     preview_h: i32 = 260,
 
+    /// Открыта ли панель меток в редакторе.
+    ///
+    /// Прямо, без переворота: панель по умолчанию закрыта, и ноль означает
+    /// именно это. Переворот нужен там, где умолчание — «включено»
+    /// (как у разгона), а здесь он только запутал бы.
+    marks_panel_on: bool = false,
+
     /// Порт, на котором слушает сервер для Claude Code.
     port: u16 = 15599,
     /// Адрес, на котором он слушает.
@@ -66,6 +73,12 @@ pub const Settings = struct {
     /// когда что-то ведёт себя странно.
     pub fn boost(self: *const Settings) bool {
         return !self.boost_off;
+    }
+
+    /// Открыта ли панель меток. По умолчанию нет: она нужна под задачу,
+    /// а не всегда, и занимает треть окна.
+    pub fn marksPanel(self: *const Settings) bool {
+        return self.marks_panel_on;
     }
 
     pub const default_template = "zigrec-%d-%t.mp4";
@@ -171,6 +184,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("template {s}\n", .{s.nameTemplate()});
     try w.print("areakey {s}\n", .{s.areaKey()});
     try w.print("preview {d}\n", .{s.preview_h});
+    try w.print("marks {d}\n", .{@intFromBool(s.marksPanel())});
     try w.print("port {d}\n", .{s.port});
     try w.print("listen {s}\n", .{s.listenAddress()});
     try w.print("boost {d}\n", .{@intFromBool(s.boost())});
@@ -207,6 +221,8 @@ pub fn read(data: []const u8) Error!Settings {
             _ = out.setAreaKey(rest);
         } else if (std.mem.eql(u8, word, "preview")) {
             _ = out.setPreviewH(rest);
+        } else if (std.mem.eql(u8, word, "marks")) {
+            out.marks_panel_on = std.mem.eql(u8, rest, "1");
         } else if (std.mem.eql(u8, word, "boost")) {
             out.boost_off = std.mem.eql(u8, rest, "0");
         } else if (std.mem.eql(u8, word, "listen")) {
@@ -459,4 +475,16 @@ test "разгон включён по умолчанию и переживае�
 test "файл прежнего выпуска без строки о разгоне даёт разгон включённым" {
     const back = try read("zigrec-settings 1\r\nport 15599\r\n");
     try std.testing.expect(back.boost());
+}
+
+test "панель меток по умолчанию закрыта и переживает запись" {
+    var s = Settings.init();
+    try std.testing.expect(!s.marksPanel());
+
+    s.marks_panel_on = true;
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&s, &w);
+    const back = try read(w.buffered());
+    try std.testing.expect(back.marksPanel());
 }

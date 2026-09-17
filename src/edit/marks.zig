@@ -75,11 +75,22 @@ pub const all_colours = [_]Colour{ .yellow, .red, .orange, .green, .cyan, .blue,
 /// туда всё равно не помещается, а обрезанная читается хуже короткой.
 pub const max_name = 40;
 
+/// Сколько букв влезает в комментарий метки.
+///
+/// Задача #79. Имя короткое — его читают на линейке между делениями.
+/// Комментарий длинный: «переснять, свет с другой стороны» на линейку
+/// не влезет никогда, и живёт он в окне меток. Сто двадцать байт — это
+/// шестьдесят русских букв: одна строчка мысли, а не абзац.
+pub const max_note = 120;
+
 /// Сколько меток помещается в проекте.
 ///
-/// Цена посчитана: метка — 56 байт, тридцать две метки это 1.8 КБ,
-/// и столько же добавляется к каждому из двадцати четырёх снимков отмены —
-/// 43 КБ поверх восьмисот, которые проект уже занимает.
+/// Цена посчитана заново вместе с комментарием: метка — 176 байт
+/// (восемь на время, сорок на имя, сто двадцать на комментарий и мелочь),
+/// тридцать две метки это 5.5 КБ, и столько же добавляется к каждому
+/// из двадцати четырёх снимков отмены — 132 КБ поверх восьмисот, которые
+/// проект уже занимает. До комментария было 43 КБ; за возможность писать
+/// у метки мысль, а не только имя, это недорого.
 pub const max_marks = 32;
 
 pub const Error = error{
@@ -94,6 +105,9 @@ pub const Mark = struct {
     colour: Colour = .yellow,
     name: [max_name]u8 = @splat(0),
     name_len: u8 = 0,
+    /// Что с этим местом делать. Пусто — метка без пояснения.
+    note: [max_note]u8 = @splat(0),
+    note_len: u8 = 0,
 
     pub fn title(self: *const Mark) []const u8 {
         return self.name[0..self.name_len];
@@ -103,6 +117,16 @@ pub const Mark = struct {
         const n = fitName(text, max_name);
         @memcpy(self.name[0..n], text[0..n]);
         self.name_len = @intCast(n);
+    }
+
+    pub fn comment(self: *const Mark) []const u8 {
+        return self.note[0..self.note_len];
+    }
+
+    pub fn setComment(self: *Mark, text: []const u8) void {
+        const n = fitName(text, max_note);
+        @memcpy(self.note[0..n], text[0..n]);
+        self.note_len = @intCast(n);
     }
 };
 
@@ -169,16 +193,23 @@ pub const Marks = struct {
         if (index >= self.count) return Error.NoSuchMark;
         const moved = self.items[index];
         try self.removeAt(index);
-        return self.add(at_ns, moved.colour, moved.title()) catch |err| switch (err) {
-            // Место только что освободили — занять его обратно всегда можно.
-            Error.TooManyMarks => unreachable,
-            else => err,
-        };
+        // Место только что освободили — занять его обратно всегда можно.
+        const where = self.add(at_ns, moved.colour, moved.title()) catch unreachable;
+        // Комментарий едет вместе с меткой: он про это место, а не про
+        // то время, где метка стояла раньше.
+        self.items[where].note = moved.note;
+        self.items[where].note_len = moved.note_len;
+        return where;
     }
 
     pub fn rename(self: *Marks, index: usize, name: []const u8) Error!void {
         if (index >= self.count) return Error.NoSuchMark;
         self.items[index].setTitle(name);
+    }
+
+    pub fn setComment(self: *Marks, index: usize, text: []const u8) Error!void {
+        if (index >= self.count) return Error.NoSuchMark;
+        self.items[index].setComment(text);
     }
 
     pub fn setColour(self: *Marks, index: usize, colour: Colour) Error!void {
@@ -384,4 +415,44 @@ test "имя по умолчанию читается" {
     var buf: [32]u8 = undefined;
     try testing.expectEqualStrings("метка 1", defaultName(&buf, 1));
     try testing.expectEqualStrings("метка 12", defaultName(&buf, 12));
+}
+
+test "комментарий метки живёт рядом с именем и не мешает ему" {
+    var m = Mark{};
+    m.setTitle("переснять");
+    m.setComment("свет с другой стороны, микрофон ближе");
+    try testing.expectEqualStrings("переснять", m.title());
+    try testing.expectEqualStrings("свет с другой стороны, микрофон ближе", m.comment());
+}
+
+test "длинный комментарий обрезается по букве" {
+    var m = Mark{};
+    var long: [max_note * 2]u8 = undefined;
+    var i: usize = 0;
+    while (i + 1 < long.len) : (i += 2) {
+        long[i] = 0xD0;
+        long[i + 1] = 0xB0; // русская «а»
+    }
+    m.setComment(&long);
+    try testing.expect(m.comment().len <= max_note);
+    try testing.expect(std.unicode.utf8ValidateSlice(m.comment()));
+}
+
+test "комментарий едет вместе с меткой" {
+    // Он про это место, а не про то время, где метка стояла раньше.
+    var m = Marks{};
+    _ = try m.add(sec, .red, "раз");
+    try m.setComment(0, "тут переснять");
+    _ = try m.add(3 * sec, .green, "два");
+
+    const now = try m.moveTo(0, 5 * sec);
+    try testing.expectEqualStrings("тут переснять", m.items[now].comment());
+    try testing.expectEqualStrings("раз", m.items[now].title());
+    // А у соседа комментария как не было, так и нет.
+    try testing.expectEqual(@as(usize, 0), m.items[0].comment().len);
+}
+
+test "комментарий у несуществующей метки — отказ" {
+    var m = Marks{};
+    try testing.expectError(Error.NoSuchMark, m.setComment(0, "нет"));
 }

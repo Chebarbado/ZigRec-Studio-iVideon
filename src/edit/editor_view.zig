@@ -29,6 +29,69 @@ pub const name_line_h: i32 = 24;
 /// Насколько близко к краю клипа надо ткнуть, чтобы взяться за край.
 pub const edge_grab: i32 = 6;
 
+// ------------------------------------------------- панель меток справа
+
+/// Ширина панели меток.
+///
+/// Триста точек: на время, имя и начало комментария. Шире — панель
+/// съедает таймлайн, ради которого окно и открыто; уже — комментарий
+/// обрезается на втором слове.
+pub const marks_panel_w: i32 = 300;
+
+/// Уже этого таймлайн не сужаем.
+///
+/// Четыреста двадцать точек — это левая колонка дорожек и ещё столько же
+/// на сами дорожки. Меньше — и панель показывала бы список меток, к которым
+/// не подойти мышью.
+pub const min_timeline_w: i32 = 420;
+
+/// Насколько панель на самом деле откроется. Ноль — окно слишком узкое.
+///
+/// Отдельным правилом, потому что «панель просто не влезла» — это то,
+/// о чём надо сказать словами, а не показать наполовину заехавшую панель.
+pub fn marksPanelWidth(window_w: i32, open: bool) i32 {
+    if (!open) return 0;
+    if (window_w - marks_panel_w < min_timeline_w) return 0;
+    return marks_panel_w;
+}
+
+/// Сколько места остаётся таймлайну.
+pub fn stageWidth(window_w: i32, open: bool) i32 {
+    return window_w - marksPanelWidth(window_w, open);
+}
+
+/// Высота строки списка и высота его заголовка.
+pub const marks_row_h: i32 = 22;
+pub const marks_head_h: i32 = 24;
+
+/// Колонки внутри панели, считая от её левого края.
+pub const marks_col_time: i32 = 8;
+pub const marks_col_name: i32 = 70;
+pub const marks_col_note: i32 = 168;
+
+/// В какой столбец попали.
+pub const MarksColumn = enum { time, name, note };
+
+pub fn marksColumnAt(x_in_panel: i32) MarksColumn {
+    if (x_in_panel >= marks_col_note) return .note;
+    if (x_in_panel >= marks_col_name) return .name;
+    return .time;
+}
+
+/// В какую строку списка попали. `null` — мимо строк.
+pub fn marksRowAt(y_in_panel: i32, count: usize) ?usize {
+    if (y_in_panel < marks_head_h) return null;
+    const index = @divTrunc(y_in_panel - marks_head_h, marks_row_h);
+    if (index < 0) return null;
+    const row: usize = @intCast(index);
+    return if (row < count) row else null;
+}
+
+/// Верх строки с таким номером, от верха панели.
+pub fn marksRowTop(row: usize) i32 {
+    return marks_head_h + @as(i32, @intCast(row)) * marks_row_h;
+}
+
 // ------------------------------------------------------------- метки
 
 /// Насколько близко к метке надо ткнуть, чтобы взяться за неё.
@@ -1031,4 +1094,50 @@ test "флажок метки помещается в линейку" {
     try std.testing.expect(f.top >= 0);
     try std.testing.expect(f.bottom <= ruler_h);
     try std.testing.expect(f.right > f.left);
+}
+
+test "панель отнимает у таймлайна ровно свою ширину" {
+    try std.testing.expectEqual(@as(i32, 1000), stageWidth(1000, false));
+    try std.testing.expectEqual(@as(i32, 1000 - marks_panel_w), stageWidth(1000, true));
+}
+
+test "в узком окне панель не открывается вовсе" {
+    // Наполовину заехавшая панель хуже, чем её отсутствие: список меток,
+    // к которым не подойти мышью, не нужен никому.
+    const narrow = min_timeline_w + marks_panel_w - 1;
+    try std.testing.expectEqual(@as(i32, 0), marksPanelWidth(narrow, true));
+    try std.testing.expectEqual(narrow, stageWidth(narrow, true));
+
+    const just_enough = min_timeline_w + marks_panel_w;
+    try std.testing.expectEqual(marks_panel_w, marksPanelWidth(just_enough, true));
+    try std.testing.expectEqual(min_timeline_w, stageWidth(just_enough, true));
+}
+
+test "строки списка меток считаются от заголовка" {
+    try std.testing.expectEqual(@as(?usize, null), marksRowAt(marks_head_h - 1, 3));
+    try std.testing.expectEqual(@as(?usize, 0), marksRowAt(marks_head_h, 3));
+    try std.testing.expectEqual(@as(?usize, 0), marksRowAt(marks_head_h + marks_row_h - 1, 3));
+    try std.testing.expectEqual(@as(?usize, 1), marksRowAt(marks_head_h + marks_row_h, 3));
+    // Ниже последней метки строк нет — там пусто, а не последняя метка.
+    try std.testing.expectEqual(@as(?usize, null), marksRowAt(marks_head_h + marks_row_h * 3, 3));
+    try std.testing.expectEqual(@as(?usize, null), marksRowAt(marks_head_h, 0));
+}
+
+test "верх строки сходится с попаданием в неё" {
+    var row: usize = 0;
+    while (row < 5) : (row += 1) {
+        const top = marksRowTop(row);
+        try std.testing.expectEqual(@as(?usize, row), marksRowAt(top, 5));
+        try std.testing.expectEqual(@as(?usize, row), marksRowAt(top + marks_row_h - 1, 5));
+    }
+}
+
+test "столбцы списка идут по порядку и не налезают" {
+    try std.testing.expectEqual(MarksColumn.time, marksColumnAt(marks_col_time));
+    try std.testing.expectEqual(MarksColumn.time, marksColumnAt(marks_col_name - 1));
+    try std.testing.expectEqual(MarksColumn.name, marksColumnAt(marks_col_name));
+    try std.testing.expectEqual(MarksColumn.name, marksColumnAt(marks_col_note - 1));
+    try std.testing.expectEqual(MarksColumn.note, marksColumnAt(marks_col_note));
+    // И комментарию остаётся место в панели.
+    try std.testing.expect(marks_col_note < marks_panel_w - 40);
 }

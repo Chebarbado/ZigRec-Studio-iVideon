@@ -48,6 +48,9 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
     for (project.marks.list()) |m| {
         // Имя — весь остаток строки: в нём бывают пробелы.
         try w.print("mark {d} {s} {s}\n", .{ m.at_ns, @tagName(m.colour), m.title() });
+        // Комментарий — отдельной строкой, а не в конец `mark`: там имя
+        // уже занимает весь остаток, и второй такой же хвост туда не влезет.
+        if (m.comment().len > 0) try w.print("note {s}\n", .{m.comment()});
     }
 
     for (project.trackList()) |track| {
@@ -140,6 +143,15 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             // своего оттенка. Берём цвет по умолчанию и идём дальше.
             const colour = std.meta.stringToEnum(timeline.Marks.Colour, colour_text) orelse .yellow;
             _ = project.marks.add(at_ns, colour, parts.rest()) catch return Error.TooBig;
+            continue;
+        }
+
+        if (std.mem.eql(u8, word, "note")) {
+            // Относится к последней прочитанной метке. Строка без метки
+            // перед ней — просто мусор, и молча его пропустить лучше,
+            // чем отказаться открыть проект из-за комментария.
+            if (project.marks.count == 0) continue;
+            project.marks.items[project.marks.count - 1].setComment(parts.rest());
             continue;
         }
 
@@ -598,4 +610,46 @@ test "проект без меток не пишет о них лишних ст
     var w = std.Io.Writer.fixed(&buf);
     try write(p, &w);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "mark ") == null);
+}
+
+test "комментарий метки переживает запись и чтение" {
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "переснять");
+    try p.setMarkComment(0, "свет с другой стороны, микрофон ближе");
+    _ = try p.addMark(7 * sec, .green, "без пояснения");
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+
+    const back = try makeProject();
+    defer std.testing.allocator.destroy(back);
+    try read(back, w.buffered());
+
+    try std.testing.expectEqualStrings(
+        "свет с другой стороны, микрофон ближе",
+        back.marks.items[0].comment(),
+    );
+    // У метки без комментария он и не появился.
+    try std.testing.expectEqual(@as(usize, 0), back.marks.items[1].comment().len);
+    // И лишней строки в файле нет.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, w.buffered(), "note "),
+    );
+}
+
+test "строка комментария без метки перед ней не мешает открыть проект" {
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+    try read(p,
+        \\zigrec-project 1
+        \\note ничей комментарий
+        \\source 60000000000 а.mp4
+        \\track video 0 Видео
+        \\
+    );
+    try std.testing.expectEqual(@as(usize, 1), p.track_count);
+    try std.testing.expectEqual(@as(usize, 0), p.marks.count);
 }

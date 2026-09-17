@@ -1258,6 +1258,19 @@ fn uiSmoke(allocator: std.mem.Allocator, w: anytype) !u8 {
     if (try checkWindow(w, "запись", zigrec.ui.checkLayout(allocator))) bad = 1;
     if (try checkWindow(w, "редактор", zigrec.editor.checkLayout(allocator))) bad = 1;
 
+    // Столбцы панели меток тоже рисуются своим кодом.
+    var cols: [zigrec.editor.marks_columns.len]zigrec.editor.ColumnFit = undefined;
+    for (zigrec.editor.marksColumnFits(&cols)) |fit| {
+        try w.print("[ui] столбец меток «{s}»: надо {d}, есть {d}\n", .{ fit.label, fit.need, fit.have });
+        if (!fit.fits()) {
+            try w.print("[ui] ПРОВАЛ: заголовок столбца «{s}» не влезает, не хватает {d} точек\n", .{
+                fit.label,
+                fit.need - fit.have,
+            });
+            bad = 1;
+        }
+    }
+
     // Поле для броска рисуется своим кодом, и его подпись не проходит
     // через замер органов управления: обрезанную подпись там видно только
     // глазами. Меряем её настоящим шрифтом.
@@ -2323,6 +2336,9 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
     // Метки: они принадлежат проекту, а не дорожке, и должны пережить
     // запись вместе с цветом и подписью.
     _ = try made.addMark(2 * std.time.ns_per_s, .red, "тут переснять");
+    // Комментарий — отдельной строкой в файле, потому что имя уже заняло
+    // весь остаток строки метки. Значит, и проверять его надо отдельно.
+    try made.setMarkComment(0, "свет с другой стороны, микрофон ближе");
     _ = try made.addMark(7 * std.time.ns_per_s, .violet, "сюда заставку");
 
     try w.print("[project] собран проект: дорожек {d}, клипов {d}\n", .{
@@ -2396,12 +2412,25 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
             try w.writeAll("[project] ПРОВАЛ: метка не пережила запись целиком\n");
             return 1;
         }
+        if (!std.mem.eql(u8, a.comment(), b.comment())) {
+            try w.print("[project] ПРОВАЛ: комментарий метки был «{s}», стал «{s}»\n", .{
+                a.comment(),
+                b.comment(),
+            });
+            return 1;
+        }
     }
-    try w.print("[project] метки целы: {d}, первая «{s}» ({s})\n", .{
+    try w.print("[project] метки целы: {d}, первая «{s}» ({s}), комментарий «{s}»\n", .{
         back.marks.count,
         back.marks.items[0].title(),
         back.marks.items[0].colour.label(),
+        back.marks.items[0].comment(),
     });
+    // Комментарий у второй метки не появился: пустое должно оставаться пустым.
+    if (back.marks.items[1].comment().len != 0) {
+        try w.writeAll("[project] ПРОВАЛ: у метки без комментария он откуда-то взялся\n");
+        return 1;
+    }
 
     try w.print("[project] прочитано обратно: дорожек {d}, пути и имена целы\n", .{back.track_count});
 

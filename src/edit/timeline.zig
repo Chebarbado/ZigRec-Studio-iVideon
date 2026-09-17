@@ -971,8 +971,23 @@ pub const Project = struct {
         // Считаем ДО снимка: меток могло не остаться, и снимок был бы
         // потрачен на несостоявшееся действие.
         var probe = self.marks;
+
+        // Метка на этом времени уже есть — имени ей не придумываем: своё
+        // у неё уже есть, а придуманное затёрло бы его. Заодно два нажатия
+        // в одном месте перестают плодить «метку 2» рядом с «меткой 2»:
+        // счётчик имён идёт от числа меток, и оно после замены не растёт.
+        var here = false;
+        for (probe.list()) |m| {
+            if (m.at_ns == at_ns) here = true;
+        }
+
         var buf: [32]u8 = undefined;
-        const title = if (name.len > 0) name else marks_mod.defaultName(&buf, probe.count + 1);
+        const title = if (name.len > 0)
+            name
+        else if (here)
+            ""
+        else
+            marks_mod.defaultName(&buf, probe.count + 1);
         const where = probe.add(at_ns, colour, title) catch return Error.TooManyClips;
 
         self.remember();
@@ -1004,6 +1019,19 @@ pub const Project = struct {
         if (std.mem.eql(u8, self.marks.items[index].title(), clean)) return;
         self.remember();
         self.marks.rename(index, clean) catch unreachable;
+    }
+
+    /// Комментарий метки: что с этим местом делать.
+    ///
+    /// Пустой принимается: комментарий стирают так же, как пишут, и
+    /// отказываться стирать было бы странно — в отличие от имени, которое
+    /// у метки есть всегда.
+    pub fn setMarkComment(self: *Project, index: usize, text: []const u8) Error!void {
+        if (index >= self.marks.count) return Error.NoSuchThing;
+        const clean = std.mem.trim(u8, text, " ");
+        if (std.mem.eql(u8, self.marks.items[index].comment(), clean)) return;
+        self.remember();
+        self.marks.setComment(index, clean) catch unreachable;
     }
 
     pub fn setMarkColour(self: *Project, index: usize, colour: marks_mod.Colour) Error!void {
@@ -1921,4 +1949,48 @@ test "меток больше отведённого не помещается, 
     const after = p.past;
     try std.testing.expectError(Error.TooManyClips, p.addMark(10_000 * sec, .red, "лишняя"));
     try std.testing.expectEqual(after, p.past);
+}
+
+test "комментарий метки отменяется и пустой принимается" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(sec, .red, "раз");
+
+    try p.setMarkComment(0, "переснять со светом");
+    try std.testing.expectEqualStrings("переснять со светом", p.marks.items[0].comment());
+
+    // Стереть комментарий можно так же, как написать.
+    try p.setMarkComment(0, "");
+    try std.testing.expectEqual(@as(usize, 0), p.marks.items[0].comment().len);
+
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqualStrings("переснять со светом", p.marks.items[0].comment());
+}
+
+test "тот же комментарий не тратит шаг отмены" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(sec, .red, "раз");
+    try p.setMarkComment(0, "тут");
+    const after = p.past;
+    try p.setMarkComment(0, "тут");
+    try p.setMarkComment(0, "  тут  ");
+    try std.testing.expectEqual(after, p.past);
+}
+
+test "повторная метка в том же месте не переименовывает прежнюю" {
+    // Иначе счётчик имён сбивается, и рядом оказываются две «метки 2».
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(sec, .yellow, "");
+    try std.testing.expectEqualStrings("метка 1", p.marks.items[0].title());
+
+    _ = try p.addMark(sec, .red, "");
+    try std.testing.expectEqualStrings("метка 1", p.marks.items[0].title());
+    // Цвет при этом обновился: нажали ещё раз — значит, хотели что-то поменять.
+    try std.testing.expectEqual(marks_mod.Colour.red, p.marks.items[0].colour);
+
+    // И следующая метка получает следующее число, а не повтор.
+    _ = try p.addMark(2 * sec, .green, "");
+    try std.testing.expectEqualStrings("метка 2", p.marks.items[1].title());
 }
