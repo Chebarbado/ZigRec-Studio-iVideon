@@ -27,12 +27,28 @@ pub const Track = struct {
     /// Время первого положенного отсчёта по тем же часам, что у кадров.
     /// Ноль — звук ещё не пошёл.
     start_ns: std.atomic.Value(u64) = .init(0),
+    /// Время КОНЦА последнего положенного куска по часам устройства.
+    ///
+    /// По нему считается дрейф (#21): сколько времени прошло у устройства
+    /// против того, сколько насчитано по отсчётам. Ставит поток захвата —
+    /// он один знает частоту, по которой длина куска переводится во время.
+    end_ns: std.atomic.Value(u64) = .init(0),
 
     pub fn reset(self: *Track) void {
         self.read_at.store(0, .release);
         self.write_at.store(0, .release);
         self.dropped.store(0, .release);
         self.start_ns.store(0, .release);
+        self.end_ns.store(0, .release);
+    }
+
+    /// Сколько времени прошло у устройства с первого куска до конца
+    /// последнего. Ноль — пока нечего мерить.
+    pub fn deviceElapsedNs(self: *const Track) u64 {
+        const start = self.start_ns.load(.acquire);
+        const end = self.end_ns.load(.acquire);
+        if (start == 0 or end <= start) return 0;
+        return end - start;
     }
 
     /// Сколько отсчётов лежит и ждёт.
@@ -150,4 +166,15 @@ test "забираем по частям — порядок не рвётся" {
     try std.testing.expectEqualSlices(i16, &[_]i16{ 30, 40 }, &small);
     try std.testing.expectEqual(@as(usize, 1), t.pop(&small));
     try std.testing.expectEqual(@as(i16, 50), small[0]);
+}
+
+test "время устройства считается от первого куска до конца последнего" {
+    var t = Track{};
+    try std.testing.expectEqual(@as(u64, 0), t.deviceElapsedNs());
+    const samples = [_]i16{ 1, 2, 3 };
+    t.push(&samples, 1_000_000_000);
+    // Конец ещё не отмечен — мерить нечего.
+    try std.testing.expectEqual(@as(u64, 0), t.deviceElapsedNs());
+    t.end_ns.store(1_500_000_000, .release);
+    try std.testing.expectEqual(@as(u64, 500_000_000), t.deviceElapsedNs());
 }

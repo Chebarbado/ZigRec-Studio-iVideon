@@ -54,6 +54,8 @@ const id_area_rec = 109;
 const id_sound = 110;
 /// Галочка «Системный звук»: то, что идёт в колонки.
 const id_system_sound = 116;
+/// Галочка «врозь»: микрофон и колонки двумя дорожками.
+const id_separate = 117;
 const id_server = 111;
 const id_editor = 112;
 const id_server_help = 113;
@@ -183,6 +185,7 @@ const App = struct {
     drawn_state: recorder.State = .idle,
     chk_sound: c.HWND = null,
     chk_system: c.HWND = null,
+    chk_separate: c.HWND = null,
     lbl_sound_note: c.HWND = null,
     slider_gain: c.HWND = null,
     lbl_gain: c.HWND = null,
@@ -207,6 +210,8 @@ const App = struct {
     sound_on: bool = false,
     /// Писать ли то, что идёт в колонки.
     system_on: bool = false,
+    /// Микрофон и колонки — двумя дорожками.
+    separate_on: bool = false,
     microphone: mic.Capture = .{},
     tray_added: bool = false,
     tray_tip: [128]u8 = @splat(0),
@@ -503,6 +508,7 @@ fn startRecording() void {
     // Галочка звука — это не только индикатор: с ней звук идёт и в файл.
     app.settings.sound = app.sound_on;
     app.settings.system_sound = app.system_on;
+    app.settings.separate_sound = app.separate_on;
     app.rec.start(path, src, app.settings) catch |err| {
         setText(app.status, errors.explain(err));
         return;
@@ -2216,6 +2222,8 @@ fn serveCall(call: *control.Call) void {
             setGainEnabled(req.sound);
             app.system_on = req.system;
             _ = c.SendMessageW(app.chk_system, c.BM_SETCHECK, if (req.system) 1 else 0, 0);
+            app.separate_on = req.separate;
+            _ = c.SendMessageW(app.chk_separate, c.BM_SETCHECK, if (req.separate) 1 else 0, 0);
 
             startRecording();
             if (!app.rec.isBusy()) {
@@ -2487,6 +2495,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             // Системный звук — рядом со «Звуком»: это тот же выбор, что писать,
             // и разводить его по разным местам окна незачем.
             app.chk_system = button(hwnd, "Звук из колонок", id_system_sound, 280, 232, 160, 24, c.BS_AUTOCHECKBOX);
+            // «Врозь» — рядом: это про те же два источника. Коротко, потому
+            // что места в ряду осталось на одно слово, и оно понятно рядом
+            // с двумя галочками звука.
+            app.chk_separate = button(hwnd, "врозь", id_separate, 444, 232, 66, 24, c.BS_AUTOCHECKBOX);
             // Галочка не должна врать: пока звук слышно, но в файл он не идёт.
             app.lbl_gain = label(hwnd, "Усиление", 14, 328, 90, 20);
             app.slider_gain = gainSlider(hwnd, 106, 322, 320, 30);
@@ -2537,7 +2549,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             _ = c.EnableWindow(app.btn_pause, 0);
             _ = c.EnableWindow(app.btn_open, 0);
 
-            for ([_]c.HWND{ app.status, app.btn_record, app.btn_pause, app.btn_open, app.chk_cursor, app.cb_fps, app.cb_preset, app.lbl_file, app.chk_sound, app.chk_system, app.lbl_sound_note, app.lbl_gain, app.btn_server, app.lbl_server }) |h| applyFont(h);
+            for ([_]c.HWND{ app.status, app.btn_record, app.btn_pause, app.btn_open, app.chk_cursor, app.cb_fps, app.cb_preset, app.lbl_file, app.chk_sound, app.chk_system, app.chk_separate, app.lbl_sound_note, app.lbl_gain, app.btn_server, app.lbl_server }) |h| applyFont(h);
             setGainEnabled(false);
             for ([_]c_int{ id_area, id_full, id_window, id_area_rec }) |id| applyFont(c.GetDlgItem(hwnd, id));
 
@@ -2610,6 +2622,9 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 },
                 id_system_sound => {
                     app.system_on = c.SendMessageW(app.chk_system, c.BM_GETCHECK, 0, 0) != 0;
+                },
+                id_separate => {
+                    app.separate_on = c.SendMessageW(app.chk_separate, c.BM_GETCHECK, 0, 0) != 0;
                 },
                 id_server => toggleServer(hwnd),
                 id_server_help => showServerHelp(hwnd),

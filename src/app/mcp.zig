@@ -47,6 +47,8 @@ pub const Request = union(enum) {
         sound: bool = false,
         /// Системный звук: то, что идёт в колонки.
         system: bool = false,
+        /// Микрофон и колонки двумя дорожками.
+        separate: bool = false,
         fps: ?u32 = null,
     };
 };
@@ -181,6 +183,9 @@ fn parseValue(root: std.json.Value) Parsed {
             if (a.get("system")) |v| if (v == .bool) {
                 start.system = v.bool;
             };
+            if (a.get("separate")) |v| if (v == .bool) {
+                start.separate = v.bool;
+            };
             if (a.get("fps")) |v| if (v == .integer and v.integer > 0) {
                 start.fps = @intCast(v.integer);
             };
@@ -233,6 +238,7 @@ pub const tools_json =
     \\   "window":{"type":"string","description":"Часть заголовка окна; область поедет за окном"},
     \\   "sound":{"type":"boolean","description":"Писать ли звук с микрофона"},
     \\   "system":{"type":"boolean","description":"Писать ли системный звук — то, что идёт в колонки; сводится с микрофоном в одну дорожку"},
+    \\   "separate":{"type":"boolean","description":"Микрофон и колонки — двумя дорожками в файле, а не одной сведённой"},
     \\   "fps":{"type":"integer","description":"Кадров в секунду"}}}},
     \\{"name":"stop_recording",
     \\ "description":"Остановить запись и вернуть путь к готовому файлу mp4.",

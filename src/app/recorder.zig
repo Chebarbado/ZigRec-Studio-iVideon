@@ -49,6 +49,8 @@ pub const Settings = struct {
     sound: bool = false,
     /// Писать ли системный звук — то, что идёт в колонки.
     system_sound: bool = false,
+    /// Микрофон и систему — двумя дорожками, а не одной сведённой.
+    separate_sound: bool = false,
 };
 
 /// Счёт времени с учётом пауз.
@@ -287,7 +289,11 @@ pub const Recorder = struct {
         // только до начала записи, и решить «пишем ли звук» задним числом
         // уже нельзя.
         var sound = audio.Feeder{
-            .sources = .{ .microphone = settings.sound, .system = settings.system_sound },
+            .sources = .{
+                .microphone = settings.sound,
+                .system = settings.system_sound,
+                .separate = settings.separate_sound,
+            },
         };
         defer sound.deinit(self.allocator);
         const origin_ns = win32.nowNs();
@@ -300,6 +306,7 @@ pub const Recorder = struct {
             .bitrate_kbps = settings.bitrate_kbps,
             .gop = settings.gop,
             .audio = sound.encoderSettings(),
+            .audio2 = sound.encoderSettings2(),
         });
         var finished = false;
         errdefer if (!finished) enc.abort();

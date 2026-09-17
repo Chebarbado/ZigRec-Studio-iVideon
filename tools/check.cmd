@@ -399,6 +399,38 @@ if defined FFMPEG (
   )
 )
 
+rem Две звуковые дорожки в одном mp4 (#21): микрофон и колонки врозь.
+rem Считаем дважды: нашим читателем и ffmpeg — сойтись должны оба.
+rem Без микрофона на машине дорожка будет одна — стенд об этом скажет.
+if defined FFMPEG (
+  echo [check] две звуковые дорожки в одном файле
+  "zig-out\bin\zigrec.exe" loopback-record ".check\system2.mp4" --separate
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: запись двумя дорожками не удалась
+    exit /b 1
+  )
+  if exist ".check\system2.mp4" (
+    rem Сколько дорожек ждём — зависит от микрофона: считаем их ffmpeg-ом
+    rem и требуем, чтобы наш читатель насчитал столько же.
+    set "AUDIO_N=0"
+    rem Сперва в файл, потом счёт: строка в for /f, начинающаяся с кавычки,
+    rem теряет кавычки и не находит ffmpeg — счёт выходил нулём на исправном файле.
+    "%FFMPEG%" -i ".check\system2.mp4" > ".check\system2_streams.txt" 2>&1
+    rem find полным путём: из Git Bash в PATH первым стоит GNU find, и он обходит весь диск.
+    for /f %%n in ('%SystemRoot%\System32\find.exe /c "Audio:" ^< ".check\system2_streams.txt"') do set "AUDIO_N=%%n"
+    echo [check] ffmpeg насчитал звуковых дорожек: !AUDIO_N!
+    if "!AUDIO_N!"=="0" (
+      echo [check] ПРОВАЛ: ffmpeg не видит звука в файле
+      exit /b 1
+    )
+    "zig-out\bin\zigrec.exe" tracks-check ".check\system2.mp4" !AUDIO_N!
+    if errorlevel 1 (
+      echo [check] ПРОВАЛ: наш читатель и ffmpeg насчитали разное число дорожек
+      exit /b 1
+    )
+  )
+)
+
 rem Звук проверяем на синтезе, а не на живом микрофоне: микрофон у каждого свой
 rem и шумит по-разному, а синус заданной амплитуды — проверяемое число.
 if defined FFMPEG (

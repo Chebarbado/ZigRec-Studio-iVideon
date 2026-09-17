@@ -18,6 +18,7 @@ const usage =
     \\        --window ТЕКСТ   окно, найденное по части заголовка; область едет за окном
     \\        --sound          писать звук с микрофона в ту же дорожку
     \\        --system         писать и то, что идёт в колонки (сводится с микрофоном)
+    \\        --separate       микрофон и колонки — двумя дорожками, а не одной
     \\  zigrec monitors                   какие есть мониторы
     \\  zigrec windows                    какие есть видимые окна
     \\  zigrec edit [ФАЙЛ]                окно редактора: дорожки, резка, перестановка
@@ -44,8 +45,11 @@ const usage =
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
     \\  zigrec loopback-smoke
     \\        самопроверка системного звука: сыграть в колонки и поймать через loopback
-    \\  zigrec loopback-record ФАЙЛ.mp4
-    \\        то же, но сквозь подачу и кодировщик — в настоящий mp4
+    \\  zigrec loopback-record ФАЙЛ.mp4 [--separate]
+    \\        то же, но сквозь подачу и кодировщик — в настоящий mp4; --separate — микрофон
+    \\        и колонки двумя дорожками
+    \\  zigrec tracks-check ФАЙЛ N
+    \\        сколько в файле звуковых дорожек нашим читателем: должно быть N
     \\  zigrec onset-spacing ФАЙЛ.wav МС
     \\        интервал между двумя всплесками в WAV: сходится ли с ожиданием
     \\  zigrec icons-smoke ЗНАЧКИ.png
@@ -225,7 +229,15 @@ pub fn main(init: std.process.Init) !void {
             try w.writeAll("нужен путь к mp4\n");
             code = 2;
         } else {
-            code = try loopbackRecord(init.io, arena, w, args[2]);
+            const separate = args.len > 3 and eq(args[3], "--separate");
+            code = try loopbackRecord(init.io, arena, w, args[2], separate);
+        }
+    } else if (eq(cmd, "tracks-check")) {
+        if (args.len < 4) {
+            try w.writeAll("нужны путь к файлу и сколько ждём звуковых дорожек\n");
+            code = 2;
+        } else {
+            code = try tracksCheck(init.io, arena, w, args[2], argInt(args, 3, 1));
         }
     } else if (eq(cmd, "onset-spacing")) {
         if (args.len < 4) {
@@ -570,6 +582,8 @@ const RecordArgs = struct {
     sound: bool = false,
     /// Системный звук: то, что идёт в колонки.
     system: bool = false,
+    /// Двумя дорожками, а не одной сведённой.
+    separate: bool = false,
 };
 
 const ArgError = error{
@@ -618,6 +632,8 @@ fn parseRecordArgs(args: []const []const u8) ArgError!RecordArgs {
             out.sound = true;
         } else if (eq(key, "--system")) {
             out.system = true;
+        } else if (eq(key, "--separate")) {
+            out.separate = true;
         } else if (eq(key, "--no-cursor")) {
             out.cursor = false;
         } else if (eq(key, "--no-clicks")) {
@@ -770,7 +786,7 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
     // только до начала записи. Тот же слой, что и у окна, — иначе формы
     // разъедутся, и «в окне звук есть, а из консоли нет» станет вопросом времени.
     var sound = zigrec.audio.Feeder{
-        .sources = .{ .microphone = opt.sound, .system = opt.system },
+        .sources = .{ .microphone = opt.sound, .system = opt.system, .separate = opt.separate },
     };
     defer sound.deinit(allocator);
     const origin_ns = zigrec.win32.nowNs();
@@ -791,7 +807,12 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
                 try w.print("[rec] системного звука не будет: {s}\n", .{explain(err)});
             } else {
                 try w.print("[rec] звук: и то, что идёт в колонки{s}\n", .{
-                    if (sound.track != null) " — сводится с микрофоном в одну дорожку" else "",
+                    if (sound.writesSeparately())
+                        " — второй дорожкой, отдельно от микрофона"
+                    else if (sound.track != null)
+                        " — сводится с микрофоном в одну дорожку"
+                    else
+                        "",
                 });
             }
         }
@@ -803,6 +824,7 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
         .bitrate_kbps = opt.bitrate_kbps,
         .gop = opt.gop,
         .audio = sound.encoderSettings(),
+        .audio2 = sound.encoderSettings2(),
     };
     try w.print("[rec] пресет «{s}», битрейт {d} кбит/с, ключевой кадр каждые {d}\n", .{
         opt.preset.label(),
@@ -1536,17 +1558,29 @@ fn loopbackSmoke(allocator: std.mem.Allocator, w: anytype) !u8 {
 /// звук. Здесь пишется настоящий mp4 с чёрными кадрами и системным звуком,
 /// пока в колонках играет план. Проверяет его чужой декодер: `check.cmd`
 /// вынимает дорожку ffmpeg-ом и меряет интервал всплесков.
-fn loopbackRecord(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8) !u8 {
+fn loopbackRecord(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, separate: bool) !u8 {
     const bench = zigrec.testbench;
     const width: u32 = bench.min_width;
     const height: u32 = 64;
     const fps: u32 = 30;
     const seconds: f32 = 3.2;
 
-    var sound = zigrec.audio.Feeder{ .sources = .{ .microphone = false, .system = true } };
+    // Врозь — значит и микрофон тоже: две дорожки из двух источников.
+    // Микрофона на стенде может не быть — тогда об этом говорится,
+    // и проверяется одна дорожка, а не две.
+    var sound = zigrec.audio.Feeder{
+        .sources = .{ .microphone = separate, .system = true, .separate = separate },
+    };
     defer sound.deinit(allocator);
     const origin_ns = zigrec.win32.nowNs();
     sound.start(allocator, origin_ns);
+    if (separate) {
+        if (sound.failure) |err| {
+            try w.print("[loopback] микрофона нет ({s}): будет одна дорожка вместо двух\n", .{explain(err)});
+        } else {
+            try w.writeAll("[loopback] микрофон и колонки пишутся двумя дорожками\n");
+        }
+    }
     if (sound.system_failure) |err| {
         if (err == error.NoSpeakers) {
             try w.writeAll("[loopback] запись пропущена: нет устройства вывода\n");
@@ -1563,6 +1597,7 @@ fn loopbackRecord(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []
     var enc = zigrec.encode.Writer.create(path, width, height, .{
         .fps = fps,
         .audio = sound.encoderSettings(),
+        .audio2 = sound.encoderSettings2(),
     }) catch |err| {
         try w.print("[loopback] ПРОВАЛ: кодировщик не создался: {s}\n", .{explain(err)});
         return 1;
@@ -1609,6 +1644,18 @@ fn loopbackRecord(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []
         summary.audio_samples,
         sound.seconds(),
         sound.dropped(),
+    });
+    if (summary.audio2_samples > 0) {
+        try w.print("[loopback] вторая дорожка: {d} отсчётов ({d:.2} с)\n", .{
+            summary.audio2_samples,
+            sound.seconds2(),
+        });
+    }
+    // Дрейф чинится понемногу; сколько всего пришлось поправить — это
+    // число, а не ощущение, и оно должно быть в отчёте.
+    try w.print("[loopback] правка дрейфа: вставлено {d}, выброшено {d} отсчётов\n", .{
+        sound.drift_inserted,
+        sound.drift_dropped,
     });
     if (play_failed) {
         try w.writeAll("[loopback] ПРОВАЛ: план не доиграл\n");
@@ -1673,6 +1720,40 @@ fn onsetSpacing(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
         return 1;
     }
     try w.writeAll("[spacing] ИНТЕРВАЛ СОШЁЛСЯ\n");
+    return 0;
+}
+
+/// Сколько в файле звуковых дорожек — нашим читателем.
+///
+/// Задача #21. Две дорожки в одном mp4 — это не «звук есть», это «плеер
+/// видит две и даёт переключать». Наш `probe` разбирает `moov` сам;
+/// чужой счёт делает ffmpeg в `check.cmd`. Сойтись должны оба.
+fn tracksCheck(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, want_audio: u32) !u8 {
+    const info = zigrec.probe.read(io, allocator, path) catch |err| {
+        try w.print("[tracks] ПРОВАЛ: {s} не разбирается: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+    var audio: u32 = 0;
+    var video: u32 = 0;
+    for (info.tracks[0..info.count]) |t| {
+        switch (t.kind) {
+            .audio => audio += 1,
+            .video => video += 1,
+            .other => {},
+        }
+        try w.print("[tracks]  {d}. {s}: {s}, {d:.2} с\n", .{ t.id, t.kind.label(), t.codecLabel(), t.seconds() });
+    }
+    try w.print("[tracks] {s}: видео {d}, звуковых {d} (ждали {d})\n", .{
+        std.fs.path.basename(path),
+        video,
+        audio,
+        want_audio,
+    });
+    if (audio != want_audio) {
+        try w.writeAll("[tracks] ПРОВАЛ: звуковых дорожек не столько\n");
+        return 1;
+    }
+    try w.writeAll("[tracks] ДОРОЖЕК СТОЛЬКО, СКОЛЬКО ЖДАЛИ\n");
     return 0;
 }
 

@@ -20,6 +20,7 @@ const encode = @import("../file/encode.zig");
 const mic = @import("mic.zig");
 const track_mod = @import("track.zig");
 const blend = @import("blend.zig");
+const drift = @import("drift.zig");
 const win32 = @import("../win32.zig");
 
 pub const Source = enum { microphone, system_loopback };
@@ -33,6 +34,9 @@ pub const Format = struct {
 pub const Sources = struct {
     microphone: bool = true,
     system: bool = false,
+    /// Врозь: микрофон и система — две дорожки в файле, а не одна сведённая.
+    /// Так их можно потом разводить в редакторе и в плеере переключать.
+    separate: bool = false,
 };
 
 /// Подача звука в файл. Живёт ровно столько же, сколько запись.
@@ -50,6 +54,15 @@ pub const Feeder = struct {
     pad_sys: blend.Padded = .{},
     /// Известна ли разница стартов. До неё сводить нечего.
     pads_known: bool = false,
+    /// Вторая дорожка — когда пишем врозь: своё смещение и свой счёт.
+    written2: u64 = 0,
+    offset2_ns: u64 = 0,
+    offset2_known: bool = false,
+    /// Правка дрейфа: часы устройства против счёта отсчётов (#21).
+    corrector: drift.Corrector = .{},
+    /// Сколько отсчётов вставлено и выброшено ради дрейфа — для отчёта.
+    drift_inserted: u64 = 0,
+    drift_dropped: u64 = 0,
     /// Звук просили, но он не поднялся. Причина — словами, для человека.
     failure: ?anyerror = null,
     /// Системный звук просили, но он не поднялся. Отдельно от микрофона:
@@ -151,9 +164,30 @@ pub const Feeder = struct {
         return if (self.active()) self.settings else null;
     }
 
+    /// Настройки второй дорожки: только когда оба источника живы и их
+    /// просили писать врозь.
+    pub fn encoderSettings2(self: *const Feeder) ?encode.AudioSettings {
+        return if (self.writesSeparately()) self.settings else null;
+    }
+
+    /// Пишем ли два источника двумя дорожками.
+    pub fn writesSeparately(self: *const Feeder) bool {
+        return self.sources.separate and self.track != null and self.system_track != null;
+    }
+
+    /// Время второй дорожки — со своим смещением.
+    fn timestampFor2(self: *const Feeder, written: u64) u64 {
+        return self.offset2_ns + written * std.time.ns_per_s / @max(self.settings.sample_rate, 1);
+    }
+
     /// Забрать накопленное и отдать в файл. Зовётся из потока записи.
     pub fn drain(self: *Feeder, enc: *encode.Writer) !void {
-        // Два источника — сводим; один — отдаём как есть.
+        // Два источника врозь — две дорожки; два вместе — сводим; один —
+        // отдаём как есть.
+        if (self.writesSeparately()) {
+            try self.drainSeparate(enc);
+            return;
+        }
         if (self.track != null and self.system_track != null) return self.drainBoth(enc);
         const t = self.track orelse self.system_track orelse return;
         if (!self.offset_known) {
@@ -166,11 +200,78 @@ pub const Feeder = struct {
             self.offset_ns = started -| self.origin_ns;
             self.offset_known = true;
         }
+        try self.correctDrift(t, enc, .first);
         while (true) {
             const n = t.pop(&self.buf);
             if (n == 0) break;
             try enc.writeAudio(self.buf[0..n], self.timestampFor(self.written));
             self.written += n;
+        }
+    }
+
+    /// Две дорожки: микрофон в первую, система во вторую, каждая со своим
+    /// смещением от начала записи. Сводить нечего — сводит потом редактор.
+    fn drainSeparate(self: *Feeder, enc: *encode.Writer) !void {
+        const a = self.track.?;
+        const b = self.system_track.?;
+        if (!self.offset_known) {
+            const started = a.start_ns.load(.acquire);
+            if (started != 0) {
+                self.offset_ns = started -| self.origin_ns;
+                self.offset_known = true;
+            }
+        }
+        if (!self.offset2_known) {
+            const started = b.start_ns.load(.acquire);
+            if (started != 0) {
+                self.offset2_ns = started -| self.origin_ns;
+                self.offset2_known = true;
+            }
+        }
+        if (self.offset_known) {
+            try self.correctDrift(a, enc, .first);
+            while (true) {
+                const n = a.pop(&self.buf);
+                if (n == 0) break;
+                try enc.writeAudioTo(.first, self.buf[0..n], self.timestampFor(self.written));
+                self.written += n;
+            }
+        }
+        if (self.offset2_known) {
+            try self.correctDrift(b, enc, .second);
+            while (true) {
+                const n = b.pop(&self.buf);
+                if (n == 0) break;
+                try enc.writeAudioTo(.second, self.buf[0..n], self.timestampFor2(self.written2));
+                self.written2 += n;
+            }
+        }
+    }
+
+    /// Поправить дрейф одной дорожки перед очередным сливом.
+    ///
+    /// Сравниваем время по отсчётам с временем устройства. Отстали —
+    /// пишем тишину, обогнали — выбрасываем из очереди. Понемногу за раз:
+    /// правило шага — в `drift`, и оно проверено тестами на десяти минутах.
+    fn correctDrift(self: *Feeder, t: *track_mod.Track, enc: *encode.Writer, which: encode.Writer.Which) !void {
+        const elapsed = t.deviceElapsedNs();
+        if (elapsed == 0) return;
+        const written = if (which == .first) self.written else self.written2;
+        // Сравниваем с тем, что уже забрали ИЗ очереди, плюс то, что в ней
+        // ещё лежит: оно тоже «насчитано» устройством.
+        const counted = written + t.available();
+        const a = self.corrector.adjust(counted, self.settings.sample_rate, elapsed);
+        if (a.insert > 0) {
+            var zeros: [64]i16 = @splat(0);
+            const n = @min(a.insert, zeros.len);
+            const ts = if (which == .first) self.timestampFor(self.written) else self.timestampFor2(self.written2);
+            try enc.writeAudioTo(which, zeros[0..n], ts);
+            if (which == .first) self.written += n else self.written2 += n;
+            self.drift_inserted += n;
+        } else if (a.drop > 0) {
+            var bin: [64]i16 = undefined;
+            const n = t.pop(bin[0..@min(a.drop, bin.len)]);
+            self.drift_dropped += n;
         }
     }
 
@@ -250,6 +351,12 @@ pub const Feeder = struct {
             allocator.destroy(t);
             self.system_track = null;
         }
+    }
+
+    /// Сколько секунд ушло во вторую дорожку.
+    pub fn seconds2(self: *const Feeder) f64 {
+        return @as(f64, @floatFromInt(self.written2)) /
+            @as(f64, @floatFromInt(@max(self.settings.sample_rate, 1)));
     }
 
     /// Сколько секунд звука ушло в файл.
@@ -344,4 +451,31 @@ test "отвалившийся системный звук не отменяет
     try std.testing.expect(f.encoderSettings() != null);
     f.track = null;
     try std.testing.expect(!f.active());
+}
+
+test "врозь пишется только когда живы оба источника" {
+    var f = Feeder{ .sources = .{ .system = true, .separate = true } };
+    try std.testing.expect(!f.writesSeparately());
+    try std.testing.expect(f.encoderSettings2() == null);
+
+    var a = @import("track.zig").Track{};
+    var b = @import("track.zig").Track{};
+    f.track = &a;
+    f.system_track = &b;
+    try std.testing.expect(f.writesSeparately());
+    try std.testing.expect(f.encoderSettings2() != null);
+
+    // Без просьбы «врозь» те же два источника сводятся в одну дорожку.
+    f.sources.separate = false;
+    try std.testing.expect(!f.writesSeparately());
+    try std.testing.expect(f.encoderSettings2() == null);
+}
+
+test "вторая дорожка считает своё время от своего старта" {
+    var f = Feeder{};
+    f.offset2_ns = 70 * std.time.ns_per_ms;
+    try std.testing.expectEqual(@as(u64, 70 * std.time.ns_per_ms), f.timestampFor2(0));
+    try std.testing.expectEqual(@as(u64, std.time.ns_per_s + 70 * std.time.ns_per_ms), f.timestampFor2(48_000));
+    f.written2 = 24_000;
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), f.seconds2(), 0.0001);
 }

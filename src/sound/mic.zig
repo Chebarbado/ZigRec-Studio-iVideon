@@ -320,8 +320,9 @@ pub const Capture = struct {
                 const at_ns: u64 = if (qpc_100ns != 0) @as(u64, qpc_100ns) * 100 else win32.nowNs();
                 t.push(out[0..m], at_ns);
                 // Помним, докуда дошло время звука: отсюда считается пауза,
-                // которую loopback не заполняет сам.
+                // которую loopback не заполняет сам, и дрейф против часов.
                 last_ns = at_ns + @as(u64, m) * std.time.ns_per_s / @max(self.track_rate, 1);
+                t.end_ns.store(last_ns, .release);
             }
 
             _ = capture.?.lpVtbl.*.ReleaseBuffer.?(capture.?, frames);

@@ -97,6 +97,9 @@ pub const Settings = struct {
     bitrate_kbps: ?u32 = null,
     /// Звуковая дорожка. `null` — файл без звука.
     audio: ?AudioSettings = null,
+    /// Вторая звуковая дорожка — например, системный звук отдельно
+    /// от микрофона (#21). `null` — её нет.
+    audio2: ?AudioSettings = null,
 
     pub fn bitrate(self: Settings, width: u32, height: u32) u32 {
         return self.bitrate_kbps orelse self.preset.bitrateKbps(width, height, self.fps);
@@ -111,6 +114,8 @@ pub const Summary = struct {
     bytes: u64 = 0,
     /// Сколько звуковых отсчётов ушло в файл.
     audio_samples: u64 = 0,
+    /// То же для второй звуковой дорожки.
+    audio2_samples: u64 = 0,
 };
 
 fn setSize(t: *c.IMFMediaType, key: *const c.GUID, w: u32, h: u32) c.HRESULT {
@@ -136,6 +141,8 @@ pub const Writer = struct {
     summary: Summary = .{},
     /// Номер звукового потока в контейнере, если звук пишется.
     audio_stream: ?c.DWORD = null,
+    /// Номер второго звукового потока.
+    audio_stream2: ?c.DWORD = null,
 
     pub fn create(path: []const u8, width: u32, height: u32, settings: Settings) Error!Writer {
         if (builtin.os.tag != .windows) return Error.Unsupported;
@@ -197,7 +204,8 @@ pub const Writer = struct {
         _ = setRatio(i, &c.MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         if (win32.failed(self.writer.lpVtbl.*.SetInputMediaType.?(self.writer, self.stream, i, null))) return Error.FormatRejected;
 
-        if (self.settings.audio) |audio| try self.configureAudio(audio);
+        if (self.settings.audio) |audio| self.audio_stream = try self.configureAudio(audio);
+        if (self.settings.audio2) |audio| self.audio_stream2 = try self.configureAudio(audio);
 
         if (win32.failed(self.writer.lpVtbl.*.BeginWriting.?(self.writer))) return Error.WriteFailed;
     }
@@ -207,7 +215,7 @@ pub const Writer = struct {
     /// Оба потока добавляются до `BeginWriting`: после начала записи писатель
     /// новых потоков не принимает, и добавить звук «когда он появится» нельзя.
     /// Поэтому решение писать звук принимается при создании файла.
-    fn configureAudio(self: *Writer, audio: AudioSettings) Error!void {
+    fn configureAudio(self: *Writer, audio: AudioSettings) Error!c.DWORD {
         var out_type: ?*c.IMFMediaType = null;
         if (win32.failed(c.MFCreateMediaType(&out_type))) return Error.FormatRejected;
         defer _ = out_type.?.lpVtbl.*.Release.?(@ptrCast(out_type.?));
@@ -240,8 +248,11 @@ pub const Writer = struct {
         _ = i.lpVtbl.*.SetUINT32.?(i, &c.MF_MT_ALL_SAMPLES_INDEPENDENT, 1);
         if (win32.failed(self.writer.lpVtbl.*.SetInputMediaType.?(self.writer, stream, i, null))) return Error.FormatRejected;
 
-        self.audio_stream = stream;
+        return stream;
     }
+
+    /// Которая из звуковых дорожек.
+    pub const Which = enum { first, second };
 
     /// Отдать кусок звука. Отсчёты целые, чередующиеся по каналам.
     ///
@@ -249,9 +260,14 @@ pub const Writer = struct {
     /// из числа отсчётов, а не из разницы меток: у звука длительность известна
     /// точно, и брать её из часов значило бы вносить дрожание там, где его нет.
     pub fn writeAudio(self: *Writer, samples: []const i16, timestamp_ns: u64) Error!void {
+        return self.writeAudioTo(.first, samples, timestamp_ns);
+    }
+
+    /// То же, но в выбранную дорожку.
+    pub fn writeAudioTo(self: *Writer, which: Which, samples: []const i16, timestamp_ns: u64) Error!void {
         if (builtin.os.tag != .windows) return Error.Unsupported;
-        const audio = self.settings.audio orelse return;
-        const stream = self.audio_stream orelse return;
+        const audio = (if (which == .first) self.settings.audio else self.settings.audio2) orelse return;
+        const stream = (if (which == .first) self.audio_stream else self.audio_stream2) orelse return;
         if (samples.len == 0) return;
 
         const bytes = samples.len * 2;
@@ -276,7 +292,10 @@ pub const Writer = struct {
         _ = sample.?.lpVtbl.*.SetSampleDuration.?(sample.?, win32.nsTo100ns(duration_ns));
 
         if (win32.failed(self.writer.lpVtbl.*.WriteSample.?(self.writer, stream, sample.?))) return Error.WriteFailed;
-        self.summary.audio_samples += frames;
+        switch (which) {
+            .first => self.summary.audio_samples += frames,
+            .second => self.summary.audio2_samples += frames,
+        }
     }
 
     /// Отдать кадр. `stride` может быть больше ширины: у DXGI строка выровнена.

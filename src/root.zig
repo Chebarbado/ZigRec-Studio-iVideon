@@ -45,6 +45,7 @@ pub const gain = @import("sound/gain.zig");
 pub const volume = @import("sound/volume.zig");
 pub const blend = @import("sound/blend.zig");
 pub const play = @import("sound/play.zig");
+pub const drift = @import("sound/drift.zig");
 pub const resample = @import("sound/resample.zig");
 pub const tone = @import("sound/tone.zig");
 pub const track = @import("sound/track.zig");

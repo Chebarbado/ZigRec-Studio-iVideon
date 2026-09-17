@@ -154,10 +154,14 @@ pub fn healthText(buf: []u8, frames: u64, dropped: u64) []const u8 {
     return std.fmt.bufPrint(buf, "кадров {d}, потерь {d}", .{ frames, dropped }) catch "";
 }
 
+/// Подписи кнопки паузы — обе короткие нарочно. Кнопка растягивается под
+/// самую длинную из них, и с «Продолжить» она выходила вдвое шире «Стопа»:
+/// пользователь так и сказал — «пауза слишком длинная». «Дальше» говорит
+/// то же самое шестью буквами.
 pub fn pauseLabel(state: State) []const u8 {
     return switch (state) {
         .recording => "Пауза",
-        .paused => "Продолжить",
+        .paused => "Дальше",
     };
 }
 
