@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const hotkey = @import("hotkey.zig");
 const listen_mod = @import("listen.zig");
+const devices_mod = @import("../sound/devices.zig");
 const c = win32.c;
 
 pub const magic = "zigrec-settings";
@@ -58,6 +59,10 @@ pub const Settings = struct {
     /// Адрес, на котором он слушает.
     listen_addr: [listen_mod.max_text]u8 = @splat(0),
     listen_addr_len: usize = 0,
+    /// Какой микрофон брать: номер устройства у Windows (#22).
+    /// Пусто — тот, что по умолчанию.
+    mic_device: [devices_mod.max_id]u8 = @splat(0),
+    mic_device_len: usize = 0,
     /// Поднимать сервер сразу при запуске окна.
     serve_at_start: bool = false,
 
@@ -95,6 +100,17 @@ pub const Settings = struct {
     }
 
     /// Адрес прослушивания. Пусто — значит умолчание.
+    pub fn micDevice(self: *const Settings) []const u8 {
+        return self.mic_device[0..self.mic_device_len];
+    }
+
+    /// Пустой номер — «по умолчанию», это тоже выбор.
+    pub fn setMicDevice(self: *Settings, id: []const u8) void {
+        const clean = std.mem.trim(u8, id, " \t");
+        self.mic_device_len = @min(clean.len, self.mic_device.len);
+        @memcpy(self.mic_device[0..self.mic_device_len], clean[0..self.mic_device_len]);
+    }
+
     pub fn listenAddress(self: *const Settings) []const u8 {
         if (self.listen_addr_len == 0) return listen_mod.default_text;
         return self.listen_addr[0..self.listen_addr_len];
@@ -187,6 +203,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("marks {d}\n", .{@intFromBool(s.marksPanel())});
     try w.print("port {d}\n", .{s.port});
     try w.print("listen {s}\n", .{s.listenAddress()});
+    try w.print("micdev {s}\n", .{s.micDevice()});
     try w.print("boost {d}\n", .{@intFromBool(s.boost())});
     try w.print("serve {d}\n", .{@intFromBool(s.serve_at_start)});
 }
@@ -227,6 +244,8 @@ pub fn read(data: []const u8) Error!Settings {
             out.boost_off = std.mem.eql(u8, rest, "0");
         } else if (std.mem.eql(u8, word, "listen")) {
             _ = out.setListenAddress(rest);
+        } else if (std.mem.eql(u8, word, "micdev")) {
+            out.setMicDevice(rest);
         } else if (std.mem.eql(u8, word, "port")) {
             _ = out.setPort(rest);
         } else if (std.mem.eql(u8, word, "serve")) {
@@ -487,4 +506,23 @@ test "панель меток по умолчанию закрыта и пере
     try write(&s, &w);
     const back = try read(w.buffered());
     try std.testing.expect(back.marksPanel());
+}
+
+test "микрофон: по умолчанию пусто, выбор переживает запись и чтение" {
+    var s = Settings.init();
+    try std.testing.expectEqualStrings("", s.micDevice());
+    s.setMicDevice("{0.0.1.00000000}.{1234}");
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&s, &w);
+    const back = try read(w.buffered());
+    try std.testing.expectEqualStrings("{0.0.1.00000000}.{1234}", back.micDevice());
+    // Вернулись к «по умолчанию» — и это тоже записывается.
+    s.setMicDevice("");
+    try std.testing.expectEqualStrings("", s.micDevice());
+}
+
+test "файл прежнего выпуска без строки о микрофоне даёт «по умолчанию»" {
+    const back = try read("zigrec-settings 1\r\nport 15599\r\n");
+    try std.testing.expectEqualStrings("", back.micDevice());
 }

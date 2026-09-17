@@ -51,6 +51,20 @@ pub const Settings = struct {
     system_sound: bool = false,
     /// Микрофон и систему — двумя дорожками, а не одной сведённой.
     separate_sound: bool = false,
+    /// Какой микрофон брать (#22): номер устройства у Windows. Пусто —
+    /// по умолчанию. Массив, а не срез: настройки едут в поток записи
+    /// копией и не должны смотреть в чужую память.
+    mic_device: [256]u8 = @splat(0),
+    mic_device_len: usize = 0,
+
+    pub fn micDevice(self: *const Settings) []const u8 {
+        return self.mic_device[0..self.mic_device_len];
+    }
+
+    pub fn setMicDevice(self: *Settings, id: []const u8) void {
+        self.mic_device_len = @min(id.len, self.mic_device.len);
+        @memcpy(self.mic_device[0..self.mic_device_len], id[0..self.mic_device_len]);
+    }
 };
 
 /// Счёт времени с учётом пауз.
@@ -294,6 +308,7 @@ pub const Recorder = struct {
                 .system = settings.system_sound,
                 .separate = settings.separate_sound,
             },
+            .mic_device = settings.micDevice(),
         };
         defer sound.deinit(self.allocator);
         const origin_ns = win32.nowNs();

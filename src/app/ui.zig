@@ -23,6 +23,10 @@ const errors = @import("../errors.zig");
 const frame_overlay = @import("../capture/frame_overlay.zig");
 const rec_dot = @import("../capture/rec_dot.zig");
 const mic = @import("../sound/mic.zig");
+const devices = @import("../sound/devices.zig");
+const probe_mod = @import("../sound/probe.zig");
+const play = @import("../sound/play.zig");
+const sound_track = @import("../sound/track.zig");
 const gain = @import("../sound/gain.zig");
 const control = @import("control.zig");
 const mcp = @import("mcp.zig");
@@ -74,6 +78,11 @@ const id_set_area_key = 341;
 const id_set_listen = 342;
 const id_set_boost = 343;
 const id_set_pick = 344;
+/// Микрофон и проба (#22).
+const id_mic = 118;
+const id_probe = 119;
+/// Частота, в которой пишется проба: та же, что у файла.
+const mic_rate: u32 = 48_000;
 /// Строки списка адресов: с запасом от остальных номеров.
 const id_listen_base = 900;
 /// Номера строк меню значка в трее. Далеко от прочих: они приходят тем же
@@ -84,7 +93,7 @@ const id_tray_base = 800;
 const wm_dropfiles = 0x0233;
 
 /// Поле, куда бросают файл. Координаты рабочей части окна.
-const drop_zone = c.RECT{ .left = 214, .top = 432, .right = 510, .bottom = 470 };
+const drop_zone = c.RECT{ .left = 214, .top = 464, .right = 510, .bottom = 502 };
 
 /// Подпись в поле для броска.
 ///
@@ -180,9 +189,12 @@ comptime {
 }
 
 const wm_tray = c.WM_APP + 1;
+/// Проба отзвучала: шлёт поток колонок, принимает окно.
+const wm_probe_played = c.WM_APP + 41;
 const timer_tick = 1;
 const timer_frame = 2;
 const timer_wave = 3;
+const timer_probe = 4;
 
 /// Состояние окна. Одно на процесс: окно тоже одно.
 const App = struct {
@@ -251,6 +263,17 @@ const App = struct {
     /// Микрофон и колонки — двумя дорожками.
     separate_on: bool = false,
     microphone: mic.Capture = .{},
+    /// Выбор микрофона и проба (#22).
+    cb_mic: c.HWND = null,
+    btn_probe: c.HWND = null,
+    mic_list: [devices.max_devices]devices.Device = @splat(.{}),
+    mic_count: usize = 0,
+    probe: probe_mod.Probe = .{},
+    probe_track: ?*sound_track.Track = null,
+    probe_samples: std.ArrayList(i16) = .empty,
+    probe_thread: ?std.Thread = null,
+    /// Индикатор работал до пробы — после неё вернуть.
+    meter_was_on: bool = false,
     tray_added: bool = false,
     tray_tip: [128]u8 = @splat(0),
 };
@@ -547,6 +570,7 @@ fn startRecording() void {
     app.settings.sound = app.sound_on;
     app.settings.system_sound = app.system_on;
     app.settings.separate_sound = app.separate_on;
+    app.settings.setMicDevice(app.prefs.micDevice());
     app.rec.start(path, src, app.settings) catch |err| {
         setText(app.status, errors.explain(err));
         return;
@@ -664,7 +688,11 @@ fn updateStatus() void {
         p.area.height,
     }) catch "идёт запись";
 
-    setText(app.status, text);
+    // Пока идёт проба или висит её итог — строка состояния про неё:
+    // человек нажал кнопку и ждёт ответа именно там.
+    var probe_buf: [160]u8 = undefined;
+    const probe_text = app.probe.status(&probe_buf, win32.nowNs());
+    setText(app.status, if (probe_text.len > 0) probe_text else text);
     setText(app.btn_pause, if (p.state == .paused) "Продолжить" else "Пауза");
     updateTrayTip(p, secs);
     // Пульт показывает то же, что и окно: одно состояние, два места.
@@ -707,7 +735,7 @@ fn updateStatus() void {
 /// управления, плюс поле по краям. Считается от самой нижней и самой
 /// правой кнопки — менять его надо, когда двигаются они.
 const client_w: c_long = 524;
-const client_h: c_long = 482;
+const client_h: c_long = 514;
 /// WS_CLIPCHILDREN: окно не рисует там, где стоят его кнопки. Без этого
 /// фон ложится поверх них, и они перерисовываются следом — а на окне,
 /// которое обновляется по таймеру, это видно как мигание.
@@ -1234,7 +1262,7 @@ fn cornerFacts() corner.Facts {
 fn serverLampRect() c.RECT {
     // Ряд сервера начинается от левого края: слева от него ничего нет,
     // а надписи с адресом интерфейса и числом просьб нужна вся ширина (#86).
-    return .{ .left = 14, .top = 406, .right = 28, .bottom = 420 };
+    return .{ .left = 14, .top = 438, .right = 28, .bottom = 452 };
 }
 
 fn drawServerLamp(dc: c.HDC) void {
@@ -2261,6 +2289,151 @@ fn showListenPicker(hwnd: c.HWND) void {
     setText(settings_win.listen_box, list[index].address);
 }
 
+// ------------------------------------------------------ микрофон и проба (#22)
+
+/// Заполнить список микрофонов и отметить запомненный.
+fn fillMicList() void {
+    app.mic_count = devices.list(&app.mic_list).len;
+    _ = c.SendMessageW(app.cb_mic, c.CB_RESETCONTENT, 0, 0);
+    addItem(app.cb_mic, devices.default_label);
+    for (app.mic_list[0..app.mic_count]) |*d| addItem(app.cb_mic, d.deviceName());
+    // Запомненного нет среди включённых — выбираем «по умолчанию», но
+    // настройку не трогаем: гарнитуру могли просто ещё не воткнуть.
+    const chosen = devices.indexOf(app.mic_list[0..app.mic_count], app.prefs.micDevice());
+    _ = c.SendMessageW(app.cb_mic, c.CB_SETCURSEL, if (chosen) |i| i + 1 else 0, 0);
+    if (chosen == null and app.prefs.micDevice().len > 0) setText(app.status, devices.missing_label);
+    app.microphone.useDevice(app.prefs.micDevice());
+}
+
+/// Выбрали микрофон: запомнить и переключить индикатор на него.
+fn onMicChosen() void {
+    const sel = c.SendMessageW(app.cb_mic, c.CB_GETCURSEL, 0, 0);
+    const id: []const u8 = if (sel >= 1 and @as(usize, @intCast(sel)) - 1 < app.mic_count)
+        app.mic_list[@as(usize, @intCast(sel)) - 1].deviceId()
+    else
+        "";
+    app.prefs.setMicDevice(id);
+    app.microphone.useDevice(id);
+    if (!settings_mod.save(&app.prefs, app.home)) setText(app.status, "выбор микрофона не сохранился: папка недоступна");
+    // Индикатор слушает старый — перезапустить на новый.
+    if (app.sound_on and app.microphone.isRunning()) {
+        app.microphone.stop();
+        app.microphone.start() catch {};
+    }
+}
+
+/// Проба: пять секунд пишем, потом отдаём в колонки.
+fn startProbe(hwnd: c.HWND) void {
+    if (app.probe.busy()) return;
+    if (app.rec.isBusy()) {
+        setText(app.status, "во время записи проба недоступна");
+        return;
+    }
+    if (app.probe_track == null) {
+        app.probe_track = app.allocator.create(sound_track.Track) catch {
+            setText(app.status, "не хватило памяти под пробу");
+            return;
+        };
+        app.probe_track.?.* = .{};
+    }
+    app.probe_track.?.reset();
+    app.probe_samples.clearRetainingCapacity();
+
+    // Индикатор и проба делят один захват: на время пробы он пишет
+    // в кольцо для файла, потом вернётся к одному индикатору.
+    app.meter_was_on = app.microphone.isRunning();
+    if (app.meter_was_on) app.microphone.stop();
+    app.microphone.track = app.probe_track;
+    app.microphone.track_rate = mic_rate;
+    app.probe.start(win32.nowNs());
+    app.microphone.start() catch |err| {
+        app.microphone.track = null;
+        app.probe.fail(win32.nowNs(), errors.explain(err));
+        restoreMeter(hwnd);
+        updateStatus();
+        return;
+    };
+    _ = c.SetTimer(hwnd, timer_probe, 50, null);
+    _ = c.EnableWindow(app.btn_probe, 0);
+    updateStatus();
+}
+
+/// Забрать накопленное из кольца: и по такту, и в конце.
+fn drainProbe() void {
+    const ring = app.probe_track orelse return;
+    var chunk: [4096]i16 = undefined;
+    while (true) {
+        const got = ring.pop(&chunk);
+        if (got == 0) break;
+        app.probe.feed(chunk[0..got]);
+        app.probe_samples.appendSlice(app.allocator, chunk[0..got]) catch break;
+    }
+}
+
+fn onProbeTick(hwnd: c.HWND) void {
+    const now = win32.nowNs();
+    switch (app.probe.state) {
+        .recording => {
+            drainProbe();
+            // Микрофон мог не подняться уже в потоке.
+            if (app.microphone.failure) |err| {
+                app.microphone.stop();
+                app.microphone.track = null;
+                app.probe.fail(now, errors.explain(err));
+                restoreMeter(hwnd);
+            } else if (app.probe.tick(now) == .stop_recording) {
+                app.microphone.stop();
+                app.microphone.track = null;
+                drainProbe();
+                app.probe.recorded(now);
+                if (app.probe.state == .playing) {
+                    app.probe_thread = std.Thread.spawn(.{}, probePlayer, .{hwnd}) catch null;
+                    if (app.probe_thread == null) {
+                        app.probe.fail(now, "не удалось завести воспроизведение");
+                        restoreMeter(hwnd);
+                    }
+                } else {
+                    restoreMeter(hwnd);
+                }
+            }
+        },
+        .done, .failed => if (app.probe.tick(now) == .forget) {
+            app.probe.forget();
+            _ = c.KillTimer(hwnd, timer_probe);
+        },
+        else => {},
+    }
+    updateStatus();
+}
+
+/// Отдать записанное в колонки. Свой поток: воспроизведение ждёт
+/// до конца, а окно ждать не должно.
+fn probePlayer(hwnd: c.HWND) void {
+    const failed = if (play.playSamples(app.probe_samples.items, mic_rate)) false else |_| true;
+    _ = c.PostMessageW(hwnd, wm_probe_played, if (failed) 1 else 0, 0);
+}
+
+fn onProbePlayed(hwnd: c.HWND) void {
+    if (app.probe_thread) |t| {
+        t.join();
+        app.probe_thread = null;
+    }
+    const now = win32.nowNs();
+    if (app.probe.state == .playing) app.probe.played(now);
+    restoreMeter(hwnd);
+    updateStatus();
+}
+
+/// Вернуть индикатор, если он работал до пробы.
+fn restoreMeter(hwnd: c.HWND) void {
+    _ = c.EnableWindow(app.btn_probe, 1);
+    if (app.meter_was_on and app.sound_on and !app.microphone.isRunning()) {
+        app.microphone.track = null;
+        app.microphone.start() catch {};
+    }
+    _ = hwnd;
+}
+
 /// Исполнить просьбу, пришедшую снаружи. Работает в потоке окна: запись
 /// заводится и останавливается только отсюда, из одного места.
 fn serveCall(call: *control.Call) void {
@@ -2602,9 +2775,16 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
 
             // Уголок: точка, надпись, кнопка «пуск/стоп» и «?». Про сервер
             // смотрят раз в день — целый ряд посреди окна он не заслужил.
-            app.btn_server = button(hwnd, "▶", id_server, 446, 400, 28, 24, 0);
-            _ = button(hwnd, "?", id_server_help, 478, 400, 28, 24, 0);
-            _ = button(hwnd, "Редактор дорожек…", id_editor, 14, 438, 190, 30, 0);
+            // Микрофон: какой брать и как он звучит (#22). Ряд свой:
+            // «Звук» — про то, писать ли, а это — про то, чем.
+            _ = label(hwnd, "Микрофон", 14, 404, 90, 20);
+            app.cb_mic = combo(hwnd, id_mic, 106, 400, 300, 240);
+            app.btn_probe = button(hwnd, "Проба 5 с", id_probe, 414, 399, 92, 26, 0);
+            fillMicList();
+
+            app.btn_server = button(hwnd, "▶", id_server, 446, 432, 28, 24, 0);
+            _ = button(hwnd, "?", id_server_help, 478, 432, 28, 24, 0);
+            _ = button(hwnd, "Редактор дорожек…", id_editor, 14, 470, 190, 30, 0);
 
             // Принимаем файлы, брошенные мышью из проводника.
             c.DragAcceptFiles(hwnd, 1);
@@ -2618,7 +2798,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 wide(""),
                 c.WS_CHILD | c.WS_VISIBLE | c.SS_NOTIFY,
                 34,
-                404,
+                436,
                 corner_label_w,
                 20,
                 hwnd,
@@ -2645,7 +2825,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             _ = c.EnableWindow(app.btn_pause, 0);
             _ = c.EnableWindow(app.btn_open, 0);
 
-            for ([_]c.HWND{ app.status, app.btn_record, app.btn_pause, app.btn_open, app.chk_cursor, app.cb_fps, app.cb_preset, app.lbl_file, app.chk_sound, app.chk_system, app.chk_separate, app.lbl_sound_note, app.lbl_gain, app.btn_server, app.lbl_server }) |h| applyFont(h);
+            for ([_]c.HWND{ app.status, app.btn_record, app.btn_pause, app.btn_open, app.chk_cursor, app.cb_fps, app.cb_preset, app.lbl_file, app.chk_sound, app.chk_system, app.chk_separate, app.lbl_sound_note, app.lbl_gain, app.btn_server, app.lbl_server, app.cb_mic, app.btn_probe }) |h| applyFont(h);
             setGainEnabled(false);
             for ([_]c_int{ id_area, id_full, id_window, id_area_rec }) |id| applyFont(c.GetDlgItem(hwnd, id));
 
@@ -2704,6 +2884,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                         else => .text_ui,
                     };
                 },
+                id_mic => if ((wp >> 16) == c.CBN_SELCHANGE) onMicChosen(),
+                id_probe => startProbe(hwnd),
                 id_sound => {
                     app.sound_on = c.SendMessageW(app.chk_sound, c.BM_GETCHECK, 0, 0) != 0;
                     if (app.sound_on) {
@@ -2812,6 +2994,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             return 0;
         },
         c.WM_TIMER => {
+            if (wp == timer_probe) {
+                onProbeTick(hwnd);
+                return 0;
+            }
             if (wp == timer_wave) {
                 var box = waveRect();
                 _ = c.InvalidateRect(hwnd, &box, 0);
@@ -2832,6 +3018,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 _ = c.KillTimer(hwnd, timer_frame);
                 frame_overlay.hide();
             }
+            return 0;
+        },
+        wm_probe_played => {
+            onProbePlayed(hwnd);
             return 0;
         },
         remote_win.wm_remote => {

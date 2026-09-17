@@ -23,11 +23,43 @@ pub const Error = error{
     Failed,
 };
 
+/// Откуда брать отсчёты: план всплесков стенда или записанные отсчёты.
+pub const Source = union(enum) {
+    plan: tone.Plan,
+    samples: struct { data: []const i16, rate: u32 },
+
+    /// Отсчёт номер `i` при частоте устройства `rate`.
+    ///
+    /// Записанное может быть в другой частоте, чем устройство: берём
+    /// ближайший отсчёт. Для пробы на слух этого достаточно.
+    pub fn sampleAt(self: Source, i: usize, rate: u32) f32 {
+        return switch (self) {
+            .plan => |p| p.sampleAt(i, rate),
+            .samples => |s| blk: {
+                const at: usize = @intCast(@as(u64, i) * s.rate / @max(rate, 1));
+                if (at >= s.data.len) break :blk 0;
+                break :blk @as(f32, @floatFromInt(s.data[at])) / 32768.0;
+            },
+        };
+    }
+};
+
 /// Проиграть план всплесков целиком и вернуться, когда он отзвучал.
 ///
 /// `seconds` — сколько всего играть, включая тишину до и после всплесков:
 /// план говорит, когда всплески, но не говорит, когда кончается запись.
 pub fn playPlan(plan: tone.Plan, seconds: f32) Error!void {
+    return playSource(.{ .plan = plan }, seconds);
+}
+
+/// Проиграть записанные отсчёты (моно, `rate` Гц) и вернуться, когда
+/// отзвучали. Для пробы микрофона (#22).
+pub fn playSamples(samples: []const i16, rate: u32) Error!void {
+    const seconds = @as(f32, @floatFromInt(samples.len)) / @as(f32, @floatFromInt(@max(rate, 1)));
+    return playSource(.{ .samples = .{ .data = samples, .rate = rate } }, seconds);
+}
+
+fn playSource(source: Source, seconds: f32) Error!void {
     if (builtin.os.tag != .windows) return Error.Unsupported;
 
     _ = c.CoInitializeEx(null, c.COINIT_MULTITHREADED);
@@ -101,7 +133,7 @@ pub fn playPlan(plan: tone.Plan, seconds: f32) Error!void {
 
     // Заполняем буфер до старта: иначе первые миллисекунды — тишина
     // и щелчок, а стенд меряет как раз начало.
-    try fill(render.?, buffer_frames, &written, total, plan, rate, channels, is_float);
+    try fill(render.?, buffer_frames, &written, total, source, rate, channels, is_float);
     if (win32.failed(client.?.lpVtbl.*.Start.?(client.?))) return Error.Failed;
     defer _ = client.?.lpVtbl.*.Stop.?(client.?);
 
@@ -113,7 +145,7 @@ pub fn playPlan(plan: tone.Plan, seconds: f32) Error!void {
             c.Sleep(5);
             continue;
         }
-        try fill(render.?, room, &written, total, plan, rate, channels, is_float);
+        try fill(render.?, room, &written, total, source, rate, channels, is_float);
     }
     // Дать буферу дозвучать: остановка сразу срезала бы хвост последнего
     // всплеска, и стенд счёл бы его короче задуманного.
@@ -127,7 +159,7 @@ fn fill(
     frames: c.UINT32,
     written: *usize,
     total: usize,
-    plan: tone.Plan,
+    source: Source,
     rate: u32,
     channels: usize,
     is_float: bool,
@@ -140,7 +172,7 @@ fn fill(
 
     var i: usize = 0;
     while (i < want) : (i += 1) {
-        const v = plan.sampleAt(written.* + i, rate);
+        const v = source.sampleAt(written.* + i, rate);
         if (is_float) {
             const out: [*]f32 = @ptrCast(@alignCast(data));
             for (0..channels) |ch| out[i * channels + ch] = v;
@@ -172,4 +204,16 @@ test "план в отсчётах: столько, сколько просят 
     const rate: u32 = 48_000;
     const total: usize = @intFromFloat(3.0 * @as(f32, @floatFromInt(rate)));
     try std.testing.expectEqual(@as(usize, 144_000), total);
+}
+
+test "записанные отсчёты отдаются в частоте устройства ближайшим отсчётом" {
+    const data = [_]i16{ 0, 16384, -16384, 32767 };
+    const src = Source{ .samples = .{ .data = &data, .rate = 4 } };
+    // Та же частота — отсчёт в отсчёт.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), src.sampleAt(1, 4), 0.001);
+    // Устройство вдвое быстрее — каждый отсчёт повторяется дважды.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), src.sampleAt(2, 8), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), src.sampleAt(3, 8), 0.001);
+    // За концом — тишина, а не чтение за краем.
+    try std.testing.expectEqual(@as(f32, 0), src.sampleAt(100, 4));
 }

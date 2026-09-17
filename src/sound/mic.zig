@@ -113,9 +113,17 @@ pub const Ring = struct {
 /// Что захватываем: микрофон или то, что идёт в колонки.
 pub const Kind = enum { microphone, system };
 
+const devices = @import("devices.zig");
+
 pub const Capture = struct {
     kind: Kind = .microphone,
     ring: Ring = .{},
+    /// Какой микрофон брать (#22). Пусто — тот, что по умолчанию в Windows.
+    device_id: [devices.max_id]u8 = @splat(0),
+    device_id_len: usize = 0,
+    /// Выбранного устройства не нашлось, взят микрофон по умолчанию.
+    /// Об этом надо сказать, а не молча писать не туда.
+    fell_back: bool = false,
     running: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     /// Что пошло не так, если захват не поднялся.
@@ -126,6 +134,16 @@ pub const Capture = struct {
     track: ?*track_mod.Track = null,
     /// Частота, к которой приводить отсчёты для файла.
     track_rate: u32 = 48_000,
+
+    /// Выбрать устройство по номеру Windows; пустой — по умолчанию.
+    pub fn useDevice(self: *Capture, id: []const u8) void {
+        self.device_id_len = @min(id.len, self.device_id.len);
+        @memcpy(self.device_id[0..self.device_id_len], id[0..self.device_id_len]);
+    }
+
+    pub fn deviceId(self: *const Capture) []const u8 {
+        return self.device_id[0..self.device_id_len];
+    }
 
     pub fn start(self: *Capture) Error!void {
         if (builtin.os.tag != .windows) return Error.Unsupported;
@@ -177,12 +195,27 @@ pub const Capture = struct {
         const missing: Error = if (self.kind == .system) Error.NoSpeakers else Error.NoMicrophone;
 
         var device: ?*c.IMMDevice = null;
-        if (win32.failed(enumerator.?.lpVtbl.*.GetDefaultAudioEndpoint.?(
-            enumerator.?,
-            flow,
-            c.eConsole,
-            &device,
-        ))) return missing;
+        // Сперва выбранный микрофон (#22). Его могли отключить — тогда
+        // берём тот, что по умолчанию, и помечаем это.
+        self.fell_back = false;
+        if (self.kind == .microphone and self.device_id_len > 0) {
+            var wide: [devices.max_id + 1]u16 = undefined;
+            if (std.unicode.utf8ToUtf16Le(&wide, self.deviceId())) |n| {
+                wide[n] = 0;
+                if (win32.failed(enumerator.?.lpVtbl.*.GetDevice.?(enumerator.?, @ptrCast(&wide), &device))) {
+                    device = null;
+                }
+            } else |_| {}
+            if (device == null) self.fell_back = true;
+        }
+        if (device == null) {
+            if (win32.failed(enumerator.?.lpVtbl.*.GetDefaultAudioEndpoint.?(
+                enumerator.?,
+                flow,
+                c.eConsole,
+                &device,
+            ))) return missing;
+        }
         defer _ = device.?.lpVtbl.*.Release.?(@ptrCast(device.?));
 
         var client: ?*c.IAudioClient = null;
@@ -398,4 +431,15 @@ test "у захвата системы устройство — вывод, у �
     try std.testing.expectEqual(Kind.microphone, mic_cap.kind);
     _ = &sys;
     _ = &mic_cap;
+}
+
+test "номер устройства запоминается и обрезается, пустой — по умолчанию" {
+    var cap = Capture{};
+    try std.testing.expectEqualStrings("", cap.deviceId());
+    cap.useDevice("{0.0.1.00000000}.{abcd}");
+    try std.testing.expectEqualStrings("{0.0.1.00000000}.{abcd}", cap.deviceId());
+    cap.useDevice("");
+    try std.testing.expectEqualStrings("", cap.deviceId());
+    cap.useDevice("x" ** 600);
+    try std.testing.expectEqual(@as(usize, devices.max_id), cap.deviceId().len);
 }

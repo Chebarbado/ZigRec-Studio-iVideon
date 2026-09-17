@@ -45,6 +45,8 @@ pub const Feeder = struct {
     sources: Sources = .{},
     track: ?*track_mod.Track = null,
     capture: ?*mic.Capture = null,
+    /// Какой микрофон брать: номер устройства у Windows, пусто — по умолчанию.
+    mic_device: []const u8 = "",
     /// Второй источник — системный звук. `null`, если его не просили
     /// или он не поднялся.
     system_track: ?*track_mod.Track = null,
@@ -104,6 +106,7 @@ pub const Feeder = struct {
             return;
         };
         m.* = .{ .kind = kind, .track = t, .track_rate = self.settings.sample_rate };
+        if (kind == .microphone) m.useDevice(self.mic_device);
 
         if (m.start()) {
             // Ждём, пока поток захвата поднимется и скажет, что вышло.

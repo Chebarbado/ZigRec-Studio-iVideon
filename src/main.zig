@@ -43,6 +43,10 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec devices-smoke
+    \\        самопроверка микрофонов: список устройств ввода с именами
+    \\  zigrec probe-smoke [СЕК]
+    \\        самопроверка пробы: записать СЕК секунд с микрофона и сыграть
     \\  zigrec loopback-smoke
     \\        самопроверка системного звука: сыграть в колонки и поймать через loopback
     \\  zigrec loopback-record ФАЙЛ.mp4 [--separate]
@@ -321,6 +325,10 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "devices-smoke")) {
+        code = try devicesSmoke(w);
+    } else if (eq(cmd, "probe-smoke")) {
+        code = try probeSmoke(arena, w, argInt(args, 2, 1));
     } else if (eq(cmd, "monitors")) {
         code = try listMonitors(arena, w);
     } else if (eq(cmd, "windows")) {
@@ -3224,6 +3232,121 @@ fn micCheck(w: anytype, seconds: u32) !u8 {
         return 1;
     }
     try w.print("[mic] СЛЫШНО: звук был в {d} замерах из {d}\n", .{ loud, i });
+    return 0;
+}
+
+/// Самопроверка списка микрофонов: список читается, номера непустые
+/// и не повторяются, у каждого есть имя. Без микрофонов — честный ноль,
+/// это не поломка: сборочная машина бывает без входа.
+fn devicesSmoke(w: anytype) !u8 {
+    const devices = zigrec.devices;
+    var out: [devices.max_devices]devices.Device = undefined;
+    const got = devices.list(&out);
+    try w.print("[devices] устройств ввода: {d}\n", .{got.len});
+    for (got, 0..) |*d, i| {
+        try w.print("[devices]   {s}  —  {s}\n", .{ d.deviceName(), d.deviceId() });
+        if (d.deviceName().len == 0 or d.deviceId().len == 0) {
+            try w.writeAll("[devices] ПРОВАЛ: устройство без имени или номера\n");
+            return 1;
+        }
+        if (devices.indexOf(got, d.deviceId()) != i) {
+            try w.writeAll("[devices] ПРОВАЛ: номер повторяется\n");
+            return 1;
+        }
+    }
+    try w.print("[devices] по умолчанию зовётся «{s}»\n", .{devices.nameFor(got, "")});
+    try w.writeAll("[devices] СПИСОК ЧИТАЕТСЯ\n");
+    return 0;
+}
+
+/// Самопроверка пробы: тот же путь, что у кнопки — микрофон в кольцо,
+/// кольцо в буфер, буфер в колонки. Сверяем число отсчётов с временем
+/// и время воспроизведения с длиной. Без микрофона или колонок проверка
+/// честно пропускается.
+fn probeSmoke(allocator: std.mem.Allocator, w: anytype, seconds: u32) !u8 {
+    const c = zigrec.win32.c;
+    const rate: u32 = 48_000;
+    const ring = try allocator.create(zigrec.track.Track);
+    defer allocator.destroy(ring);
+    ring.* = .{};
+
+    var cap = zigrec.mic.Capture{ .track = ring, .track_rate = rate };
+    var probe = zigrec.mic_probe.Probe{};
+    const started = zigrec.win32.nowNs();
+    probe.start(started);
+    cap.start() catch |err| {
+        try w.print("[probe] микрофона нет ({s}) — проверка пропущена\n", .{explain(err)});
+        return 0;
+    };
+    c.Sleep(300);
+    if (cap.failure) |err| {
+        cap.stop();
+        try w.print("[probe] микрофон не поднялся ({s}) — проверка пропущена\n", .{explain(err)});
+        return 0;
+    }
+
+    var samples: std.ArrayList(i16) = .empty;
+    defer samples.deinit(allocator);
+    var chunk: [4096]i16 = undefined;
+    const want_ns: u64 = @as(u64, seconds) * std.time.ns_per_s;
+    const t0 = zigrec.win32.nowNs();
+    while (zigrec.win32.nowNs() - t0 < want_ns) {
+        c.Sleep(50);
+        while (true) {
+            const got = ring.pop(&chunk);
+            if (got == 0) break;
+            probe.feed(chunk[0..got]);
+            try samples.appendSlice(allocator, chunk[0..got]);
+        }
+    }
+    cap.stop();
+    while (true) {
+        const got = ring.pop(&chunk);
+        if (got == 0) break;
+        probe.feed(chunk[0..got]);
+        try samples.appendSlice(allocator, chunk[0..got]);
+    }
+
+    // Считаем от старта захвата, а не от конца разгона: микрофон пишет
+    // и те триста миллисекунд, что мы ждали его формат.
+    const elapsed_ns = zigrec.win32.nowNs() - started;
+    const expected: usize = @intCast(@as(u64, rate) * elapsed_ns / std.time.ns_per_s);
+    try w.print("[probe] записано {d} отсчётов за {d} мс, ждали около {d}; пик {d:.1} дБ\n", .{
+        samples.items.len,
+        elapsed_ns / std.time.ns_per_ms,
+        expected,
+        probe.peakDb(),
+    });
+    // Пятнадцать процентов: первые кусочки теряются на подъёме потока,
+    // а больше — уже дыра во времени, которую слышно.
+    if (samples.items.len < expected * 85 / 100 or samples.items.len > expected * 115 / 100) {
+        try w.writeAll("[probe] ПРОВАЛ: отсчётов не столько, сколько времени прошло\n");
+        return 1;
+    }
+
+    // Итог пробы — как в окне: тишина — не удалась, звук — слушаем.
+    probe.recorded(zigrec.win32.nowNs());
+    var status_buf: [160]u8 = undefined;
+    try w.print("[probe] {s}\n", .{probe.status(&status_buf, zigrec.win32.nowNs())});
+
+    // Играем всегда, даже тишину: проверяем путь до колонок, а не голос.
+    const p0 = zigrec.win32.nowNs();
+    zigrec.play.playSamples(samples.items, rate) catch |err| {
+        try w.print("[probe] колонок нет ({s}) — воспроизведение пропущено\n", .{zigrec.play.explain(err)});
+        return 0;
+    };
+    const played_ms = (zigrec.win32.nowNs() - p0) / std.time.ns_per_ms;
+    const want_ms: u64 = @as(u64, samples.items.len) * 1000 / rate;
+    try w.print("[probe] сыграно за {d} мс, длина {d} мс\n", .{ played_ms, want_ms });
+    if (played_ms < want_ms) {
+        try w.writeAll("[probe] ПРОВАЛ: воспроизведение кончилось раньше, чем звук\n");
+        return 1;
+    }
+    if (played_ms > want_ms + 1500) {
+        try w.writeAll("[probe] ПРОВАЛ: воспроизведение тянулось дольше звука на секунды \n");
+        return 1;
+    }
+    try w.writeAll("[probe] ПРОБА ПРОХОДИТ\n");
     return 0;
 }
 

@@ -1406,6 +1406,9 @@ fn startRecordTo(track_index: usize) void {
     mic_ring.?.reset();
     ed.rec_samples.clearRetainingCapacity();
 
+    // Тот же микрофон, что выбран в окне записи (#22).
+    var dev_buf: [256]u8 = undefined;
+    mic_capture.useDevice(chosenMicDevice(&dev_buf));
     mic_capture.track = mic_ring;
     mic_capture.track_rate = mic_rate;
     mic_capture.start() catch {
@@ -2232,6 +2235,19 @@ fn startMarksPanelEdit(row: usize, is_note: bool) void {
     else
         "новое имя метки, затем Enter; Esc — оставить как было");
     refresh();
+}
+
+/// Номер выбранного микрофона из настроек; пусто — по умолчанию.
+fn chosenMicDevice(buf: []u8) []const u8 {
+    const dir = settingsDir(ed.allocator) orelse return "";
+    defer ed.allocator.free(dir);
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    const prefs = settings_mod.load(threaded.io(), ed.allocator, dir);
+    const id = prefs.micDevice();
+    const n = @min(id.len, buf.len);
+    @memcpy(buf[0..n], id[0..n]);
+    return buf[0..n];
 }
 
 /// Запомнить, открыта панель или нет: её открывают под задачу и ждут,
