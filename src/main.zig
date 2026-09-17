@@ -1258,12 +1258,14 @@ fn navSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const 
     // прокрутки.
     {
         const wf = zigrec.waveform;
-        var builder = wf.Builder.init(wf.buckets * 10, 600 * std.time.ns_per_s);
+        const total: usize = wf.bucketsFor(600 * std.time.ns_per_s) * 10;
+        var builder = try wf.Builder.init(allocator, total, 600 * std.time.ns_per_s);
         var k: usize = 0;
-        while (k < wf.buckets * 10) : (k += 1) {
-            builder.push(@as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(wf.buckets * 10)));
+        while (k < total) : (k += 1) {
+            builder.push(@as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(total)));
         }
-        const env = builder.finish();
+        var env = builder.finish();
+        defer env.deinit(allocator);
         const clip = zigrec.timeline.Clip{ .at_ns = 0, .in_ns = 0, .len_ns = 600 * std.time.ns_per_s };
         const x = zigrec.editor_view.header_w + 120;
         const before = zigrec.editor_view.View{ .at_ns = 0, .ns_per_px = std.time.ns_per_s };
@@ -1275,6 +1277,24 @@ fn navSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const 
         try w.print("[nav] волна под одним пикселем до и после прокрутки: {d:.2} → {d:.2}\n", .{ h0, h1 });
         if (h1 <= h0) {
             try w.writeAll("[nav] ПРОВАЛ: прокрутка не меняет волну под пикселем\n");
+            return 1;
+        }
+
+        // #84: при приближении соседние столбики отличаются, а не идут
+        // блоками. Масштаб — две минуты на экран, как на снимке пользователя:
+        // столбец огибающей в 50 мс короче пикселя в 200 мс, и волна
+        // с ростом громкости обязана расти на каждом пикселе.
+        const close = zigrec.editor_view.View{ .at_ns = 300 * std.time.ns_per_s, .ns_per_px = 200 * std.time.ns_per_ms };
+        var grew: usize = 0;
+        var px: i32 = 0;
+        while (px < 100) : (px += 1) {
+            const sa = zigrec.editor_view.waveSpanAt(close, clip, x + px).?;
+            const sb = zigrec.editor_view.waveSpanAt(close, clip, x + px + 1).?;
+            if (env.relativeBetween(sb.from_ns, sb.to_ns) > env.relativeBetween(sa.from_ns, sa.to_ns)) grew += 1;
+        }
+        try w.print("[nav] при приближении из 100 соседних столбиков выше предыдущего: {d}\n", .{grew});
+        if (grew < 90) {
+            try w.writeAll("[nav] ПРОВАЛ: волна при приближении идёт блоками — разрешение огибающей мало́\n");
             return 1;
         }
     }

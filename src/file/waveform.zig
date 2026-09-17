@@ -27,14 +27,34 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// Сколько столбцов держим на файл. Тысяча с небольшим — это больше, чем
-/// пикселей у дорожки на любом разумном экране, и при этом всего четыре
-/// килобайта на файл.
-pub const buckets = 1024;
+/// Столбцов — от длины файла, а не тысяча на всё.
+///
+/// Задача #84. Тысяча столбцов на файл в 63 минуты — это 3.7 секунды на
+/// столбец; при приближении к двум минутам на экран их всего тридцать,
+/// и волна превращается в блоки по шестнадцать пикселей одной высоты.
+/// Пользователь так и показал.
+///
+/// Двадцать столбцов в секунду — 50 мс: короче слога, длиннее щелчка.
+/// Меньше тысячи не берём, чтобы короткий файл на широком экране не стал
+/// лесенкой; больше миллиона — четыре мегабайта на исходник — незачем:
+/// это четырнадцать часов записи.
+pub const per_second: usize = 20;
+pub const min_buckets: usize = 1024;
+pub const max_buckets: usize = 1 << 20;
+
+/// Сколько столбцов завести под файл такой длины.
+pub fn bucketsFor(duration_ns: u64) usize {
+    const seconds = duration_ns / std.time.ns_per_s;
+    const want = @as(usize, @intCast(seconds)) * per_second;
+    return std.math.clamp(want, min_buckets, max_buckets);
+}
 
 /// Огибающая: по столбцу на каждую долю файла.
 pub const Envelope = struct {
-    peak: [buckets]f32 = @splat(0),
+    /// Пик каждого столбца. Живёт в куче: столбцов у длинного файла
+    /// десятки тысяч, и держать их на стеке или в массиве на всякий случай
+    /// значило бы отдать мегабайты под каждый из тридцати двух исходников.
+    peak: []f32 = &.{},
     /// Длительность звука, по которой раскладывались столбцы.
     duration_ns: u64 = 0,
     /// Самое громкое место файла. По нему волна и нормируется.
@@ -44,9 +64,21 @@ pub const Envelope = struct {
 
     /// Столбец для момента времени внутри файла.
     pub fn bucketAt(self: *const Envelope, when_ns: u64) usize {
-        if (self.duration_ns == 0) return 0;
-        const at = when_ns * buckets / self.duration_ns;
-        return @min(at, buckets - 1);
+        if (self.duration_ns == 0 or self.peak.len == 0) return 0;
+        const at = when_ns * self.peak.len / self.duration_ns;
+        return @min(at, self.peak.len - 1);
+    }
+
+    /// Сколько длится один столбец.
+    pub fn bucketNs(self: *const Envelope) u64 {
+        if (self.peak.len == 0) return 0;
+        return self.duration_ns / self.peak.len;
+    }
+
+    /// Отдать память. Пустую огибающую освобождать безопасно.
+    pub fn deinit(self: *Envelope, allocator: std.mem.Allocator) void {
+        if (self.peak.len > 0) allocator.free(self.peak);
+        self.* = .{};
     }
 
     /// Самый громкий отсчёт на отрезке — то, что рисуется одним столбцом
@@ -58,7 +90,7 @@ pub const Envelope = struct {
         const last = self.bucketAt(to_ns -| 1);
         var top: f32 = 0;
         var i = first;
-        while (i <= last and i < buckets) : (i += 1) top = @max(top, self.peak[i]);
+        while (i <= last and i < self.peak.len) : (i += 1) top = @max(top, self.peak[i]);
         return top;
     }
 
@@ -85,21 +117,31 @@ pub const Envelope = struct {
 /// молча: не туда разложить, потерять хвост, поделить на ноль.
 pub const Builder = struct {
     envelope: Envelope = .{},
+    allocator: std.mem.Allocator,
     /// Сколько отсчётов приходится на столбец.
     per_bucket: f64 = 0,
     /// Сколько отсчётов уже положено.
     seen: u64 = 0,
 
-    pub fn init(total_samples: u64, duration_ns: u64) Builder {
-        var b = Builder{};
+    pub fn init(allocator: std.mem.Allocator, total_samples: u64, duration_ns: u64) Error!Builder {
+        const count = bucketsFor(duration_ns);
+        const peak = allocator.alloc(f32, count) catch return Error.OutOfMemory;
+        @memset(peak, 0);
+        var b = Builder{ .allocator = allocator };
+        b.envelope.peak = peak;
         b.envelope.duration_ns = duration_ns;
-        b.per_bucket = @as(f64, @floatFromInt(@max(total_samples, 1))) / @as(f64, buckets);
+        b.per_bucket = @as(f64, @floatFromInt(@max(total_samples, 1))) / @as(f64, @floatFromInt(count));
         return b;
+    }
+
+    /// Бросить недостроенное: память отдать, огибающую не отдавать.
+    pub fn deinit(self: *Builder) void {
+        self.envelope.deinit(self.allocator);
     }
 
     pub fn push(self: *Builder, value: f32) void {
         const index_f = @as(f64, @floatFromInt(self.seen)) / @max(self.per_bucket, 1);
-        const index: usize = @min(@as(usize, @intFromFloat(index_f)), buckets - 1);
+        const index: usize = @min(@as(usize, @intFromFloat(index_f)), self.envelope.peak.len - 1);
         const a = @abs(value);
         if (a > self.envelope.peak[index]) self.envelope.peak[index] = a;
         self.seen += 1;
@@ -107,8 +149,13 @@ pub const Builder = struct {
 
     pub fn finish(self: *Builder) Envelope {
         // Пустой файл — не повод показывать полосу шума: пусть будет ровно
-        // ничего, и это честнее нарисованной наугад волны.
-        self.envelope.ready = self.seen > 0;
+        // ничего, и это честнее нарисованной наугад волны. И память под
+        // ничего держать незачем.
+        if (self.seen == 0) {
+            self.envelope.deinit(self.allocator);
+            return .{};
+        }
+        self.envelope.ready = true;
         var top: f32 = 0;
         for (self.envelope.peak) |v| top = @max(top, v);
         self.envelope.loudest = top;
@@ -121,7 +168,7 @@ pub const Builder = struct {
 /// Декодирует Media Foundation: она открывает всё, что открываем мы, и своего
 /// декодера тут заводить незачем. Формат просим один — 32-битный вещественный
 /// моно: сводить каналы самим дешевле, чем разбирать чужую раскладку.
-pub fn read(path: []const u8) Error!Envelope {
+pub fn read(allocator: std.mem.Allocator, path: []const u8) Error!Envelope {
     if (builtin.os.tag != .windows) return Error.Unsupported;
 
     _ = c.CoInitializeEx(null, c.COINIT_APARTMENTTHREADED | c.COINIT_DISABLE_OLE1DDE);
@@ -168,7 +215,9 @@ pub fn read(path: []const u8) Error!Envelope {
 
     const duration_ns = durationOf(r);
     const total = duration_ns * rate / std.time.ns_per_s;
-    var builder = Builder.init(@max(total, 1), duration_ns);
+    var builder = try Builder.init(allocator, @max(total, 1), duration_ns);
+    // Не дочитали — памяти не оставляем: огибающая отдаётся только целой.
+    errdefer builder.deinit();
 
     while (true) {
         var flags: c.DWORD = 0;
@@ -234,12 +283,55 @@ fn durationOf(r: *c.IMFSourceReader) u64 {
 // ---------------------------------------------------------------- тесты
 
 const sec = std.time.ns_per_s;
+const ta = std.testing.allocator;
+
+test "столбцов больше у длинного файла и не меньше тысячи у короткого" {
+    // Разрешение растёт с длиной: 63 минуты — это больше семидесяти тысяч
+    // столбцов, а не тысяча на всё.
+    try std.testing.expectEqual(min_buckets, bucketsFor(sec));
+    try std.testing.expectEqual(min_buckets, bucketsFor(10 * sec));
+    try std.testing.expectEqual(@as(usize, 20 * 600), bucketsFor(600 * sec));
+    try std.testing.expectEqual(@as(usize, 20 * 3796), bucketsFor(3796 * sec));
+    // И потолок: четырнадцать часов не превращаются в гигабайт.
+    try std.testing.expectEqual(max_buckets, bucketsFor(100 * 3600 * sec));
+}
+
+test "у длинного файла столбец короче ста миллисекунд" {
+    // Ровно то, чего не хватало на снимке: столбец в 3.7 с рисовался
+    // полосой в шестнадцать пикселей.
+    var b = try Builder.init(ta, 48_000 * 3796, 3796 * sec);
+    defer b.deinit();
+    try std.testing.expect(b.envelope.bucketNs() <= 100 * std.time.ns_per_ms);
+}
+
+test "на длинном файле всплеск отличим от тишины рядом" {
+    // Десять минут тишины и один всплеск в сто миллисекунд посередине.
+    // При тысяче столбцов он размазался бы на шестьсот миллисекунд;
+    // при двадцати в секунду соседние сто миллисекунд остаются тишиной.
+    const rate: u32 = 1000;
+    const total: u64 = 600 * rate;
+    var b = try Builder.init(ta, total, 600 * sec);
+    var e = b.finish();
+    defer e.deinit(ta);
+    // Пустой finish отдал память — строим заново, кладя отсчёты.
+    var b2 = try Builder.init(ta, total, 600 * sec);
+    var i: u64 = 0;
+    while (i < total) : (i += 1) {
+        const t_ms = i * 1000 / rate;
+        b2.push(if (t_ms >= 300_000 and t_ms < 300_100) 0.9 else 0.0);
+    }
+    var e2 = b2.finish();
+    defer e2.deinit(ta);
+    try std.testing.expect(e2.peakBetween(300_000 * std.time.ns_per_ms, 300_100 * std.time.ns_per_ms) > 0.8);
+    try std.testing.expectEqual(@as(f32, 0), e2.peakBetween(300_300 * std.time.ns_per_ms, 300_400 * std.time.ns_per_ms));
+}
 
 test "столбцы раскладываются по всей длине, а не кучей в начале" {
-    var b = Builder.init(buckets * 10, 10 * sec);
+    var b = try Builder.init(ta, min_buckets * 10, 10 * sec);
     var i: usize = 0;
-    while (i < buckets * 10) : (i += 1) b.push(1.0);
-    const e = b.finish();
+    while (i < min_buckets * 10) : (i += 1) b.push(1.0);
+    var e = b.finish();
+    defer e.deinit(ta);
 
     try std.testing.expect(e.ready);
     // Ни один столбец не остался пустым.
@@ -248,12 +340,13 @@ test "столбцы раскладываются по всей длине, а �
 
 test "в столбце остаётся самый громкий отсчёт, а не средний" {
     // Тишина с одним щелчком: среднее размазало бы его до невидимости.
-    var b = Builder.init(1000, sec);
+    var b = try Builder.init(ta, 1000, sec);
     var i: usize = 0;
     while (i < 1000) : (i += 1) {
         b.push(if (i == 500) 0.9 else 0.0);
     }
-    const e = b.finish();
+    var e = b.finish();
+    defer e.deinit(ta);
 
     var loudest: f32 = 0;
     for (e.peak) |v| loudest = @max(loudest, v);
@@ -261,28 +354,34 @@ test "в столбце остаётся самый громкий отсчёт,
 }
 
 test "знак не теряется: отрицательный отсчёт так же громок" {
-    var b = Builder.init(10, sec);
+    var b = try Builder.init(ta, 10, sec);
     b.push(-0.7);
-    const e = b.finish();
+    var e = b.finish();
+    defer e.deinit(ta);
     try std.testing.expectApproxEqAbs(@as(f32, 0.7), e.peak[0], 0.001);
 }
 
 test "момент времени попадает в свой столбец" {
-    var b = Builder.init(1000, 10 * sec);
-    const e = b.finish();
+    var b = try Builder.init(ta, 1000, 10 * sec);
+    b.push(0.1);
+    var e = b.finish();
+    defer e.deinit(ta);
+    const n = e.peak.len;
     try std.testing.expectEqual(@as(usize, 0), e.bucketAt(0));
-    try std.testing.expectEqual(@as(usize, buckets / 2), e.bucketAt(5 * sec));
+    try std.testing.expectEqual(n / 2, e.bucketAt(5 * sec));
     // За концом файла столбец не убегает за край.
-    try std.testing.expectEqual(@as(usize, buckets - 1), e.bucketAt(100 * sec));
+    try std.testing.expectEqual(n - 1, e.bucketAt(100 * sec));
 }
 
 test "пик на отрезке берётся по всем задетым столбцам" {
-    var b = Builder.init(buckets, 10 * sec);
+    const n = bucketsFor(10 * sec);
+    var b = try Builder.init(ta, n, 10 * sec);
     var i: usize = 0;
-    while (i < buckets) : (i += 1) {
-        b.push(if (i == buckets - 1) 0.8 else 0.1);
+    while (i < n) : (i += 1) {
+        b.push(if (i == n - 1) 0.8 else 0.1);
     }
-    const e = b.finish();
+    var e = b.finish();
+    defer e.deinit(ta);
 
     // Отрезок в начале — тихий.
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), e.peakBetween(0, sec), 0.01);
@@ -290,10 +389,12 @@ test "пик на отрезке берётся по всем задетым с�
     try std.testing.expectApproxEqAbs(@as(f32, 0.8), e.peakBetween(9 * sec, 10 * sec), 0.01);
 }
 
-test "пустая огибающая не рисуется" {
-    var b = Builder.init(1000, sec);
-    const e = b.finish();
+test "пустая огибающая не рисуется и не держит памяти" {
+    var b = try Builder.init(ta, 1000, sec);
+    var e = b.finish();
+    defer e.deinit(ta);
     try std.testing.expect(!e.ready);
+    try std.testing.expectEqual(@as(usize, 0), e.peak.len);
     try std.testing.expectEqual(@as(f32, 0), e.peakBetween(0, sec));
 }
 
@@ -301,15 +402,17 @@ test "нулевая длительность не делит на ноль" {
     const e = Envelope{};
     try std.testing.expectEqual(@as(usize, 0), e.bucketAt(5 * sec));
     try std.testing.expectEqual(@as(f32, 0), e.peakBetween(0, sec));
+    try std.testing.expectEqual(@as(u64, 0), e.bucketNs());
 }
 
 test "короткий файл: отсчётов меньше, чем столбцов" {
     // Столбцов тысяча, а отсчётов десять — раскладка не должна падать
     // и не должна оставлять мусор.
-    var b = Builder.init(10, sec / 10);
+    var b = try Builder.init(ta, 10, sec / 10);
     var i: usize = 0;
     while (i < 10) : (i += 1) b.push(0.5);
-    const e = b.finish();
+    var e = b.finish();
+    defer e.deinit(ta);
     try std.testing.expect(e.ready);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), e.peak[0], 0.001);
 }
@@ -318,12 +421,14 @@ test "волна нормируется по самому громкому ме�
     // Тихая запись: пик 0.02, то есть около минус тридцати четырёх децибел.
     // В абсолютном масштабе это волна в один пиксель — видно, что дорожка
     // есть, и больше ничего.
-    var b = Builder.init(buckets, 10 * sec);
+    const n = bucketsFor(10 * sec);
+    var b = try Builder.init(ta, n, 10 * sec);
     var i: usize = 0;
-    while (i < buckets) : (i += 1) {
-        b.push(if (i < buckets / 2) 0.02 else 0.005);
+    while (i < n) : (i += 1) {
+        b.push(if (i < n / 2) 0.02 else 0.005);
     }
-    const e = b.finish();
+    var e = b.finish();
+    defer e.deinit(ta);
 
     try std.testing.expectApproxEqAbs(@as(f32, 0.02), e.loudest, 0.001);
     // Громкая половина рисуется во всю высоту.
@@ -334,10 +439,19 @@ test "волна нормируется по самому громкому ме�
 }
 
 test "тишина остаётся тишиной, а не растягивается до вида речи" {
-    var b = Builder.init(buckets, sec);
+    const n = bucketsFor(sec);
+    var b = try Builder.init(ta, n, sec);
     var i: usize = 0;
-    while (i < buckets) : (i += 1) b.push(0.0);
-    const e = b.finish();
+    while (i < n) : (i += 1) b.push(0.0);
+    var e = b.finish();
+    defer e.deinit(ta);
     try std.testing.expectEqual(@as(f32, 0), e.loudest);
     try std.testing.expectEqual(@as(f32, 0), e.relativeBetween(0, sec));
+}
+
+test "брошенный строитель отдаёт память" {
+    var b = try Builder.init(ta, 1000, 10 * sec);
+    b.push(0.5);
+    b.deinit();
+    // Аллокатор тестов сам проверит, что утечек нет.
 }

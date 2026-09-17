@@ -1233,10 +1233,11 @@ fn loadProject(path: []const u8) void {
     var missing: usize = 0;
     for (ed.project.sourceList(), 0..) |src, i| {
         if (i >= ed.waves.len) break;
-        ed.waves[i] = waveform.read(src.fullPath()) catch blk: {
+        const made = waveform.read(ed.allocator, src.fullPath()) catch blk: {
             missing += 1;
-            break :blk .{};
+            break :blk waveform.Envelope{};
         };
+        replaceWave(i, made);
     }
 
     ed.has_selection = false;
@@ -2530,7 +2531,7 @@ fn afterProjectLoaded(made_by: []const u8, inside: usize, unpacked: bool) void {
     var missing: usize = 0;
     for (ed.project.sourceList(), 0..) |src, i| {
         if (i >= ed.waves.len) break;
-        ed.waves[i] = .{};
+        replaceWave(i, .{});
         startWave(src.fullPath(), @intCast(i));
         if (!recent_mod.onDisk(src.fullPath())) missing += 1;
     }
@@ -3492,7 +3493,26 @@ const WaveJob = struct {
     path: [512]u8 = @splat(0),
     len: usize = 0,
     source: u16 = 0,
+    /// Готовая огибающая. Кладёт поток волны, забирает поток окна.
+    result: waveform.Envelope = .{},
 };
+
+/// Поставить огибающую на место старой — и старую отдать.
+///
+/// Огибающая теперь в куче (#84), и молча перезаписать её значит потерять
+/// память на каждом открытии файла. Зовётся только из потока окна:
+/// рисование читает те же столбцы, и освобождать их из другого потока
+/// нельзя.
+fn replaceWave(index: usize, made: waveform.Envelope) void {
+    if (index >= ed.waves.len) return;
+    ed.waves[index].deinit(ed.allocator);
+    ed.waves[index] = made;
+}
+
+/// Отдать все огибающие: при закрытии окна и при новом проекте.
+fn dropWaves() void {
+    for (&ed.waves) |*wave| wave.deinit(ed.allocator);
+}
 
 /// Посчитать волну в стороне от окна.
 fn startWave(path: []const u8, source: u16) void {
@@ -3505,7 +3525,7 @@ fn startWave(path: []const u8, source: u16) void {
         // Поток не завёлся — считаем прямо здесь. Лучше подождать,
         // чем остаться без волны.
         ed.allocator.destroy(job);
-        ed.waves[source] = waveform.read(path) catch .{};
+        replaceWave(source, waveform.read(ed.allocator, path) catch .{});
         return;
     };
     // Не ждём его: он сам сообщит окну, когда досчитает.
@@ -3513,12 +3533,24 @@ fn startWave(path: []const u8, source: u16) void {
 }
 
 fn waveWorker(job: *WaveJob) void {
-    const made = waveform.read(job.path[0..job.len]) catch waveform.Envelope{};
-    if (job.source < ed.waves.len) ed.waves[job.source] = made;
-    // Просим окно перерисоваться из его же потока: трогать окно из чужого
-    // потока нельзя, а сообщение — можно.
-    _ = c.PostMessageW(ed.hwnd, wm_wave_ready, 0, 0);
+    job.result = waveform.read(ed.allocator, job.path[0..job.len]) catch waveform.Envelope{};
+    // Готовое отдаём окну сообщением, а не пишем в его массив отсюда:
+    // окно в этот момент может рисовать старую огибающую, и подменить её
+    // из чужого потока значит выдернуть память из-под кисти. Указатель
+    // на работу едет в wParam; он из кучи и выровнен — это не дескриптор.
+    _ = c.PostMessageW(ed.hwnd, wm_wave_ready, @intFromPtr(job), 0);
+}
+
+/// Пришла готовая волна: поставить на место и перерисовать.
+fn onWaveReady(wp: c.WPARAM) void {
+    if (wp == 0) {
+        refresh();
+        return;
+    }
+    const job: *WaveJob = @ptrFromInt(@as(usize, @bitCast(wp)));
+    replaceWave(job.source, job.result);
     ed.allocator.destroy(job);
+    refresh();
 }
 
 // ------------------------------------------------------------- недавние
@@ -3742,7 +3774,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             return 0;
         },
         wm_wave_ready => {
-            refresh();
+            onWaveReady(wp);
             return 0;
         },
         wm_frame_ready => {
@@ -3827,6 +3859,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
         c.WM_DESTROY => {
             if (ed.name_box != null) finishRename(false);
             ed.frames.stop();
+            dropWaves();
             c.PostQuitMessage(0);
             return 0;
         },
