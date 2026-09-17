@@ -39,6 +39,8 @@ const usage =
     \\        самопроверка открытия: быстрый путь и медленный дают одно
     \\  zigrec ui-smoke
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
+    \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
+    \\        самопроверка громкости: свести с кривой и проверить, что она слышна
     \\  zigrec remote-smoke
     \\        самопроверка пульта: подписи влезают, пульт не в кадре
     \\  zigrec hotkey-smoke [СОЧЕТАНИЕ]
@@ -198,6 +200,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "ui-smoke")) {
         code = try uiSmoke(arena, w);
+    } else if (eq(cmd, "mix-smoke")) {
+        if (args.len < 4) {
+            try w.writeAll("нужны исходник и куда писать смесь\n");
+            code = 2;
+        } else {
+            code = try mixSmoke(init.io, arena, w, args[2], args[3]);
+        }
     } else if (eq(cmd, "remote-smoke")) {
         code = try remoteSmoke(w);
     } else if (eq(cmd, "hotkey-smoke")) {
@@ -1288,6 +1297,182 @@ fn checkWindow(w: anytype, name: []const u8, got: anyerror!zigrec.ui.Layout) !bo
     }
     try w.print("[ui] {s}: всё поместилось, под кнопками не рисуем\n", .{name});
     return false;
+}
+
+/// Самопроверка громкости и кривой громкости.
+///
+/// Задачи #61 и #62. Нарисованная кривая, которая ничего не меняет в звуке, —
+/// это картинка, а не громкость, и отличить одно от другого по окну нельзя:
+/// линия выглядит одинаково в обоих случаях.
+///
+/// Здесь берётся настоящий файл, из него собирается проект с известной
+/// кривой — от «как записано» в начале до минус двадцати децибел в конце, —
+/// смесь пишется в WAV, и он тут же читается обратно и меряется. Ожидаемые
+/// числа считаются из той же кривой, но другим путём: не сведением,
+/// а прямо по правилу.
+fn mixSmoke(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    w: anytype,
+    src_path: []const u8,
+    out_path: []const u8,
+) !u8 {
+    const timeline = zigrec.timeline;
+    const volume = zigrec.volume;
+    const mixdown = zigrec.mixdown;
+
+    var audio = zigrec.audio_read.read(allocator, src_path) catch |err| {
+        try w.print("[mix] ПРОВАЛ: {s}: {s}\n", .{ src_path, zigrec.audio_read.explain(err) });
+        return 1;
+    };
+    defer audio.deinit(allocator);
+
+    const len_ns = audio.durationNs();
+    try w.print("[mix] исходник {s}: {d} Гц, {d:.2} с, отсчётов {d}\n", .{
+        std.fs.path.basename(src_path),
+        audio.rate,
+        @as(f64, @floatFromInt(len_ns)) / @as(f64, std.time.ns_per_s),
+        audio.samples.len,
+    });
+    if (len_ns < std.time.ns_per_s) {
+        try w.writeAll("[mix] ПРОВАЛ: исходник короче секунды, мерить нечего\n");
+        return 1;
+    }
+
+    // Проект: одна звуковая дорожка, весь исходник, кривая вниз на 20 дБ.
+    const project = try allocator.create(timeline.Project);
+    defer allocator.destroy(project);
+    project.* = .{};
+    const source = project.addSource(src_path, len_ns) catch return 1;
+    _ = project.addTrack(.audio, "Звук") catch return 1;
+    project.place(0, source, 0, len_ns) catch return 1;
+
+    const fall_db10: volume.Db10 = -200;
+    _ = project.addCurvePoint(0, 0, 0) catch return 1;
+    _ = project.addCurvePoint(0, len_ns, fall_db10) catch return 1;
+
+    const rate: u32 = audio.rate;
+    const out = try allocator.alloc(i16, mixdown.totalSamples(project, rate));
+    defer allocator.free(out);
+    mixdown.mix(project, rate, &.{audio.forMix()}, out);
+
+    // Пишем WAV и тут же читаем его обратно: мерить то, что осталось
+    // в памяти, значит не проверить ни запись, ни чтение.
+    {
+        var buf: [1 << 16]u8 = undefined;
+        var file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch |err| {
+            try w.print("[mix] ПРОВАЛ: не создать {s}: {s}\n", .{ out_path, @errorName(err) });
+            return 1;
+        };
+        defer file.close(io);
+        var fw = file.writer(io, &buf);
+        zigrec.wav.write(&fw.interface, rate, 1, out) catch |err| {
+            try w.print("[mix] ПРОВАЛ: не записать WAV: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        fw.interface.flush() catch {};
+    }
+
+    const back = std.Io.Dir.cwd().readFileAlloc(io, out_path, allocator, .limited(1 << 28)) catch |err| {
+        try w.print("[mix] ПРОВАЛ: не прочитать обратно {s}: {s}\n", .{ out_path, @errorName(err) });
+        return 1;
+    };
+    defer allocator.free(back);
+    const info = zigrec.wav.parse(back) catch |err| {
+        try w.print("[mix] ПРОВАЛ: свой же WAV не разбирается: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    try w.print("[mix] смесь {s}: {d} Гц, каналов {d}, {d:.2} с\n", .{
+        std.fs.path.basename(out_path),
+        info.sample_rate,
+        info.channels,
+        info.durationSeconds(),
+    });
+
+    // Уровень исходника: всё считается относительно него, а не абсолютно.
+    const src_peak = peakOfFloats(audio.samples);
+    const src_db = toDb(src_peak);
+    try w.print("[mix] уровень исходника {d:.2} дБ\n", .{src_db});
+
+    var bad: u8 = 0;
+    const spots = [_]f64{ 0.05, 0.5, 0.95 };
+    for (spots) |part| {
+        const at_ns: u64 = @intFromFloat(@as(f64, @floatFromInt(len_ns)) * part);
+        // Ожидание считаем прямо по правилу кривой, а не спрашиваем сведение:
+        // иначе стенд проверял бы сведение им же самим.
+        const want_db = src_db + @as(f64, @floatFromInt(fall_db10)) / 10.0 * part;
+
+        const from = @as(usize, @intFromFloat(@as(f64, @floatFromInt(at_ns)) / 1e9 * @as(f64, @floatFromInt(rate))));
+        const window = rate / 20; // двадцатая доля секунды
+        const got_db = toDb(peakOfPcm(back, info, from, window));
+
+        const gap = @abs(got_db - want_db);
+        try w.print("[mix] на {d:.0}%: ждали {d:.2} дБ, вышло {d:.2} дБ, разница {d:.2}\n", .{
+            part * 100, want_db, got_db, gap,
+        });
+        // Полтора децибела: смесь берёт пик в короткое окно, и на спуске
+        // он неизбежно чуть отстаёт от точного значения кривой.
+        if (gap > 1.5) {
+            try w.writeAll("[mix] ПРОВАЛ: громкость не пошла по кривой\n");
+            bad = 1;
+        }
+    }
+
+    // И проверка проверки: без кривой те же места должны звучать ровно.
+    project.setCurveOn(0, false) catch {};
+    mixdown.mix(project, rate, &.{audio.forMix()}, out);
+    const flat_start = toDb(peakOfSamples(out, 0, rate / 20));
+    const flat_end = toDb(peakOfSamples(out, out.len -| (rate / 20), rate / 20));
+    try w.print("[mix] без кривой: начало {d:.2} дБ, конец {d:.2} дБ\n", .{ flat_start, flat_end });
+    if (@abs(flat_start - flat_end) > 1.0) {
+        try w.writeAll("[mix] ПРОВАЛ: выключенная кривая всё равно меняет громкость\n");
+        bad = 1;
+    }
+    if (@abs(flat_start - src_db) > 1.0) {
+        try w.writeAll("[mix] ПРОВАЛ: без правок смесь звучит не как исходник\n");
+        bad = 1;
+    }
+
+    if (bad != 0) return 1;
+    try w.writeAll("[mix] ГРОМКОСТЬ ИДЁТ ПО КРИВОЙ\n");
+    return 0;
+}
+
+fn toDb(peak: f64) f64 {
+    if (peak <= 0) return -120;
+    return 20.0 * std.math.log10(peak);
+}
+
+fn peakOfFloats(samples: []const f32) f64 {
+    var peak: f64 = 0;
+    for (samples) |v| {
+        const a = @abs(@as(f64, v));
+        if (a > peak) peak = a;
+    }
+    return peak;
+}
+
+fn peakOfSamples(samples: []const i16, from: usize, count: usize) f64 {
+    var peak: f64 = 0;
+    var i = from;
+    const to = @min(from + count, samples.len);
+    while (i < to) : (i += 1) {
+        const v = @as(f64, @floatFromInt(samples[i]));
+        const a = if (v < 0) -v / 32768.0 else v / 32767.0;
+        if (a > peak) peak = a;
+    }
+    return peak;
+}
+
+fn peakOfPcm(bytes: []const u8, info: zigrec.wav.Info, from: usize, count: usize) f64 {
+    var peak: f64 = 0;
+    var i = from;
+    const to = @min(from + count, info.frameCount());
+    while (i < to) : (i += 1) {
+        const a = @abs(@as(f64, zigrec.wav.sampleAt(bytes, info, i)));
+        if (a > peak) peak = a;
+    }
+    return peak;
 }
 
 /// Самопроверка пульта управления съёмкой.

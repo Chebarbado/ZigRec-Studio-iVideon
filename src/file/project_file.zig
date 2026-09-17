@@ -49,16 +49,29 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
             @intFromBool(track.muted),
             track.title(),
         });
+        // Громкость дорожки отдельной строкой, а не в конце строки
+        // `track`: там имя дорожки, и оно занимает весь остаток строки.
+        // Незнакомое слово прежнее поколение пропускает, поэтому файл
+        // остаётся читаемым и для него — без громкости, но целиком.
+        if (track.gain_db10 != 0 or track.curve_on) {
+            try w.print("gain {d} {d}\n", .{ track.gain_db10, @intFromBool(track.curve_on) });
+        }
+        for (track.curve.list()) |p| {
+            try w.print("point {d} {d}\n", .{ p.at_ns, p.db10 });
+        }
+
         for (track.list()) |clip| {
-            // Пятое число — номер связки. Дописано в конец строки нарочно:
-            // прежнее поколение читает первые четыре и просто не заметит
-            // пятого. Связка потеряется, проект — нет.
-            try w.print("clip {d} {d} {d} {d} {d}\n", .{
+            // Пятое число — номер связки, шестое — громкость клипа.
+            // Дописаны в конец строки нарочно: прежнее поколение читает
+            // первые четыре и просто не заметит остальных. Связка
+            // и громкость потеряются, проект — нет.
+            try w.print("clip {d} {d} {d} {d} {d} {d}\n", .{
                 clip.source,
                 clip.in_ns,
                 clip.len_ns,
                 clip.at_ns,
                 clip.link,
+                clip.gain_db10,
             });
         }
     }
@@ -113,6 +126,25 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             continue;
         }
 
+        if (std.mem.eql(u8, word, "gain")) {
+            const track = current_track orelse return Error.Malformed;
+            const db10 = parseI16(parts.next()) orelse return Error.Malformed;
+            // Признака может не быть: строку писала версия, в которой
+            // кривой ещё не было. Тогда её нет — это честнее, чем включить.
+            const on = parseU64(parts.next()) orelse 0;
+            project.tracks[track].gain_db10 = timeline.Volume.clamp(db10);
+            project.tracks[track].curve_on = on != 0;
+            continue;
+        }
+
+        if (std.mem.eql(u8, word, "point")) {
+            const track = current_track orelse return Error.Malformed;
+            const at_ns = parseU64(parts.next()) orelse return Error.Malformed;
+            const db10 = parseI16(parts.next()) orelse return Error.Malformed;
+            _ = project.tracks[track].curve.add(at_ns, db10) catch return Error.TooBig;
+            continue;
+        }
+
         if (std.mem.eql(u8, word, "clip")) {
             const track = current_track orelse return Error.Malformed;
             const source = parseU64(parts.next()) orelse return Error.Malformed;
@@ -122,12 +154,15 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             // Номера связки может не быть: файл от прежнего поколения.
             // Тогда клип сам по себе — это честнее, чем придумать ему связь.
             const link = parseU64(parts.next()) orelse 0;
+            // Громкости может не быть — тогда клип звучит как записан.
+            const gain_db10 = parseI16(parts.next()) orelse 0;
             project.tracks[track].clips[project.tracks[track].count] = .{
                 .source = @intCast(source),
                 .in_ns = in_ns,
                 .len_ns = len_ns,
                 .at_ns = at_ns,
                 .link = @truncate(link),
+                .gain_db10 = timeline.Volume.clamp(gain_db10),
             };
             // Счётчик связок должен обгонять всё, что прочитано: иначе
             // следующая связка получила бы уже занятый номер.
@@ -157,6 +192,12 @@ fn parseU64(maybe: ?[]const u8) ?u64 {
     return std.fmt.parseInt(u64, text, 10) catch null;
 }
 
+/// Громкость бывает отрицательной, и беззнаковым разбором её не прочесть.
+fn parseI16(maybe: ?[]const u8) ?i16 {
+    const text = maybe orelse return null;
+    return std.fmt.parseInt(i16, text, 10) catch null;
+}
+
 /// Объяснение словами — для окна.
 pub fn explain(err: anyerror) []const u8 {
     return switch (err) {
@@ -175,6 +216,19 @@ const sec = std.time.ns_per_s;
 fn makeProject() !*timeline.Project {
     const p = try std.testing.allocator.create(timeline.Project);
     p.* = .{};
+    return p;
+}
+
+/// Проект с дорожками и клипом — для проверок громкости.
+fn withTracks() !*timeline.Project {
+    const p = try makeProject();
+    _ = try p.addSource("D:\\видео\\запись.mp4", 60 * sec);
+    _ = try p.addTrack(.video, "Видео");
+    _ = try p.addTrack(.audio, "Микрофон");
+    try p.place(1, 0, 0, 10 * sec);
+    // Расставленное — это ещё не правка: отменять здесь нечего.
+    p.past = 0;
+    p.future = 0;
     return p;
 }
 
@@ -369,4 +423,96 @@ test "файл прежнего поколения без номера связ�
         \\
     );
     try std.testing.expectEqual(@as(u16, 0), p.tracks[0].clips[0].link);
+}
+
+test "громкость дорожки, клипа и кривая переживают запись и чтение" {
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+    try p.setTrackGain(1, -75);
+    try p.setClipGain(1, 0, -35);
+    _ = try p.addCurvePoint(1, 0, 0);
+    _ = try p.addCurvePoint(1, 5 * sec, -200);
+    _ = try p.addCurvePoint(1, 9 * sec, 40);
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+
+    const back = try makeProject();
+    defer std.testing.allocator.destroy(back);
+    try read(back, w.buffered());
+
+    try std.testing.expectEqual(@as(i16, -75), back.tracks[1].gain_db10);
+    try std.testing.expectEqual(@as(i16, -35), back.tracks[1].clips[0].gain_db10);
+    try std.testing.expect(back.tracks[1].curve_on);
+    try std.testing.expectEqual(@as(usize, 3), back.tracks[1].curve.count);
+    // И считается она обратно тем же числом, а не похожим.
+    try std.testing.expectEqual(p.gainAt(1, 2 * sec), back.gainAt(1, 2 * sec));
+    try std.testing.expectEqual(p.gainAt(1, 7 * sec), back.gainAt(1, 7 * sec));
+}
+
+test "выключенная кривая пишется выключенной и с точками" {
+    // Её выключают, чтобы сравнить с ней и без неё. Нарисованное обязано
+    // пережить закрытие окна, иначе сравнивать будет не с чем.
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addCurvePoint(1, sec, -120);
+    try p.setCurveOn(1, false);
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+
+    const back = try makeProject();
+    defer std.testing.allocator.destroy(back);
+    try read(back, w.buffered());
+
+    try std.testing.expect(!back.tracks[1].curve_on);
+    try std.testing.expectEqual(@as(usize, 1), back.tracks[1].curve.count);
+}
+
+test "проект без громкости не пишет о ней лишних строк" {
+    // Файл читают глазами. Строка «gain 0 0» у каждой дорожки — это шум,
+    // который не несёт ничего.
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "gain ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "point ") == null);
+}
+
+test "файл прежнего поколения без громкости читается как «как записано»" {
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+    try read(p,
+        \\zigrec-project 1
+        \\source 60000000000 а.mp4
+        \\track audio 0 Микрофон
+        \\clip 0 0 1000000000 0 0
+        \\
+    );
+    try std.testing.expectEqual(@as(i16, 0), p.tracks[0].gain_db10);
+    try std.testing.expectEqual(@as(i16, 0), p.tracks[0].clips[0].gain_db10);
+    try std.testing.expect(!p.tracks[0].curve_on);
+    try std.testing.expectEqual(@as(i16, 0), p.gainAt(0, 0));
+}
+
+test "громкость из файла прижимается к пределам" {
+    // Файл правят руками — это его свойство, а не беда. Написанное там
+    // «999 дБ» не должно оглушить.
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+    try read(p,
+        \\zigrec-project 1
+        \\source 60000000000 а.mp4
+        \\track audio 0 Микрофон
+        \\gain 9990 1
+        \\clip 0 0 1000000000 0 0 -9990
+        \\
+    );
+    try std.testing.expectEqual(timeline.Volume.max_db10, p.tracks[0].gain_db10);
+    try std.testing.expectEqual(timeline.Volume.min_db10, p.tracks[0].clips[0].gain_db10);
 }

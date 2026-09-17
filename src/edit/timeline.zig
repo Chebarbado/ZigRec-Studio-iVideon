@@ -16,6 +16,10 @@
 //! Связку можно снять — и тогда звук двигается, режется и выбрасывается
 //! сам по себе. Так делают, когда звук нарочно кладут под другую картинку.
 const std = @import("std");
+const volume = @import("../sound/volume.zig");
+
+/// Громкость наружу, чтобы окно не тянуло звуковой модуль отдельно.
+pub const Volume = volume;
 
 pub const TrackKind = enum {
     video,
@@ -39,6 +43,14 @@ pub const Clip = struct {
     len_ns: u64 = 0,
     /// Где он стоит на дорожке.
     at_ns: u64 = 0,
+    /// Насколько этот кусок тише или громче остального, в десятых долях
+    /// децибела. Ноль — как записано.
+    ///
+    /// Громкость клипа отдельно от громкости дорожки: «сделать всю дорожку
+    /// тише» и «сделать тише вот этот кусок» — разные желания, и второе
+    /// не должно пропадать, когда поправили первое.
+    gain_db10: volume.Db10 = 0,
+
     /// Номер связки: клипы с одним номером ходят вместе. Ноль — сам по себе.
     ///
     /// Номер, а не ссылка на соседа: соседей бывает больше двух (видео
@@ -96,6 +108,14 @@ pub const Track = struct {
     name_len: usize = 0,
     /// Дорожку не видно и не слышно, но она никуда не делась.
     muted: bool = false,
+    /// Громкость всей дорожки, в десятых долях децибела.
+    gain_db10: volume.Db10 = 0,
+    /// Считать ли кривую громкости. Выключенная кривая не стирается:
+    /// её выключают, чтобы сравнить с ней и без неё, и нарисованное
+    /// должно пережить такое сравнение.
+    curve_on: bool = false,
+    /// Ломаная громкости поверх дорожки, как в Logic.
+    curve: volume.Curve = .{},
     clips: [max_clips]Clip = @splat(.{}),
     count: usize = 0,
 
@@ -840,6 +860,107 @@ pub const Project = struct {
         const tr = try self.track(track_index);
         tr.muted = muted;
     }
+
+    // ----------------------------------------------------------- громкость
+
+    /// Громкость всей дорожки.
+    pub fn setTrackGain(self: *Project, track_index: usize, db10: volume.Db10) Error!void {
+        const want = volume.clamp(db10);
+        const t = try self.track(track_index);
+        // Ползунок шлёт сообщение на каждую точку своего хода. Запоминать
+        // снимок на каждую — значит забить журнал отмен одним движением
+        // мыши и потерять всё, что было до него.
+        if (t.gain_db10 == want) return;
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.gain_db10 = want;
+    }
+
+    /// Громкость одного клипа.
+    pub fn setClipGain(self: *Project, track_index: usize, clip_index: usize, db10: volume.Db10) Error!void {
+        const want = volume.clamp(db10);
+        const t = try self.track(track_index);
+        if (clip_index >= t.count) return Error.NoSuchThing;
+        if (t.clips[clip_index].gain_db10 == want) return;
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.clips[clip_index].gain_db10 = want;
+    }
+
+    /// Включить или выключить кривую. Нарисованное при этом не стирается.
+    pub fn setCurveOn(self: *Project, track_index: usize, on: bool) Error!void {
+        const t = try self.track(track_index);
+        if (t.curve_on == on) return;
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.curve_on = on;
+    }
+
+    /// Поставить точку кривой. Возвращает её номер.
+    ///
+    /// Первая же поставленная точка включает кривую: человек ткнул в линию,
+    /// чтобы она заработала, а не чтобы нарисовать её и потом искать,
+    /// где её включают.
+    pub fn addCurvePoint(self: *Project, track_index: usize, at_ns: u64, db10: volume.Db10) Error!usize {
+        const t = try self.track(track_index);
+        // Считаем ДО снимка: кривая могла оказаться полной, и тогда снимок
+        // был бы потрачен на несостоявшееся действие.
+        var probe_curve = t.curve;
+        const where = probe_curve.add(at_ns, db10) catch return Error.TooManyClips;
+
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.curve = probe_curve;
+        tr.curve_on = true;
+        return where;
+    }
+
+    /// Передвинуть точку. Возвращает её новый номер: она могла перепрыгнуть
+    /// соседа, а рисование и попадание мышью ждут точки по порядку.
+    pub fn moveCurvePoint(
+        self: *Project,
+        track_index: usize,
+        point: usize,
+        at_ns: u64,
+        db10: volume.Db10,
+    ) Error!usize {
+        const t = try self.track(track_index);
+        if (point >= t.curve.count) return Error.NoSuchThing;
+        const before = t.curve.points[point];
+        if (before.at_ns == at_ns and before.db10 == volume.clamp(db10)) return point;
+
+        var probe_curve = t.curve;
+        const where = probe_curve.moveTo(point, at_ns, db10) catch return Error.NoSuchThing;
+
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.curve = probe_curve;
+        return where;
+    }
+
+    pub fn removeCurvePoint(self: *Project, track_index: usize, point: usize) Error!void {
+        const t = try self.track(track_index);
+        if (point >= t.curve.count) return Error.NoSuchThing;
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.curve.removeAt(point) catch unreachable;
+    }
+
+    /// Насколько тише или громче звучит дорожка в этой точке времени.
+    ///
+    /// Складываются три вещи: громкость дорожки, кривая и громкость того
+    /// клипа, который в этой точке стоит. Заглушённая дорожка молчит,
+    /// что бы ни было накручено в остальном.
+    pub fn gainAt(self: *const Project, track_index: usize, at_ns: u64) volume.Db10 {
+        if (track_index >= self.track_count) return volume.unity;
+        const t = &self.tracks[track_index];
+        if (t.muted) return volume.min_db10;
+
+        var total = t.gain_db10;
+        if (t.curve_on and !t.curve.empty()) total = volume.sum(total, t.curve.valueAt(at_ns));
+        if (t.clipAt(at_ns)) |i| total = volume.sum(total, t.clips[i].gain_db10);
+        return total;
+    }
 };
 
 // ---------------------------------------------------------------- тесты
@@ -1489,4 +1610,149 @@ test "у пустого проекта нет ненулевых умолчан�
     plain.* = .{};
     zeroed.* = std.mem.zeroes(Project);
     try std.testing.expect(std.meta.eql(plain.*, zeroed.*));
+}
+
+// ------------------------------------------------- громкость и кривая
+
+test "громкость дорожки и клипа складываются, а не спорят" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(1, 0, 0, 10 * sec);
+
+    try p.setTrackGain(1, -60);
+    try p.setClipGain(1, 0, -60);
+    // Минус шесть и ещё минус шесть — это минус двенадцать.
+    try std.testing.expectEqual(@as(volume.Db10, -120), p.gainAt(1, sec));
+}
+
+test "заглушённая дорожка молчит, что бы ни было накручено" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(1, 0, 0, 10 * sec);
+
+    try p.setTrackGain(1, 120);
+    try p.setMuted(1, true);
+    try std.testing.expect(volume.silent(p.gainAt(1, sec)));
+}
+
+test "громкость там, где клипа нет, — это громкость дорожки" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(1, 0, 0, 5 * sec);
+    try p.setTrackGain(1, -100);
+    try p.setClipGain(1, 0, -200);
+
+    try std.testing.expectEqual(@as(volume.Db10, -300), p.gainAt(1, sec));
+    // За концом клипа его собственная громкость ни при чём.
+    try std.testing.expectEqual(@as(volume.Db10, -100), p.gainAt(1, 9 * sec));
+}
+
+test "движение ползунка на то же число не тратит шаг отмены" {
+    // Ползунок шлёт сообщение на каждую свою точку. Снимок на каждое
+    // значил бы, что одно движение мыши выбрасывает весь журнал отмен.
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.setTrackGain(1, -60);
+    const after_first = p.past;
+    try p.setTrackGain(1, -60);
+    try p.setTrackGain(1, -60);
+    try std.testing.expectEqual(after_first, p.past);
+}
+
+test "громкость отменяется наравне с резкой" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(1, 0, 0, 10 * sec);
+
+    try p.setTrackGain(1, -200);
+    try std.testing.expectEqual(@as(volume.Db10, -200), p.tracks[1].gain_db10);
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(@as(volume.Db10, 0), p.tracks[1].gain_db10);
+    try std.testing.expect(p.redo());
+    try std.testing.expectEqual(@as(volume.Db10, -200), p.tracks[1].gain_db10);
+}
+
+test "первая точка кривой включает кривую" {
+    // Человек ткнул в линию, чтобы она заработала, а не чтобы потом искать,
+    // где её включают.
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try std.testing.expect(!p.tracks[1].curve_on);
+    _ = try p.addCurvePoint(1, sec, -60);
+    try std.testing.expect(p.tracks[1].curve_on);
+}
+
+test "выключенная кривая не стирается и не считается" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(1, 0, 0, 10 * sec);
+    _ = try p.addCurvePoint(1, 0, -120);
+    try std.testing.expectEqual(@as(volume.Db10, -120), p.gainAt(1, sec));
+
+    try p.setCurveOn(1, false);
+    try std.testing.expectEqual(@as(volume.Db10, 0), p.gainAt(1, sec));
+    // Но нарисованное на месте: выключают, чтобы сравнить, а не чтобы стереть.
+    try std.testing.expectEqual(@as(usize, 1), p.tracks[1].curve.count);
+}
+
+test "кривая, дорожка и клип складываются вместе" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(1, 0, 0, 10 * sec);
+
+    try p.setTrackGain(1, -30);
+    try p.setClipGain(1, 0, -30);
+    _ = try p.addCurvePoint(1, 0, -60);
+    _ = try p.addCurvePoint(1, 10 * sec, -60);
+
+    try std.testing.expectEqual(@as(volume.Db10, -120), p.gainAt(1, 5 * sec));
+}
+
+test "точка кривой отменяется" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addCurvePoint(1, sec, -60);
+    _ = try p.addCurvePoint(1, 2 * sec, -120);
+    try std.testing.expectEqual(@as(usize, 2), p.tracks[1].curve.count);
+
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(@as(usize, 1), p.tracks[1].curve.count);
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(@as(usize, 0), p.tracks[1].curve.count);
+    // И кривая выключилась обратно вместе с первой точкой.
+    try std.testing.expect(!p.tracks[1].curve_on);
+}
+
+test "точку кривой можно двигать и убирать" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addCurvePoint(1, sec, 0);
+    _ = try p.addCurvePoint(1, 3 * sec, 0);
+
+    const now = try p.moveCurvePoint(1, 0, 5 * sec, -60);
+    try std.testing.expectEqual(@as(usize, 1), now);
+    try std.testing.expectEqual(@as(volume.Db10, -60), p.tracks[1].curve.valueAt(5 * sec));
+
+    try p.removeCurvePoint(1, 1);
+    try std.testing.expectEqual(@as(usize, 1), p.tracks[1].curve.count);
+}
+
+test "чужой номер дорожки или точки — отказ, а не порча соседней" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try std.testing.expectError(Error.NoSuchThing, p.setTrackGain(9, -60));
+    try std.testing.expectError(Error.NoSuchThing, p.setClipGain(1, 0, -60));
+    try std.testing.expectError(Error.NoSuchThing, p.removeCurvePoint(1, 0));
+    try std.testing.expectError(Error.NoSuchThing, p.moveCurvePoint(1, 0, sec, 0));
+    // Ни одно из этих обращений не потратило шаг отмены.
+    try std.testing.expectEqual(@as(usize, 0), p.past);
+}
+
+test "громкость не вылезает за пределы, откуда бы ни пришла" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.setTrackGain(1, 30000);
+    try std.testing.expectEqual(volume.max_db10, p.tracks[1].gain_db10);
+    try p.setTrackGain(1, -30000);
+    try std.testing.expectEqual(volume.min_db10, p.tracks[1].gain_db10);
 }

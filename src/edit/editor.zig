@@ -15,6 +15,12 @@ const timeline = @import("timeline.zig");
 const view_mod = @import("editor_view.zig");
 const media = @import("../file/media.zig");
 const waveform = @import("../file/waveform.zig");
+const audio_read = @import("../file/audio_read.zig");
+const mixdown = @import("mixdown.zig");
+const zigwav = @import("../sound/wav.zig");
+const mic = @import("../sound/mic.zig");
+const sound_track = @import("../sound/track.zig");
+const recorder = @import("../app/recorder.zig");
 const project_file = @import("../file/project_file.zig");
 const pack = @import("../file/project_pack.zig");
 const player_mod = @import("../file/player.zig");
@@ -47,6 +53,7 @@ const id_menu_save = 302;
 const id_menu_save_as = 304;
 const id_menu_save_bundle = 305;
 const id_menu_close = 303;
+const id_menu_mixdown = 306;
 /// Номера строк в списках недавних. Два ряда подряд, по одному на список.
 const id_recent_rec = 700;
 const id_recent_view = 740;
@@ -64,6 +71,7 @@ var preview_h: i32 = 260;
 /// Такт воспроизведения. Тридцать раз в секунду: чаще человек не заметит,
 /// реже — заметит рывки.
 const timer_play = 1;
+const timer_mic = 2;
 
 /// Дескриптор курсора — не адрес, а номер в таблице ядра, и выровнен он
 /// как попало. Приведение его к типизированному указателю Zig в безопасном
@@ -120,7 +128,7 @@ fn apart() bool {
 const cs_dblclks: c.UINT = 0x0008;
 
 /// Что человек тянет мышью прямо сейчас.
-const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll };
+const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point };
 
 const Editor = struct {
     allocator: std.mem.Allocator,
@@ -136,6 +144,19 @@ const Editor = struct {
     sel_clip: usize = 0,
 
     drag: Drag = .none,
+    /// Какую точку кривой тянут. Значимо только при `drag == .curve_point`.
+    curve_point: usize = 0,
+
+    // ------------------------------------------------ запись с микрофона
+
+    /// На какую дорожку пишем. `null` — не пишем.
+    rec_track: ?usize = null,
+    /// С какого места дорожки началась запись.
+    rec_at_ns: u64 = 0,
+    /// Когда нажали «писать» — по тем же часам, что у всего остального.
+    rec_started_ns: u64 = 0,
+    /// Накопленные отсчёты. Пишутся в файл, когда запись остановят.
+    rec_samples: std.ArrayList(i16) = .empty,
     /// Смещение от начала клипа до точки захвата — чтобы клип не прыгал
     /// под курсор своим левым краем.
     drag_grab_ns: u64 = 0,
@@ -218,6 +239,10 @@ const col_playhead: c.COLORREF = 0x002020C0;
 const col_ruler: c.COLORREF = 0x00FAFAFA;
 const col_text: c.COLORREF = 0x00303030;
 const col_muted: c.COLORREF = 0x00BFBFBF;
+const col_curve: c.COLORREF = 0x00D07020;
+const col_curve_dot: c.COLORREF = 0x00F09030;
+const col_slider: c.COLORREF = 0x00C0C0C0;
+const col_slider_on: c.COLORREF = 0x00707070;
 
 fn solid(dc: c.HDC, rect: c.RECT, color: c.COLORREF) void {
     var r = rect;
@@ -501,16 +526,160 @@ fn drawTracks(dc: c.HDC, width: i32, height: i32) void {
         // Левая колонка: имя и что за дорожка.
         solid(dc, .{ .left = 0, .top = top, .right = view_mod.header_w, .bottom = bottom }, 0x00FFFFFF);
         line(dc, view_mod.header_w - 1, top, view_mod.header_w - 1, bottom, col_lane_line, 1);
-        drawText(dc, 10, top + 8, track.title(), col_text);
+        // Имя обрезаем по букве, а не по месту: под кнопкой микрофона
+        // от него осталась бы половина последней буквы, то есть ромб
+        // с вопросительным знаком.
+        const name_room: usize = if (track.kind == .audio) 16 else 22;
+        const shown_name = track.title()[0..timeline.fitName(track.title(), name_room)];
+        drawText(dc, 10, top + 8, shown_name, col_text);
 
-        var kind_buf: [64]u8 = undefined;
-        const kind_text = std.fmt.bufPrint(&kind_buf, "{s}{s}", .{
-            track.kind.label(),
-            if (track.muted) " · выключена" else "",
-        }) catch track.kind.label();
-        drawText(dc, 10, top + 28, kind_text, if (track.muted) col_muted else 0x00808080);
+        // Вид дорожки и её громкость — одной строкой. Двумя строками они
+        // не помещаются: под ними ещё ползунок, и число налезало бы на слово.
+        var kind_buf: [96]u8 = undefined;
+        var db_buf: [32]u8 = undefined;
+        const kind_text = if (track.kind == .audio)
+            std.fmt.bufPrint(&kind_buf, "{s}{s} · {s}", .{
+                track.kind.label(),
+                if (track.muted) " · выключена" else "",
+                timeline.Volume.text(&db_buf, track.gain_db10),
+            }) catch track.kind.label()
+        else
+            std.fmt.bufPrint(&kind_buf, "{s}{s}", .{
+                track.kind.label(),
+                if (track.muted) " · выключена" else "",
+            }) catch track.kind.label();
+        drawText(dc, 10, top + 26, kind_text, if (track.muted) col_muted else 0x00808080);
+
+        if (track.kind == .audio) {
+            drawMicButton(dc, index, top);
+            drawGainRow(dc, track, top);
+        }
 
         drawClips(dc, track, index, top, width);
+        if (track.kind == .audio and track.curve_on) drawCurve(dc, track, index, top, width);
+    }
+}
+
+/// Кнопка микрофона в строке имени дорожки.
+///
+/// Микрофон рисуем сами — кружок на ножке, — а не берём знак из шрифта:
+/// системный шрифт знает не всякий знак, и вместо микрофона легко получить
+/// пустой квадратик. Пока идёт запись, кнопка красная и с квадратом
+/// остановки внутри: по ней видно и что писать можно, и что уже пишется.
+fn drawMicButton(dc: c.HDC, track_index: usize, top: i32) void {
+    const x0 = view_mod.rec_btn_x0;
+    const x1 = view_mod.rec_btn_x1;
+    const y0 = top + view_mod.rec_btn_top;
+    const y1 = y0 + view_mod.rec_btn_h;
+    const writing = ed.rec_track == track_index;
+
+    const back: c.COLORREF = if (writing) 0x002020D0 else 0x00FFFFFF;
+    solid(dc, .{ .left = x0, .top = y0, .right = x1, .bottom = y1 }, back);
+    const frame: c.COLORREF = if (writing) 0x002020D0 else col_slider;
+    line(dc, x0, y0, x1, y0, frame, 1);
+    line(dc, x0, y1 - 1, x1, y1 - 1, frame, 1);
+    line(dc, x0, y0, x0, y1, frame, 1);
+    line(dc, x1 - 1, y0, x1 - 1, y1, frame, 1);
+
+    const ink: c.COLORREF = if (writing) 0x00FFFFFF else 0x00606060;
+    const cx = @divTrunc(x0 + x1, 2);
+    const cy = @divTrunc(y0 + y1, 2);
+    if (writing) {
+        // Квадрат остановки: то же, чем помечают «стоп» везде.
+        solid(dc, .{ .left = cx - 4, .top = cy - 4, .right = cx + 4, .bottom = cy + 4 }, ink);
+        return;
+    }
+    // Головка микрофона и ножка.
+    solid(dc, .{ .left = cx - 2, .top = cy - 6, .right = cx + 3, .bottom = cy + 1 }, ink);
+    line(dc, cx - 4, cy + 1, cx - 4, cy + 3, ink, 1);
+    line(dc, cx + 4, cy + 1, cx + 4, cy + 3, ink, 1);
+    line(dc, cx - 4, cy + 3, cx + 4, cy + 3, ink, 1);
+    line(dc, cx, cy + 3, cx, cy + 6, ink, 1);
+    line(dc, cx - 3, cy + 6, cx + 4, cy + 6, ink, 1);
+}
+
+/// Громкость дорожки: ползунок, число и выключатель кривой.
+///
+/// Число рядом с ползунком обязательно: по одному положению ручки нельзя
+/// сказать, что там сейчас, а «сделать на три децибела тише» — обычная
+/// просьба, а не редкость.
+fn drawGainRow(dc: c.HDC, track: timeline.Track, top: i32) void {
+    const row = view_mod.gainTop(top);
+    const middle = row + view_mod.gain_line_h / 2;
+
+    // Дорожка ползунка.
+    line(dc, view_mod.gain_x0, middle, view_mod.gain_x1, middle, col_slider, 2);
+    const at = view_mod.gainX(track.gain_db10);
+    line(dc, view_mod.gain_x0, middle, at, middle, col_slider_on, 2);
+    // Ручка.
+    solid(dc, .{ .left = at - 3, .top = middle - 6, .right = at + 3, .bottom = middle + 6 }, col_slider_on);
+
+    drawCurveButton(dc, track, row);
+}
+
+/// Выключатель кривой: волнистая черта в рамке.
+///
+/// Волну рисуем сами, а не берём знак из шрифта: системный шрифт знает
+/// не всякий знак, и вместо волны легко получить пустой квадратик — это
+/// уже случалось на кнопках пульта.
+fn drawCurveButton(dc: c.HDC, track: timeline.Track, row: i32) void {
+    const x0 = view_mod.curve_btn_x0;
+    const x1 = view_mod.curve_btn_x1;
+    const y0 = row + 1;
+    const y1 = row + view_mod.gain_line_h - 1;
+    const on = track.curve_on;
+
+    solid(dc, .{ .left = x0, .top = y0, .right = x1, .bottom = y1 }, if (on) col_curve else 0x00FFFFFF);
+    const frame = if (on) col_curve else col_slider;
+    line(dc, x0, y0, x1, y0, frame, 1);
+    line(dc, x0, y1 - 1, x1, y1 - 1, frame, 1);
+    line(dc, x0, y0, x0, y1, frame, 1);
+    line(dc, x1 - 1, y0, x1 - 1, y1, frame, 1);
+
+    // Сама волна: вниз, вверх, вниз — четырьмя отрезками.
+    const ink: c.COLORREF = if (on) 0x00FFFFFF else 0x00808080;
+    const mid = @divTrunc(y0 + y1, 2);
+    const step = @divTrunc(x1 - x0 - 8, 4);
+    var i: i32 = 0;
+    var x = x0 + 4;
+    var y = mid + 3;
+    while (i < 4) : (i += 1) {
+        const ny = if (@mod(i, 2) == 0) mid - 3 else mid + 3;
+        line(dc, x, y, x + step, ny, ink, 1);
+        x += step;
+        y = ny;
+    }
+}
+
+/// Кривая громкости поверх дорожки.
+fn drawCurve(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, width: i32) void {
+    const left = view_mod.header_w;
+    if (width <= left) return;
+
+    // Пустая кривая — всё равно линия: иначе включённая кривая выглядит
+    // как невключённая, и ткнуть в неё некуда.
+    var prev_x = left;
+    var prev_y = view_mod.curveY(top, track.curve.valueAt(ed.view.xToTime(left)));
+    var x = left + 2;
+    while (x <= width) : (x += 2) {
+        const y = view_mod.curveY(top, track.curve.valueAt(ed.view.xToTime(x)));
+        line(dc, prev_x, prev_y, x, y, col_curve, 2);
+        prev_x = x;
+        prev_y = y;
+    }
+
+    // Точки поверх линии.
+    for (track.curve.list(), 0..) |p, i| {
+        const px = ed.view.timeToX(p.at_ns);
+        if (px < left - view_mod.curve_dot or px > width) continue;
+        const py = view_mod.curveY(top, p.db10);
+        const held = ed.drag == .curve_point and ed.sel_track == track_index and ed.curve_point == i;
+        const d = view_mod.curve_dot + @as(i32, if (held) 1 else 0);
+        solid(dc, .{ .left = px - d, .top = py - d, .right = px + d, .bottom = py + d }, col_curve_dot);
+        line(dc, px - d, py - d, px + d, py - d, col_curve, 1);
+        line(dc, px - d, py + d - 1, px + d, py + d - 1, col_curve, 1);
+        line(dc, px - d, py - d, px - d, py + d, col_curve, 1);
+        line(dc, px + d - 1, py - d, px + d - 1, py + d, col_curve, 1);
     }
 }
 
@@ -1004,6 +1173,313 @@ fn askAndSave(bundle: pack.Bundle) void {
     writeProjectTo(utf8[0..len], bundle);
 }
 
+// ------------------------------------------------ запись с микрофона
+
+/// Захват микрофона. Один на окно: писать на две дорожки сразу незачем,
+/// а второй микрофон система всё равно не отдаст.
+var mic_capture: mic.Capture = .{};
+
+/// Кольцо между потоком микрофона и окном.
+///
+/// Заводится в куче: это триста восемьдесят четыре килобайта, и на стеке
+/// им не место. Заводится по первой записи, а не при открытии окна:
+/// редактором пользуются и без микрофона.
+var mic_ring: ?*sound_track.Track = null;
+
+/// Частота, в которой пишем. Та же, в которой сводим: пересчитывать
+/// собственную запись не из-за чего.
+const mic_rate: u32 = 48_000;
+
+/// Нажали микрофон на дорожке.
+fn toggleRecordTo(track_index: usize) void {
+    if (ed.rec_track != null) return stopRecordTo();
+    startRecordTo(track_index);
+}
+
+fn startRecordTo(track_index: usize) void {
+    if (track_index >= ed.project.track_count) return;
+    if (ed.project.tracks[track_index].kind != .audio) return;
+
+    // Во время воспроизведения писать нельзя: указатель едет, и запись
+    // легла бы не туда, куда человек её ставил.
+    if (ed.playing) togglePlay();
+
+    if (mic_ring == null) {
+        mic_ring = ed.allocator.create(sound_track.Track) catch {
+            ed.say("не хватило памяти под запись с микрофона");
+            refresh();
+            return;
+        };
+        mic_ring.?.* = .{};
+    }
+    mic_ring.?.reset();
+    ed.rec_samples.clearRetainingCapacity();
+
+    mic_capture.track = mic_ring;
+    mic_capture.track_rate = mic_rate;
+    mic_capture.start() catch {
+        ed.say("микрофон не поднялся: проверьте, что он есть и разрешён");
+        refresh();
+        return;
+    };
+
+    ed.rec_track = track_index;
+    ed.rec_at_ns = ed.playhead_ns;
+    ed.rec_started_ns = win32.nowNs();
+    _ = c.SetTimer(ed.hwnd, timer_mic, 50, null);
+    ed.say("идёт запись с микрофона; нажмите микрофон ещё раз, чтобы остановить");
+    refresh();
+}
+
+/// Забрать накопленное из кольца. Зовётся по таймеру и ещё раз в конце:
+/// то, что микрофон положил после остановки, тоже наше.
+fn drainMic() void {
+    const from_mic = mic_ring orelse return;
+    var chunk: [4096]i16 = undefined;
+    while (true) {
+        const got = from_mic.pop(&chunk);
+        if (got == 0) break;
+        ed.rec_samples.appendSlice(ed.allocator, chunk[0..got]) catch {
+            // Память кончилась посреди записи: останавливаемся, но то,
+            // что уже записано, не выбрасываем.
+            ed.say("памяти под запись не хватило: останавливаю");
+            stopRecordTo();
+            return;
+        };
+    }
+}
+
+fn onMicTick() void {
+    drainMic();
+    if (ed.rec_track == null) return;
+
+    const elapsed = win32.nowNs() -| ed.rec_started_ns;
+    const level = if (mic_ring != null) mic_capture.ring.level() else mic.Level{};
+    var say: [160]u8 = undefined;
+    const line_text = std.fmt.bufPrint(&say, "запись с микрофона: {d:.1} с, уровень {d:.0} дБ{s}", .{
+        @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s),
+        level.dbfs(),
+        if (level.isClipping()) " — ПЕРЕГРУЗ" else "",
+    }) catch "запись с микрофона";
+    ed.say(line_text);
+    refresh();
+}
+
+fn stopRecordTo() void {
+    const track_index = ed.rec_track orelse return;
+    _ = c.KillTimer(ed.hwnd, timer_mic);
+    mic_capture.stop();
+    // Ещё раз: после остановки в кольце остаётся последний кусок.
+    drainMic();
+    ed.rec_track = null;
+    mic_capture.track = null;
+
+    if (mic_capture.failure) |_| {
+        ed.say("микрофон не отдал звук: запись не получилась");
+        refresh();
+        return;
+    }
+    if (ed.rec_samples.items.len == 0) {
+        ed.say("с микрофона ничего не пришло: запись пустая");
+        refresh();
+        return;
+    }
+
+    var path_buf: [1024]u8 = undefined;
+    const where = micFileName(&path_buf) orelse {
+        ed.say("некуда положить запись: не нашлась папка для файлов");
+        refresh();
+        return;
+    };
+
+    writeMicWav(where) catch |err| {
+        sayError("запись с микрофона не сохранилась", err);
+        return;
+    };
+
+    const len_ns = @as(u64, ed.rec_samples.items.len) * std.time.ns_per_s / mic_rate;
+    const source = ed.project.addSource(where, len_ns) catch {
+        ed.say("исходников в проекте больше не помещается");
+        refresh();
+        return;
+    };
+    ed.project.place(track_index, source, ed.rec_at_ns, len_ns) catch {
+        ed.say("клипов на дорожке больше не помещается");
+        refresh();
+        return;
+    };
+    // Волна считается в стороне: клип должен появиться сразу.
+    startWave(where, source);
+
+    var say: [256]u8 = undefined;
+    const line_text = std.fmt.bufPrint(&say, "записано {d:.1} с на дорожку «{s}»: {s}", .{
+        @as(f64, @floatFromInt(len_ns)) / @as(f64, std.time.ns_per_s),
+        ed.project.tracks[track_index].title(),
+        std.fs.path.basename(where),
+    }) catch "запись легла на дорожку";
+    ed.say(line_text);
+    refresh();
+}
+
+/// Куда положить записанное: рядом с прочими записями, с датой в имени.
+fn micFileName(buf: []u8) ?[]const u8 {
+    const dir = settingsDir(ed.allocator) orelse return null;
+    defer ed.allocator.free(dir);
+    const now = recorder.DateTime.now();
+    return std.fmt.bufPrint(buf, "{s}\\озвучка {d:0>4}-{d:0>2}-{d:0>2} {d:0>2}-{d:0>2}-{d:0>2}.wav", .{
+        dir,
+        now.year,
+        now.month,
+        now.day,
+        now.hour,
+        now.minute,
+        now.second,
+    }) catch null;
+}
+
+fn writeMicWav(where: []const u8) !void {
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var buf: [1 << 16]u8 = undefined;
+    var file = try std.Io.Dir.cwd().createFile(io, where, .{});
+    defer file.close(io);
+    var fw = file.writer(io, &buf);
+    try zigwav.write(&fw.interface, mic_rate, 1, ed.rec_samples.items);
+    try fw.interface.flush();
+}
+
+/// Свести звук проекта в один WAV.
+///
+/// Здесь нарисованная кривая громкости впервые становится слышной: до этого
+/// она только линия на дорожке. Пишем WAV, а не mp4: сведение отвечает
+/// за громкость, а не за перекодирование — это разные задачи, и смешивать
+/// их значит не сделать толком ни ту, ни другую.
+fn mixdownToWav() void {
+    const audio_tracks = countAudioTracks();
+    if (audio_tracks == 0) {
+        ed.say("сводить нечего: звуковых дорожек в проекте нет");
+        refresh();
+        return;
+    }
+
+    var path: [1024]u16 = @splat(0);
+    const default = ui.wide("смесь.wav");
+    @memcpy(path[0..default.len], default);
+
+    var ofn = std.mem.zeroes(c.OPENFILENAMEW);
+    ofn.lStructSize = @sizeOf(c.OPENFILENAMEW);
+    ofn.hwndOwner = ed.hwnd;
+    ofn.lpstrFile = &path;
+    ofn.nMaxFile = path.len;
+    ofn.lpstrFilter = ui.wide("Звук WAV\x00*.wav\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrDefExt = ui.wide("wav");
+    ofn.lpstrTitle = ui.wide("Свести звук в WAV");
+    ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_NOCHANGEDIR;
+    if (c.GetSaveFileNameW(&ofn) == 0) return;
+
+    var utf8: [1024]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&path, 0)) catch {
+        ed.say("путь не переводится: сведите в другое место");
+        refresh();
+        return;
+    };
+    writeMixTo(utf8[0..len]);
+}
+
+fn countAudioTracks() usize {
+    var n: usize = 0;
+    for (ed.project.trackList()) |t| {
+        if (t.kind == .audio and t.count > 0) n += 1;
+    }
+    return n;
+}
+
+fn writeMixTo(where: []const u8) void {
+    const rate: u32 = 48_000;
+
+    // Читаем исходники по одному. Их бывает много, и держать все сразу
+    // незачем: сведение берёт из каждого только то, что стоит на дорожках.
+    var sources: [timeline.max_sources]mixdown.SourceAudio = @splat(.{});
+    var loaded: [timeline.max_sources]audio_read.Audio = @splat(.{});
+    var count: usize = 0;
+    defer {
+        var i: usize = 0;
+        while (i < count) : (i += 1) loaded[i].deinit(ed.allocator);
+    }
+
+    var silent_sources: usize = 0;
+    for (ed.project.sourceList(), 0..) |src, i| {
+        count = i + 1;
+        loaded[i] = audio_read.read(ed.allocator, src.fullPath()) catch {
+            // Исходник без звука — обычное дело: на видеодорожке лежит файл,
+            // у которого звука и нет. Останавливаться не из-за чего, но
+            // сосчитать их надо: «сведено ноль секунд» без объяснения
+            // выглядит поломкой.
+            loaded[i] = .{};
+            sources[i] = .{};
+            silent_sources += 1;
+            continue;
+        };
+        sources[i] = loaded[i].forMix();
+    }
+
+    const total = mixdown.totalSamples(ed.project, rate);
+    if (total == 0) {
+        ed.say("сводить нечего: на звуковых дорожках пусто");
+        refresh();
+        return;
+    }
+    const out = ed.allocator.alloc(i16, total) catch {
+        ed.say("не хватило памяти на сведение: проект слишком длинный");
+        refresh();
+        return;
+    };
+    defer ed.allocator.free(out);
+
+    mixdown.mix(ed.project, rate, sources[0..count], out);
+
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var buf: [1 << 16]u8 = undefined;
+    var file = std.Io.Dir.cwd().createFile(io, where, .{}) catch |err| {
+        sayError("не записать смесь", err);
+        return;
+    };
+    defer file.close(io);
+    var fw = file.writer(io, &buf);
+    zigwav.write(&fw.interface, rate, 1, out) catch |err| {
+        sayError("не записать смесь", err);
+        return;
+    };
+    fw.interface.flush() catch {};
+
+    var say: [256]u8 = undefined;
+    var without: [64]u8 = undefined;
+    const note = if (silent_sources > 0)
+        std.fmt.bufPrint(&without, "; без звука осталось исходников: {d}", .{silent_sources}) catch ""
+    else
+        "";
+    const line_text = std.fmt.bufPrint(&say, "звук сведён: {s}, {d:.1} с, дорожек {d}{s}", .{
+        std.fs.path.basename(where),
+        @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(rate)),
+        countAudioTracks(),
+        note,
+    }) catch "звук сведён";
+    ed.say(line_text);
+    refresh();
+}
+
+fn sayError(what: []const u8, err: anyerror) void {
+    var say: [256]u8 = undefined;
+    const line_text = std.fmt.bufPrint(&say, "{s}: {s}", .{ what, @errorName(err) }) catch what;
+    ed.say(line_text);
+    refresh();
+}
+
 /// Записать проект по этому пути.
 fn writeProjectTo(where: []const u8, bundle: pack.Bundle) void {
     if (ed.project.track_count == 0) {
@@ -1447,8 +1923,86 @@ fn onDown(x: i32, y: i32) void {
             ed.cur_track = hit.track;
             ed.project.setMuted(hit.track, !ed.project.tracks[hit.track].muted) catch {};
         },
+        .header_gain => {
+            ed.cur_track = hit.track;
+            ed.sel_track = hit.track;
+            ed.drag = .gain;
+            setGainFromX(hit.track, x);
+            _ = c.SetCapture(ed.hwnd);
+        },
+        .header_rec => {
+            ed.cur_track = hit.track;
+            toggleRecordTo(hit.track);
+        },
+        .header_curve => {
+            ed.cur_track = hit.track;
+            const on = ed.project.tracks[hit.track].curve_on;
+            ed.project.setCurveOn(hit.track, !on) catch {};
+            ed.say(if (!on)
+                "кривая громкости включена: щёлкните по линии, чтобы поставить точку"
+            else
+                "кривая громкости выключена; нарисованное осталось на месте");
+        },
+        .curve_point => {
+            ed.cur_track = hit.track;
+            ed.sel_track = hit.track;
+            ed.curve_point = hit.point;
+            ed.drag = .curve_point;
+            _ = c.SetCapture(ed.hwnd);
+        },
+        .curve_line => {
+            // Щелчок по линии ставит точку и сразу даёт её тянуть: иначе
+            // пришлось бы ткнуть, отпустить, найти точку и взяться снова.
+            ed.cur_track = hit.track;
+            ed.sel_track = hit.track;
+            const top = ed.view.laneTop(hit.track);
+            const db = view_mod.curveDbAt(top, toLane(y));
+            ed.curve_point = ed.project.addCurvePoint(hit.track, hit.when_ns, db) catch {
+                ed.say("точек на кривой больше не помещается");
+                refresh();
+                return;
+            };
+            ed.drag = .curve_point;
+            _ = c.SetCapture(ed.hwnd);
+        },
         .empty => {},
     }
+    refresh();
+}
+
+/// Поставить громкость дорожки по тому, куда уехала мышь.
+fn setGainFromX(track_index: usize, x: i32) void {
+    const want = view_mod.gainFromX(x);
+    ed.project.setTrackGain(track_index, want) catch return;
+
+    var buf: [32]u8 = undefined;
+    var say: [96]u8 = undefined;
+    const line_text = std.fmt.bufPrint(&say, "громкость дорожки: {s}", .{
+        timeline.Volume.text(&buf, want),
+    }) catch return;
+    ed.say(line_text);
+}
+
+/// Передвинуть точку кривой за мышью.
+///
+/// По времени точку держим в пределах соседей не мы, а модель: она сама
+/// переставляет точки по порядку и возвращает новый номер. Гадать здесь,
+/// куда точка переехала, значило бы схватить чужую на следующем движении.
+fn moveCurvePoint(x: i32, y: i32) void {
+    const track_index = ed.sel_track;
+    if (track_index >= ed.project.track_count) return;
+    const top = ed.view.laneTop(track_index);
+    const when = ed.view.xToTime(x);
+    const db = view_mod.curveDbAt(top, toLane(y));
+
+    ed.curve_point = ed.project.moveCurvePoint(track_index, ed.curve_point, when, db) catch return;
+
+    var buf: [32]u8 = undefined;
+    var say: [96]u8 = undefined;
+    const line_text = std.fmt.bufPrint(&say, "точка кривой: {s}", .{
+        timeline.Volume.text(&buf, db),
+    }) catch return;
+    ed.say(line_text);
     refresh();
 }
 
@@ -1465,7 +2019,14 @@ fn onMove(x: i32, y: i32) void {
         // Курсор подсказывает, что будет: у края — растяжение.
         const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
         var cursor: ?*anyopaque = null;
-        ui.setSystemCursor(&cursor, if (hit.isEdge()) 32644 else ui.idc_arrow);
+        // 32649 — «указывающая рука»: она говорит «здесь можно взяться»
+        // там, где взяться не за край, а за точку или ползунок.
+        const shape: usize = switch (hit.target) {
+            .clip_left, .clip_right => 32644,
+            .curve_point, .curve_line, .header_gain, .header_curve => 32649,
+            else => ui.idc_arrow,
+        };
+        ui.setSystemCursor(&cursor, shape);
         _ = setCursorRaw(cursor);
         return;
     }
@@ -1485,6 +2046,16 @@ fn onMove(x: i32, y: i32) void {
             totalNs(),
         );
         refreshStage();
+        return;
+    }
+
+    if (ed.drag == .gain) {
+        setGainFromX(ed.sel_track, x);
+        refresh();
+        return;
+    }
+    if (ed.drag == .curve_point) {
+        moveCurvePoint(x, y);
         return;
     }
 
@@ -1532,7 +2103,9 @@ fn onMove(x: i32, y: i32) void {
             ed.drag_started = true;
             refresh();
         },
-        .splitter, .scroll, .none => {},
+        // Ползунок громкости и точку кривой обработали выше: им не нужно
+        // время под курсором, им нужна высота.
+        .gain, .curve_point, .splitter, .scroll, .none => {},
     }
 }
 
@@ -1545,6 +2118,20 @@ fn moveSplitter(y: i32) void {
     const want = view_mod.previewHeightAt(y, toolbar_h, room);
     if (want == preview_h) return;
     preview_h = want;
+    refresh();
+}
+
+/// Правая кнопка: убрать точку кривой.
+///
+/// Точку надо уметь не только поставить, но и снять, а левая кнопка занята
+/// перетаскиванием: тянуть и удалять одним и тем же нажатием нельзя.
+fn onRightDown(x: i32, y: i32) void {
+    if (y < laneAreaTop()) return;
+    const hit = view_mod.hitTest(ed.project, ed.view, x, toLane(y));
+    if (hit.target != .curve_point) return;
+
+    ed.project.removeCurvePoint(hit.track, hit.point) catch return;
+    ed.say("точка кривой убрана");
     refresh();
 }
 
@@ -1986,6 +2573,8 @@ fn buildMenu(hwnd: c.HWND) void {
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_as, ui.wide("Сохранить как…\tCtrl+Shift+S"));
     _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_bundle, ui.wide("Собрать всё в один файл…"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_mixdown, ui.wide("Свести звук в WAV…"));
+    _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(
         file_menu,
         c.MF_POPUP,
@@ -2087,6 +2676,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_save => saveProject(),
                 id_menu_save_as => saveProjectAs(),
                 id_menu_save_bundle => saveProjectBundle(),
+                id_menu_mixdown => mixdownToWav(),
                 id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_recent_rec...id_recent_rec + recent_mod.max_items - 1 => {
                     openFromRecent(&ed.recent.recorded, @intCast((wp & 0xFFFF) - id_recent_rec));
@@ -2132,6 +2722,10 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             onDoubleClick(loWord(lp), hiWord(lp));
             return 0;
         },
+        c.WM_RBUTTONDOWN => {
+            onRightDown(loWord(lp), hiWord(lp));
+            return 0;
+        },
         c.WM_MOUSEMOVE => {
             onMove(loWord(lp), hiWord(lp));
             return 0;
@@ -2174,6 +2768,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
         },
         c.WM_TIMER => {
             if (wp == timer_play) onPlayTick();
+            if (wp == timer_mic) onMicTick();
             return 0;
         },
         c.WM_SIZE => {

@@ -361,6 +361,37 @@ if defined FFMPEG (
   echo [check] ffmpeg не найден — проверка звука на тонах пропущена
 )
 
+rem Громкость и кривая: нарисованная линия, которая ничего не меняет
+rem в звуке, выглядит в окне точно так же, как работающая.
+if defined FFMPEG (
+  echo [check] самопроверка громкости и кривой
+  if not exist ".check\audio" mkdir ".check\audio"
+  "%FFMPEG%" -y -v error -f lavfi -i "aevalsrc=0.5*sin(2*PI*1000*t):d=10:s=48000" -c:a pcm_s16le ".check\audio\mix_src.wav"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: не получилось сделать тон для сведения
+    exit /b 1
+  )
+  "zig-out\bin\zigrec.exe" mix-smoke ".check\audio\mix_src.wav" ".check\audio\mix.wav"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: громкость не идёт по кривой
+    exit /b 1
+  )
+  rem Своим же читателем проверять свою запись — значит повторить
+  rem ошибку в обе стороны и ничего не заметить.
+  where python >nul 2>&1
+  if errorlevel 1 (
+    echo [check] python не найден — чужая проверка смеси пропущена
+  ) else (
+    python "tools\check_mix.py" ".check\audio\mix.wav" -20 -6.02
+    if errorlevel 1 (
+      echo [check] ПРОВАЛ: чужой читатель не согласен с нашей смесью
+      exit /b 1
+    )
+  )
+) else (
+  echo [check] ffmpeg не найден — проверка громкости пропущена
+)
+
 echo [check] ВСЁ ЗЕЛЁНОЕ
 exit /b 0
 

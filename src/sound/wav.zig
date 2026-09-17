@@ -49,6 +49,39 @@ pub const Info = struct {
     }
 };
 
+/// Записать WAV: заголовок и отсчёты.
+///
+/// Нужен там, где мы сами сделали звук — свели проект, вынули дорожку —
+/// и хотим отдать его наружу. Пишем простейший PCM без лишних кусков:
+/// чем меньше в файле нашего, тем меньше поводов чужой программе его
+/// не понять.
+///
+/// Пишем в писателя, а не в файл: так запись проверяется тестом в память.
+pub fn write(w: *std.Io.Writer, sample_rate: u32, channels: u16, samples: []const i16) !void {
+    const bits: u16 = 16;
+    const block_align: u16 = channels * (bits / 8);
+    const data_len: u32 = @intCast(samples.len * 2);
+
+    try w.writeAll("RIFF");
+    // Длина всего файла без первых восьми байт: 4 («WAVE») + 24 (fmt)
+    // + 8 (заголовок data) + сами данные.
+    try w.writeInt(u32, 36 + data_len, .little);
+    try w.writeAll("WAVE");
+
+    try w.writeAll("fmt ");
+    try w.writeInt(u32, 16, .little);
+    try w.writeInt(u16, @intFromEnum(Format.pcm), .little);
+    try w.writeInt(u16, channels, .little);
+    try w.writeInt(u32, sample_rate, .little);
+    try w.writeInt(u32, sample_rate * block_align, .little);
+    try w.writeInt(u16, block_align, .little);
+    try w.writeInt(u16, bits, .little);
+
+    try w.writeAll("data");
+    try w.writeInt(u32, data_len, .little);
+    for (samples) |v| try w.writeInt(i16, v, .little);
+}
+
 /// Разобрать заголовок. Идём по кускам, а не считаем смещения: между `fmt`
 /// и `data` часто лежат чужие куски (`LIST`, `fact`), и жёсткие смещения
 /// ломаются на первом же файле из чужой программы.
@@ -253,4 +286,48 @@ test "чужие куски между fmt и data не мешают" {
     const info = try parse(&data);
     try std.testing.expectEqual(@as(u32, 44100), info.sample_rate);
     try std.testing.expectEqual(@as(usize, 4), info.frameCount());
+}
+
+test "записанный WAV читается обратно нами же" {
+    var samples: [480]i16 = undefined;
+    for (&samples, 0..) |*v, i| v.* = @intCast(@as(i32, @intCast(i)) * 60 - 14400);
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&w, 48_000, 1, &samples);
+
+    const info = try parse(w.buffered());
+    try std.testing.expectEqual(@as(u32, 48_000), info.sample_rate);
+    try std.testing.expectEqual(@as(u16, 1), info.channels);
+    try std.testing.expectEqual(@as(u16, 16), info.bits);
+    try std.testing.expectEqual(Format.pcm, info.format);
+    try std.testing.expectEqual(samples.len, info.frameCount());
+
+    // И отсчёты те же, до последнего.
+    for (samples, 0..) |want, i| {
+        const got = sampleAt(w.buffered(), info, i) * 32768.0;
+        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(want)), got, 1.0);
+    }
+}
+
+test "длина, записанная в заголовке, сходится с длиной файла" {
+    // Неверная длина в RIFF — любимая ошибка своих писателей: наш читатель
+    // её не заметит, а чужой откажется открывать файл целиком.
+    var samples: [100]i16 = @splat(0);
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&w, 44_100, 1, &samples);
+
+    const bytes = w.buffered();
+    const riff_len = std.mem.readInt(u32, bytes[4..8], .little);
+    try std.testing.expectEqual(@as(usize, bytes.len), riff_len + 8);
+}
+
+test "пустая запись — всё ещё настоящий WAV" {
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&w, 48_000, 1, &.{});
+    const info = try parse(w.buffered());
+    try std.testing.expectEqual(@as(usize, 0), info.frameCount());
+    try std.testing.expectEqual(@as(f64, 0), info.durationSeconds());
 }
