@@ -48,6 +48,7 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
     for (project.marks.list()) |m| {
         // Имя — весь остаток строки: в нём бывают пробелы.
         try w.print("mark {d} {s} {s}\n", .{ m.at_ns, @tagName(m.colour), m.title() });
+        if (m.icon != .none) try w.print("icon {s}\n", .{@tagName(m.icon)});
         // Длина и комментарий — отдельными строками, а не в конец `mark`:
         // там имя уже занимает весь остаток, и второй хвост туда не влезет.
         // Прежнее поколение таких слов не знает и пропустит их, получив
@@ -62,6 +63,9 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
             @intFromBool(track.muted),
             track.title(),
         });
+        // Значок — отдельной строкой: имя дорожки занимает весь остаток
+        // строки `track`, и дописать после него нечего.
+        if (track.icon != .none) try w.print("tricon {s}\n", .{@tagName(track.icon)});
         // Громкость дорожки отдельной строкой, а не в конце строки
         // `track`: там имя дорожки, и оно занимает весь остаток строки.
         // Незнакомое слово прежнее поколение пропускает, поэтому файл
@@ -78,13 +82,14 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
             // Дописаны в конец строки нарочно: прежнее поколение читает
             // первые четыре и просто не заметит остальных. Связка
             // и громкость потеряются, проект — нет.
-            try w.print("clip {d} {d} {d} {d} {d} {d}\n", .{
+            try w.print("clip {d} {d} {d} {d} {d} {d} {d}\n", .{
                 clip.source,
                 clip.in_ns,
                 clip.len_ns,
                 clip.at_ns,
                 clip.link,
                 clip.gain_db10,
+                @intFromEnum(clip.icon),
             });
         }
     }
@@ -149,6 +154,23 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             continue;
         }
 
+        if (std.mem.eql(u8, word, "icon")) {
+            // Относится к последней прочитанной метке, как `note` и `span`.
+            if (project.marks.count == 0) continue;
+            // Незнакомый значок — не повод не открыть проект: метка важнее
+            // своей картинки.
+            const icon = std.meta.stringToEnum(timeline.Marks.Icons.Icon, parts.rest()) orelse .none;
+            project.marks.items[project.marks.count - 1].icon = icon;
+            continue;
+        }
+
+        if (std.mem.eql(u8, word, "tricon")) {
+            const track = current_track orelse continue;
+            const icon = std.meta.stringToEnum(timeline.Marks.Icons.Icon, parts.rest()) orelse .none;
+            project.tracks[track].icon = icon;
+            continue;
+        }
+
         if (std.mem.eql(u8, word, "span")) {
             // Как и `note`, относится к последней прочитанной метке.
             if (project.marks.count == 0) continue;
@@ -196,6 +218,15 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             const link = parseU64(parts.next()) orelse 0;
             // Громкости может не быть — тогда клип звучит как записан.
             const gain_db10 = parseI16(parts.next()) orelse 0;
+            // Значка может не быть — файл прежнего поколения.
+            const icon_no = parseU64(parts.next()) orelse 0;
+            // Незнакомый номер значка — без значка: файл правят руками,
+            // и написанная там сотня не должна ронять открытие проекта.
+            const Icon = timeline.Marks.Icons.Icon;
+            const icon: Icon = if (icon_no <= @intFromEnum(Icon.flag))
+                @enumFromInt(@as(u8, @intCast(icon_no)))
+            else
+                .none;
             project.tracks[track].clips[project.tracks[track].count] = .{
                 .source = @intCast(source),
                 .in_ns = in_ns,
@@ -203,6 +234,7 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
                 .at_ns = at_ns,
                 .link = @truncate(link),
                 .gain_db10 = timeline.Volume.clamp(gain_db10),
+                .icon = icon,
             };
             // Счётчик связок должен обгонять всё, что прочитано: иначе
             // следующая связка получила бы уже занятый номер.
@@ -703,4 +735,56 @@ test "файл прежнего поколения без длины даёт т
     );
     try std.testing.expectEqual(@as(usize, 1), p.marks.count);
     try std.testing.expect(!p.marks.items[0].isSpan());
+}
+
+test "значки метки, дорожки и клипа переживают запись и чтение" {
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "вырезать");
+    try p.setMarkIcon(0, .scissors);
+    try p.setTrackIcon(1, .mic);
+    try p.setClipIcon(1, 0, .eye);
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+
+    const back = try makeProject();
+    defer std.testing.allocator.destroy(back);
+    try read(back, w.buffered());
+
+    try std.testing.expectEqual(timeline.Marks.Icons.Icon.scissors, back.marks.items[0].icon);
+    try std.testing.expectEqual(timeline.Marks.Icons.Icon.mic, back.tracks[1].icon);
+    try std.testing.expectEqual(timeline.Marks.Icons.Icon.eye, back.tracks[1].clips[0].icon);
+    // У дорожки без значка он не появился.
+    try std.testing.expectEqual(timeline.Marks.Icons.Icon.none, back.tracks[0].icon);
+}
+
+test "проект без значков не пишет о них лишних строк" {
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "icon ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "tricon ") == null);
+}
+
+test "незнакомый значок не мешает открыть проект" {
+    // Метка важнее своей картинки: отказаться открыть проект из-за значка —
+    // это потерять работу из-за мелочи.
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+    try read(p,
+        \\zigrec-project 1
+        \\source 60000000000 а.mp4
+        \\mark 1000000000 red важное
+        \\icon динозавр
+        \\track video 0 Видео
+        \\tricon динозавр
+        \\
+    );
+    try std.testing.expectEqual(@as(usize, 1), p.marks.count);
+    try std.testing.expectEqual(timeline.Marks.Icons.Icon.none, p.marks.items[0].icon);
+    try std.testing.expectEqual(timeline.Marks.Icons.Icon.none, p.tracks[0].icon);
 }

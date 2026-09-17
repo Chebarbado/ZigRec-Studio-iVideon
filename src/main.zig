@@ -41,6 +41,8 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec icons-smoke ЗНАЧКИ.png
+    \\        самопроверка значков: все нарисованы, все разные, все в одной картинке
     \\  zigrec window-smoke
     \\        самопроверка захвата окна: окно находится и съёмка едет за ним
     \\  zigrec remote-smoke
@@ -208,6 +210,13 @@ pub fn main(init: std.process.Init) !void {
             code = 2;
         } else {
             code = try mixSmoke(init.io, arena, w, args[2], args[3]);
+        }
+    } else if (eq(cmd, "icons-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к PNG\n");
+            code = 2;
+        } else {
+            code = try iconsSmoke(init.io, arena, w, args[2]);
         }
     } else if (eq(cmd, "window-smoke")) {
         code = try windowSmoke(init.io, w);
@@ -1329,6 +1338,136 @@ fn checkWindow(w: anytype, name: []const u8, got: anyerror!zigrec.ui.Layout) !bo
     }
     try w.print("[ui] {s}: всё поместилось, под кнопками не рисуем\n", .{name});
     return false;
+}
+
+/// Самопроверка значков.
+///
+/// Задача #81. Значок, который никто не нарисовал, выглядит в окне так же,
+/// как значок, который просто не туда поставили: пустое место. А два
+/// похожих значка — это два названия одного и того же, и выбор между ними
+/// ничего не значит.
+///
+/// Здесь все значки сводятся в одну картинку — её можно посмотреть
+/// глазами, — и тут же сверяются числом: ни один не пустой, ни один
+/// не залит целиком, ни один не повторяет соседа.
+fn iconsSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8) !u8 {
+    const icons = zigrec.icons;
+    const side = icons.side;
+    // Клетка значка в точках: значок выходит 36 на 36 — разглядеть можно.
+    const cell = 3;
+    const pad = 6;
+    const box = side * cell + pad * 2;
+
+    const count = icons.all.len;
+    const width: u32 = @intCast(box * @as(i32, @intCast(count)));
+    const height: u32 = @intCast(box);
+
+    const pixels = try allocator.alloc(u8, @as(usize, width) * height * 4);
+    defer allocator.free(pixels);
+    // Белый фон: значки тёмные, и на белом их видно так же, как в окне.
+    @memset(pixels, 0xFF);
+
+    var bad: u8 = 0;
+    for (icons.all, 0..) |icon, n| {
+        const weight = icon.weight();
+        try w.print("[icons] {s}: клеток {d} из {d}\n", .{ icon.label(), weight, side * side });
+        if (weight == 0) {
+            try w.print("[icons] ПРОВАЛ: значок «{s}» не нарисован вовсе\n", .{icon.label()});
+            bad = 1;
+        }
+        if (weight == side * side) {
+            try w.print("[icons] ПРОВАЛ: значок «{s}» залит целиком — это не значок\n", .{icon.label()});
+            bad = 1;
+        }
+
+        const x0 = @as(usize, @intCast(box * @as(i32, @intCast(n)))) + pad;
+        var row: usize = 0;
+        while (row < side) : (row += 1) {
+            var col: usize = 0;
+            while (col < side) : (col += 1) {
+                if (!icon.on(row, col)) continue;
+                var dy: usize = 0;
+                while (dy < cell) : (dy += 1) {
+                    var dx: usize = 0;
+                    while (dx < cell) : (dx += 1) {
+                        const px = x0 + col * cell + dx;
+                        const py = pad + row * cell + dy;
+                        const at = (py * @as(usize, width) + px) * 4;
+                        pixels[at + 0] = 0x20;
+                        pixels[at + 1] = 0x20;
+                        pixels[at + 2] = 0x20;
+                        pixels[at + 3] = 0xFF;
+                    }
+                }
+            }
+        }
+    }
+
+    // Пары: ни один значок не повторяет другого.
+    for (icons.all, 0..) |a, i| {
+        for (icons.all[0..i]) |b| {
+            var same: usize = 0;
+            for (0..side) |r| {
+                for (0..side) |col| {
+                    if (a.on(r, col) == b.on(r, col)) same += 1;
+                }
+            }
+            const part = same * 100 / (side * side);
+            if (part >= 95) {
+                try w.print("[icons] ПРОВАЛ: «{s}» и «{s}» совпадают на {d}%\n", .{
+                    a.label(),
+                    b.label(),
+                    part,
+                });
+                bad = 1;
+            }
+        }
+    }
+
+    const png_bytes = zigrec.png.fromBgra(allocator, pixels, width, height, width * 4) catch |err| {
+        try w.print("[icons] ПРОВАЛ: картинка не собралась: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(png_bytes);
+
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = png_bytes }) catch |err| {
+        try w.print("[icons] ПРОВАЛ: не записывается {s}: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+    try w.print("[icons] {d} значков сведены в {s}: {d}x{d}, {d} байт\n", .{
+        count,
+        std.fs.path.basename(path),
+        width,
+        height,
+        png_bytes.len,
+    });
+
+    // Строки меню рисуем мы сами, и живое меню не снять: оно исчезает
+    // от щелчка мимо. Рисуем те же строки в память и смотрим на пиксели.
+    var rows: [zigrec.editor.menu_rows]zigrec.editor.RowCheck = undefined;
+    const drawn = zigrec.editor.checkMenuRows(&rows);
+    if (drawn.len == 0) {
+        try w.writeAll("[icons] ПРОВАЛ: строки меню не нарисовались вовсе\n");
+        bad = 1;
+    }
+    for (drawn) |row| {
+        if (row.ok()) continue;
+        if (row.want != 0) {
+            try w.print("[icons] ПРОВАЛ: строка цвета «{s}»: ждали 0x{X:0>6}, вышло 0x{X:0>6}\n", .{
+                row.what,
+                row.want,
+                row.middle,
+            });
+        } else {
+            try w.print("[icons] ПРОВАЛ: строка значка «{s}» нарисовалась пустой\n", .{row.what});
+        }
+        bad = 1;
+    }
+    try w.print("[icons] строк меню нарисовано {d}, все не пустые\n", .{drawn.len});
+
+    if (bad != 0) return 1;
+    try w.writeAll("[icons] ВСЕ ЗНАЧКИ НАРИСОВАНЫ И РАЗЛИЧИМЫ\n");
+    return 0;
 }
 
 /// Самопроверка захвата окна.

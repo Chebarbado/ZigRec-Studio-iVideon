@@ -253,7 +253,30 @@ pub fn listWindows(out: []WindowInfo) []const WindowInfo {
         out[count] = item;
         count += 1;
     }
+    openFirst(out[0..count]);
     return out[0..count];
+}
+
+/// Сначала открытые окна, потом свёрнутые.
+///
+/// Свёрнутых обычно больше, чем открытых, и без этого нужное окно тонет
+/// среди тех, которых сейчас на экране нет. Внутри каждой половины порядок
+/// прежний — по перекрытию, сверху вниз: наверху то, на что человек
+/// смотрит сейчас, и его окно оказывается первым или вторым.
+pub fn openFirst(items: []WindowInfo) void {
+    var put: usize = 0;
+    var i: usize = 0;
+    // Устойчивая перестановка: вынимаем открытые по очереди и сдвигаем
+    // всё, что между. Сортировка сравнением сбила бы порядок по перекрытию,
+    // а он здесь и есть главное.
+    while (i < items.len) : (i += 1) {
+        if (items[i].minimized) continue;
+        const moved = items[i];
+        var j = i;
+        while (j > put) : (j -= 1) items[j] = items[j - 1];
+        items[put] = moved;
+        put += 1;
+    }
 }
 
 /// Обрезать заголовок по букве, а не по байту: русская буква занимает
@@ -479,4 +502,46 @@ test "свёрнутое окно остаётся в списке, если о�
     // человек ищет «моё окно», а не «окно, которое сейчас на экране».
     const big = Rect{ .x = -32000, .y = -32000, .width = 1200, .height = 800 };
     try std.testing.expect(worthShowing(10, true, big));
+}
+
+test "открытые окна идут первыми, порядок внутри не сбивается" {
+    var items: [6]WindowInfo = undefined;
+    const folded = [_]bool{ true, false, true, false, true, false };
+    for (&items, 0..) |*it, i| {
+        it.* = .{ .minimized = folded[i] };
+        it.title_len = 1;
+        it.title[0] = @intCast('a' + @as(u8, @intCast(i)));
+    }
+
+    openFirst(&items);
+
+    // Сначала открытые.
+    try std.testing.expect(!items[0].minimized);
+    try std.testing.expect(!items[1].minimized);
+    try std.testing.expect(!items[2].minimized);
+    try std.testing.expect(items[3].minimized);
+    try std.testing.expect(items[4].minimized);
+    try std.testing.expect(items[5].minimized);
+
+    // И порядок по перекрытию внутри каждой половины прежний: наверху то,
+    // на что человек смотрит сейчас.
+    try std.testing.expectEqualStrings("b", items[0].name());
+    try std.testing.expectEqualStrings("d", items[1].name());
+    try std.testing.expectEqualStrings("f", items[2].name());
+    try std.testing.expectEqualStrings("a", items[3].name());
+    try std.testing.expectEqualStrings("c", items[4].name());
+    try std.testing.expectEqualStrings("e", items[5].name());
+}
+
+test "список из одних свёрнутых или одних открытых не портится" {
+    var all_folded: [3]WindowInfo = @splat(.{ .minimized = true });
+    openFirst(&all_folded);
+    for (all_folded) |it| try std.testing.expect(it.minimized);
+
+    var all_open: [3]WindowInfo = @splat(.{});
+    openFirst(&all_open);
+    for (all_open) |it| try std.testing.expect(!it.minimized);
+
+    var none: [0]WindowInfo = .{};
+    openFirst(&none);
 }

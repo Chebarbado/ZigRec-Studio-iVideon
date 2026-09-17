@@ -618,6 +618,12 @@ fn drawMarkFlags(dc: c.HDC, width: i32) void {
             line(dc, f.right, f.top - 1, f.right, f.bottom, dark, 1);
         }
 
+        // Значок — прямо в флажке, поверх его цвета. Так он виден там же,
+        // где метка, и не занимает отдельного места на тесной линейке.
+        if (m.icon != .none) {
+            drawIcon(dc, m.icon, f.left + 1, f.top + 1, 1, 0x00202020);
+        }
+
         // Подпись справа от флажка — если до следующей метки есть место.
         const next_x = if (i + 1 < ed.project.marks.count)
             ed.view.timeToX(ed.project.marks.items[i + 1].at_ns)
@@ -699,9 +705,16 @@ fn drawTracks(dc: c.HDC, width: i32, height: i32) void {
         // Имя обрезаем по букве, а не по месту: под кнопкой микрофона
         // от него осталась бы половина последней буквы, то есть ромб
         // с вопросительным знаком.
-        const name_room: usize = if (track.kind == .audio) 16 else 22;
+        // Значок дорожки — перед именем. Он говорит, что это за дорожка,
+        // быстрее подписи, поэтому и стоит первым.
+        var name_x: i32 = 10;
+        if (track.icon != .none) {
+            drawIcon(dc, track.icon, 8, top + 6, 1, 0x00404040);
+            name_x = 24;
+        }
+        const name_room: usize = if (track.kind == .audio) 15 else 21;
         const shown_name = track.title()[0..timeline.fitName(track.title(), name_room)];
-        drawText(dc, 10, top + 8, shown_name, col_text);
+        drawText(dc, name_x, top + 8, shown_name, col_text);
 
         // Вид дорожки и её громкость — одной строкой. Двумя строками они
         // не помещаются: под ними ещё ползунок, и число налезало бы на слово.
@@ -878,6 +891,11 @@ fn drawClips(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, wid
 
         if (track.kind == .audio and !track.muted) drawWave(dc, clip, rect);
         if (clip.link != 0) drawLinkMark(dc, rect);
+        // Значок клипа — в нижнем правом углу: сверху справа уже стоит
+        // значок связки, а слева лежит подпись.
+        if (clip.icon != .none and right - left > 20) {
+            drawIcon(dc, clip.icon, right - 16, rect.bottom - 16, 1, 0x00202020);
+        }
 
         // Подпись помещается — пишем. Не помещается — не пишем: обрезанное
         // слово читается хуже, чем его отсутствие.
@@ -1525,6 +1543,272 @@ fn writeMicWav(where: []const u8) !void {
 /// С этого номера идут строки меню метки.
 const id_mark_menu = 800;
 
+/// Сколько места занимает строка цвета в меню.
+///
+/// Квадратик и поля вокруг него. Ширина с запасом: Windows сама добавит
+/// место под галочку слева, а узкое меню выглядит случайным.
+const colour_item_w: i32 = 92;
+const colour_item_h: i32 = 22;
+const colour_swatch: i32 = 14;
+
+/// С этого номера идут строки выбора значка.
+const id_icon_menu = 850;
+
+/// Нарисовать значок: клетки узора закрашиваются полосками.
+///
+/// Полосками, а не по клетке: двенадцать на двенадцать — это сто сорок
+/// четыре вызова рисования на один значок, а полосок выходит с десяток.
+/// Что полоски складываются в тот же узор, проверено тестом в `icons`.
+fn drawIcon(dc: c.HDC, icon: timeline.Marks.Icons.Icon, x: i32, y: i32, cell: i32, color: c.COLORREF) void {
+    if (icon == .none or cell <= 0) return;
+    const side = timeline.Marks.Icons.side;
+    var row: usize = 0;
+    while (row < side) : (row += 1) {
+        var col: usize = 0;
+        while (col < side) {
+            const strip = timeline.Marks.Icons.runLength(icon, row, col);
+            if (strip == 0) {
+                col += 1;
+                continue;
+            }
+            solid(dc, .{
+                .left = x + @as(i32, @intCast(col)) * cell,
+                .top = y + @as(i32, @intCast(row)) * cell,
+                .right = x + @as(i32, @intCast(col + strip)) * cell,
+                .bottom = y + @as(i32, @intCast(row + 1)) * cell,
+            }, color);
+            col += strip + 1;
+        }
+    }
+}
+
+/// Меню выбора значка. Значки рисуем сами, поэтому строки — свои.
+fn showIconMenu(at: c.POINT, now: timeline.Marks.Icons.Icon) ?timeline.Marks.Icons.Icon {
+    const menu = c.CreatePopupMenu();
+    if (menu == null) return null;
+    defer _ = c.DestroyMenu(menu);
+
+    // Первая строка снимает значок: раз его поставили, должен быть
+    // и путь обратно.
+    var wide_none: [64]u16 = undefined;
+    if (std.unicode.utf8ToUtf16Le(&wide_none, "— без значка —")) |n| {
+        wide_none[n] = 0;
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_icon_menu, @ptrCast(&wide_none));
+        _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+    } else |_| {}
+
+    for (timeline.Marks.Icons.all, 0..) |icon, i| {
+        var flags: c.UINT = c.MF_OWNERDRAW;
+        if (icon == now) flags |= c.MF_CHECKED;
+        // Номер значка — в данных строки: обработчик рисования получит
+        // только их. Плюс тысяча, чтобы не спутать со строками цвета.
+        _ = c.AppendMenuW(
+            menu,
+            flags,
+            @intCast(id_icon_menu + 1 + @as(c_int, @intCast(i))),
+            @ptrFromInt(1000 + @as(usize, @intCast(i)) + 1),
+        );
+    }
+
+    _ = c.SetForegroundWindow(ed.hwnd);
+    const chosen = c.TrackPopupMenu(
+        menu,
+        c.TPM_LEFTBUTTON | c.TPM_RETURNCMD | c.TPM_NONOTIFY,
+        at.x,
+        at.y,
+        0,
+        ed.hwnd,
+        null,
+    );
+    if (chosen == 0) return null;
+    if (chosen == id_icon_menu) return .none;
+    const which: usize = @intCast(chosen - id_icon_menu - 1);
+    if (which >= timeline.Marks.Icons.all.len) return null;
+    return timeline.Marks.Icons.all[which];
+}
+
+/// Сколько места просит строка значка.
+const icon_item_w: i32 = 150;
+const icon_item_h: i32 = 24;
+/// Сторона клетки значка в меню: значок выходит 24 на 24 точки.
+const icon_cell: i32 = 2;
+
+/// Сколько места просит строка цвета.
+fn measureColourItem(item: *c.MEASUREITEMSTRUCT) void {
+    if (item.itemData > 1000) {
+        item.itemWidth = @intCast(icon_item_w);
+        item.itemHeight = @intCast(icon_item_h);
+        return;
+    }
+    item.itemWidth = @intCast(colour_item_w);
+    item.itemHeight = @intCast(colour_item_h);
+}
+
+/// Нарисовать строку цвета: квадратик во всю строку.
+///
+/// Подписи нет нарочно: имя цвета рядом с самим цветом ничего не добавляет,
+/// а глаз всё равно выбирает по цвету. Какой цвет выбран, видно по галочке,
+/// которую рисует сама Windows слева от строки.
+fn drawColourItem(item: *c.DRAWITEMSTRUCT) void {
+    if (item.itemData > 1000) return drawIconItem(item);
+
+    const dc = item.hDC;
+    const which = item.itemData;
+    if (which == 0 or which > timeline.Marks.all_colours.len) return;
+    const col = timeline.Marks.all_colours[which - 1];
+
+    const chosen = item.itemState & c.ODS_SELECTED != 0;
+    const back = item.rcItem;
+    solid(dc, back, if (chosen) @as(c.COLORREF, 0x00E8E8E8) else @as(c.COLORREF, 0x00FFFFFF));
+
+    const top = @divTrunc(back.top + back.bottom - colour_swatch, 2);
+    const left = back.left + 8;
+    const box = c.RECT{
+        .left = left,
+        .top = top,
+        .right = left + colour_item_w - 16,
+        .bottom = top + colour_swatch,
+    };
+    solid(dc, box, col.rgb());
+    // Тонкая рамка: светлые цвета на белом фоне иначе теряют края.
+    line(dc, box.left, box.top, box.right, box.top, 0x00606060, 1);
+    line(dc, box.left, box.bottom - 1, box.right, box.bottom - 1, 0x00606060, 1);
+    line(dc, box.left, box.top, box.left, box.bottom, 0x00606060, 1);
+    line(dc, box.right - 1, box.top, box.right - 1, box.bottom, 0x00606060, 1);
+}
+
+/// Нарисовать строку выбора значка: сам значок и его смысл словами.
+///
+/// Здесь подпись нужна, в отличие от цвета: ножницы и крест похожи
+/// по рисунку, а «вырезать» и «выбросить» — разные вещи.
+fn drawIconItem(item: *c.DRAWITEMSTRUCT) void {
+    const dc = item.hDC;
+    const which = item.itemData - 1000;
+    if (which == 0 or which > timeline.Marks.Icons.all.len) return;
+    const icon = timeline.Marks.Icons.all[which - 1];
+
+    const chosen = item.itemState & c.ODS_SELECTED != 0;
+    solid(dc, item.rcItem, if (chosen) @as(c.COLORREF, 0x00E8E8E8) else @as(c.COLORREF, 0x00FFFFFF));
+
+    const box = timeline.Marks.Icons.side * icon_cell;
+    const top = @divTrunc(item.rcItem.top + item.rcItem.bottom - box, 2);
+    drawIcon(dc, icon, item.rcItem.left + 8, top, icon_cell, 0x00303030);
+
+    var text_rc = c.RECT{
+        .left = item.rcItem.left + 8 + box + 8,
+        .top = item.rcItem.top,
+        .right = item.rcItem.right - 4,
+        .bottom = item.rcItem.bottom,
+    };
+    var wide_buf: [64]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, icon.label()) catch return;
+    _ = c.SetBkMode(dc, c.TRANSPARENT);
+    _ = c.SetTextColor(dc, @as(c.COLORREF, 0x00202020));
+    const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
+    const old_font = c.SelectObject(dc, font);
+    _ = c.DrawTextW(dc, &wide_buf, @intCast(n), &text_rc, c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE);
+    _ = c.SelectObject(dc, old_font);
+}
+
+/// Что вышло, когда строку меню нарисовали.
+pub const RowCheck = struct {
+    what: []const u8 = "",
+    /// Цвет в середине строки — для цветных квадратиков.
+    middle: u32 = 0,
+    /// Чего мы ждали там увидеть. Ноль — не проверяем цвет.
+    want: u32 = 0,
+    /// Сколько тёмных точек в строке — для значков.
+    dark: usize = 0,
+
+    pub fn ok(self: RowCheck) bool {
+        if (self.want != 0) return self.middle == self.want;
+        return self.dark > 0;
+    }
+};
+
+pub const menu_rows = timeline.Marks.all_colours.len + timeline.Marks.Icons.all.len;
+
+/// Нарисовать строки меню в память и посмотреть, что получилось.
+///
+/// Строки меню мы рисуем сами, и проверить их иначе нечем: живое меню
+/// не снять — оно исчезает от любого щелчка мимо, а пустая строка
+/// выглядит так же, как строка, которую не туда поставили. Здесь та же
+/// самая рисовалка вызывается на память, и пиксели сверяются числом.
+pub fn checkMenuRows(out: *[menu_rows]RowCheck) []const RowCheck {
+    const w: i32 = @max(colour_item_w, icon_item_w);
+    const h: i32 = @max(colour_item_h, icon_item_h);
+
+    const screen_dc = c.GetDC(null);
+    defer _ = c.ReleaseDC(null, screen_dc);
+    const dc = c.CreateCompatibleDC(screen_dc);
+    if (dc == null) return out[0..0];
+    defer _ = c.DeleteDC(dc);
+
+    var info = std.mem.zeroes(c.BITMAPINFO);
+    info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = w;
+    // Отрицательная высота — строки сверху вниз, как везде у нас.
+    info.bmiHeader.biHeight = -h;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = c.BI_RGB;
+
+    var bits: ?*anyopaque = null;
+    const bmp = c.CreateDIBSection(dc, &info, c.DIB_RGB_COLORS, &bits, null, 0);
+    if (bmp == null or bits == null) return out[0..0];
+    defer _ = c.DeleteObject(@ptrCast(bmp));
+    const old = c.SelectObject(dc, @ptrCast(bmp));
+    defer _ = c.SelectObject(dc, old);
+
+    const pixels: [*]u32 = @ptrCast(@alignCast(bits.?));
+    var n: usize = 0;
+
+    for (timeline.Marks.all_colours, 0..) |col, i| {
+        var item = std.mem.zeroes(c.DRAWITEMSTRUCT);
+        item.hDC = dc;
+        item.rcItem = .{ .left = 0, .top = 0, .right = w, .bottom = h };
+        item.itemData = i + 1;
+        drawColourItem(&item);
+
+        // Середина строки должна быть тем самым цветом.
+        const at = @as(usize, @intCast(@divTrunc(h, 2))) * @as(usize, @intCast(w)) +
+            @as(usize, @intCast(@divTrunc(w, 3)));
+        out[n] = .{
+            .what = col.label(),
+            .middle = pixels[at] & 0x00FFFFFF,
+            // В памяти точка лежит как 0x00RRGGBB, а COLORREF — 0x00BBGGRR.
+            .want = swapRedBlue(col.rgb()),
+        };
+        n += 1;
+    }
+
+    for (timeline.Marks.Icons.all, 0..) |icon, i| {
+        var item = std.mem.zeroes(c.DRAWITEMSTRUCT);
+        item.hDC = dc;
+        item.rcItem = .{ .left = 0, .top = 0, .right = w, .bottom = h };
+        item.itemData = 1000 + i + 1;
+        drawIconItem(&item);
+
+        var dark: usize = 0;
+        var at: usize = 0;
+        while (at < @as(usize, @intCast(w)) * @as(usize, @intCast(h))) : (at += 1) {
+            const px = pixels[at] & 0x00FFFFFF;
+            if ((px & 0xFF) < 0x80) dark += 1;
+        }
+        out[n] = .{ .what = icon.label(), .dark = dark };
+        n += 1;
+    }
+
+    return out[0..n];
+}
+
+fn swapRedBlue(colour: u32) u32 {
+    const b = (colour >> 16) & 0xFF;
+    const g = (colour >> 8) & 0xFF;
+    const r = colour & 0xFF;
+    return (r << 16) | (g << 8) | b;
+}
+
 /// Сказать о метке в строке состояния.
 fn sayMark(index: usize) void {
     if (index >= ed.project.marks.count) return;
@@ -1630,13 +1914,18 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
     if (menu == null) return;
     defer _ = c.DestroyMenu(menu);
 
+    // Цвета рисуем квадратиками, а не пишем словами: «сиреневая» и
+    // «голубая» различаются чтением, а квадратик — взглядом. Ради этого
+    // строки меню рисуются нами (MF_OWNERDRAW), и это единственное место,
+    // где такое нужно.
     const now = ed.project.marks.items[index].colour;
     for (timeline.Marks.all_colours, 0..) |col, i| {
-        var wide_buf: [64]u16 = undefined;
-        const n = std.unicode.utf8ToUtf16Le(&wide_buf, col.label()) catch continue;
-        wide_buf[n] = 0;
-        const flags: c.UINT = if (col == now) c.MF_STRING | c.MF_CHECKED else c.MF_STRING;
-        _ = c.AppendMenuW(menu, flags, @intCast(id_mark_menu + @as(c_int, @intCast(i))), @ptrCast(&wide_buf));
+        const id: c_int = @intCast(id_mark_menu + @as(c_int, @intCast(i)));
+        var flags: c.UINT = c.MF_OWNERDRAW;
+        if (col == now) flags |= c.MF_CHECKED;
+        // Номер цвета кладём в данные строки: обработчик рисования получит
+        // только их, а не наш список.
+        _ = c.AppendMenuW(menu, flags, @intCast(id), @ptrFromInt(@as(usize, @intCast(i)) + 1));
     }
     _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
     // Диапазон делается по указателю: человек только что стоял там, куда
@@ -1647,6 +1936,7 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
     } else if (ed.playhead_ns > m.at_ns + timeline.Marks.min_span_ns) {
         _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 102, ui.wide("Растянуть до указателя"));
     }
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 103, ui.wide("Значок…"));
     _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 100, ui.wide("Переименовать…"));
     _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 101, ui.wide("Убрать метку"));
 
@@ -1671,6 +1961,15 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
     }
     if (chosen == id_mark_menu + 100) {
         startMarkRename(index);
+        return;
+    }
+    if (chosen == id_mark_menu + 103) {
+        var where: c.POINT = undefined;
+        _ = c.GetCursorPos(&where);
+        const picked = showIconMenu(where, ed.project.marks.items[index].icon) orelse return;
+        ed.project.setMarkIcon(index, picked) catch return;
+        sayMark(index);
+        refresh();
         return;
     }
     if (chosen == id_mark_menu + 102) {
@@ -1743,6 +2042,12 @@ fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
             .right = left + 5,
             .bottom = row_top + view_mod.marks_row_h - 3,
         }, m.colour.rgb());
+
+        // Значок — справа в строке, у самого края: слева уже время, имя
+        // и комментарий, и втискивать его между ними некуда.
+        if (m.icon != .none) {
+            drawIcon(dc, m.icon, window_w - 16, row_top + 5, 1, 0x00404040);
+        }
 
         // У диапазона в столбце времени — начало и длина: «от и сколько»
         // читается быстрее, чем «от и до», когда важен размер куска.
@@ -2790,6 +3095,30 @@ fn onRightDown(x: i32, y: i32) void {
         return;
     }
 
+    // Значок ставится там, где стоит сам объект: правая кнопка по левой
+    // колонке дорожки или по телу клипа. Отдельного окна «свойства» для
+    // одного значка заводить незачем.
+    if (hit.target == .header or hit.target == .header_name) {
+        ed.cur_track = hit.track;
+        var where: c.POINT = undefined;
+        _ = c.GetCursorPos(&where);
+        const picked = showIconMenu(where, ed.project.tracks[hit.track].icon) orelse return;
+        ed.project.setTrackIcon(hit.track, picked) catch return;
+        ed.say(if (picked == .none) "значок дорожки убран" else picked.label());
+        refresh();
+        return;
+    }
+    if (hit.target == .clip or hit.target == .clip_left or hit.target == .clip_right) {
+        var where: c.POINT = undefined;
+        _ = c.GetCursorPos(&where);
+        const now = ed.project.tracks[hit.track].clips[hit.clip].icon;
+        const picked = showIconMenu(where, now) orelse return;
+        ed.project.setClipIcon(hit.track, hit.clip, picked) catch return;
+        ed.say(if (picked == .none) "значок клипа убран" else picked.label());
+        refresh();
+        return;
+    }
+
     if (hit.target != .curve_point) return;
 
     ed.project.removeCurvePoint(hit.track, hit.point) catch return;
@@ -3422,6 +3751,18 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
         c.WM_LBUTTONDBLCLK => {
             onDoubleClick(loWord(lp), hiWord(lp));
             return 0;
+        },
+        // Строки цвета в меню метки рисуем сами: «сиреневая» и «голубая»
+        // различаются чтением, а квадратик — взглядом.
+        c.WM_MEASUREITEM => {
+            const item: *c.MEASUREITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lp)));
+            measureColourItem(item);
+            return 1;
+        },
+        c.WM_DRAWITEM => {
+            const item: *c.DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lp)));
+            drawColourItem(item);
+            return 1;
         },
         c.WM_RBUTTONDOWN => {
             onRightDown(loWord(lp), hiWord(lp));

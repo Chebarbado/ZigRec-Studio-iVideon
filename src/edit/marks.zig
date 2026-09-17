@@ -16,6 +16,10 @@
 //! Здесь только счёт: где метка, какого цвета, как они упорядочены.
 //! Рисование — в окне.
 const std = @import("std");
+const icons_mod = @import("icons.zig");
+
+/// Значки наружу: они общие для метки, дорожки и клипа.
+pub const Icons = icons_mod;
 
 /// Цвет метки.
 ///
@@ -126,6 +130,12 @@ pub const Mark = struct {
     /// Что с этим местом делать. Пусто — метка без пояснения.
     note: [max_note]u8 = @splat(0),
     note_len: u8 = 0,
+    /// Значок: что с этим местом делать, одним взглядом.
+    ///
+    /// Помещается в выравнивание, которое у метки и так есть: 179 байт
+    /// полей округляются до 184, и значок занимает один из пяти байтов,
+    /// которые всё равно лежали пустыми. Цена — ноль.
+    icon: icons_mod.Icon = .none,
 
     pub fn title(self: *const Mark) []const u8 {
         return self.name[0..self.name_len];
@@ -241,11 +251,12 @@ pub const Marks = struct {
         try self.removeAt(index);
         // Место только что освободили — занять его обратно всегда можно.
         const where = self.add(at_ns, moved.colour, moved.title()) catch unreachable;
-        // Комментарий и длина едут вместе с меткой: они про это место,
-        // а не про то время, где метка стояла раньше.
+        // Комментарий, длина и значок едут вместе с меткой: они про это
+        // место, а не про то время, где метка стояла раньше.
         self.items[where].note = moved.note;
         self.items[where].note_len = moved.note_len;
         self.items[where].len_ns = moved.len_ns;
+        self.items[where].icon = moved.icon;
         return where;
     }
 
@@ -262,6 +273,11 @@ pub const Marks = struct {
     pub fn setColour(self: *Marks, index: usize, colour: Colour) Error!void {
         if (index >= self.count) return Error.NoSuchMark;
         self.items[index].colour = colour;
+    }
+
+    pub fn setIcon(self: *Marks, index: usize, icon: icons_mod.Icon) Error!void {
+        if (index >= self.count) return Error.NoSuchMark;
+        self.items[index].icon = icon;
     }
 
     /// Сделать метку диапазоном или вернуть её в точку.
@@ -704,4 +720,24 @@ test "длина едет вместе с меткой" {
     const now = try m.moveTo(0, 10 * sec);
     try testing.expectEqual(@as(u64, 4 * sec), m.items[now].len_ns);
     try testing.expectEqualStrings("кусок", m.items[now].title());
+}
+
+test "значок метки ставится и едет вместе с ней" {
+    var m = Marks{};
+    _ = try m.add(sec, .red, "вырезать");
+    try testing.expectEqual(Icons.Icon.none, m.items[0].icon);
+
+    try m.setIcon(0, .scissors);
+    try testing.expectEqual(Icons.Icon.scissors, m.items[0].icon);
+
+    _ = try m.add(3 * sec, .green, "сосед");
+    const now = try m.moveTo(0, 10 * sec);
+    try testing.expectEqual(Icons.Icon.scissors, m.items[now].icon);
+    // А соседу значок не достался.
+    try testing.expectEqual(Icons.Icon.none, m.items[0].icon);
+}
+
+test "значок у несуществующей метки — отказ" {
+    var m = Marks{};
+    try testing.expectError(Error.NoSuchMark, m.setIcon(0, .star));
 }

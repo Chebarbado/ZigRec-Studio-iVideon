@@ -54,6 +54,9 @@ pub const Clip = struct {
     /// не должно пропадать, когда поправили первое.
     gain_db10: volume.Db10 = 0,
 
+    /// Значок клипа. Ноль — без значка.
+    icon: marks_mod.Icons.Icon = .none,
+
     /// Номер связки: клипы с одним номером ходят вместе. Ноль — сам по себе.
     ///
     /// Номер, а не ссылка на соседа: соседей бывает больше двух (видео
@@ -111,6 +114,8 @@ pub const Track = struct {
     name_len: usize = 0,
     /// Дорожку не видно и не слышно, но она никуда не делась.
     muted: bool = false,
+    /// Значок дорожки: что это за дорожка, быстрее подписи.
+    icon: marks_mod.Icons.Icon = .none,
     /// Громкость всей дорожки, в десятых долях децибела.
     gain_db10: volume.Db10 = 0,
     /// Считать ли кривую громкости. Выключенная кривая не стирается:
@@ -1062,6 +1067,33 @@ pub const Project = struct {
         self.remember();
         self.marks = probe;
         return where;
+    }
+
+    /// Значок метки.
+    pub fn setMarkIcon(self: *Project, index: usize, icon: marks_mod.Icons.Icon) Error!void {
+        if (index >= self.marks.count) return Error.NoSuchThing;
+        if (self.marks.items[index].icon == icon) return;
+        self.remember();
+        self.marks.setIcon(index, icon) catch unreachable;
+    }
+
+    /// Значок дорожки.
+    pub fn setTrackIcon(self: *Project, track_index: usize, icon: marks_mod.Icons.Icon) Error!void {
+        const t = try self.track(track_index);
+        if (t.icon == icon) return;
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.icon = icon;
+    }
+
+    /// Значок клипа.
+    pub fn setClipIcon(self: *Project, track_index: usize, clip_index: usize, icon: marks_mod.Icons.Icon) Error!void {
+        const t = try self.track(track_index);
+        if (clip_index >= t.count) return Error.NoSuchThing;
+        if (t.clips[clip_index].icon == icon) return;
+        self.remember();
+        const tr = try self.track(track_index);
+        tr.clips[clip_index].icon = icon;
     }
 
     pub fn setMarkColour(self: *Project, index: usize, colour: marks_mod.Colour) Error!void {
@@ -2073,4 +2105,45 @@ test "у точки края не двигаются, и шаг отмены н�
     const after = p.past;
     try std.testing.expectError(Error.NoSuchThing, p.moveMarkEdge(0, false, 9 * sec));
     try std.testing.expectEqual(after, p.past);
+}
+
+test "значки метки, дорожки и клипа ставятся и отменяются" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(0, 0, 0, 10 * sec);
+    _ = try p.addMark(2 * sec, .red, "вырезать");
+
+    try p.setMarkIcon(0, .scissors);
+    try p.setTrackIcon(1, .mic);
+    try p.setClipIcon(0, 0, .eye);
+
+    try std.testing.expectEqual(marks_mod.Icons.Icon.scissors, p.marks.items[0].icon);
+    try std.testing.expectEqual(marks_mod.Icons.Icon.mic, p.tracks[1].icon);
+    try std.testing.expectEqual(marks_mod.Icons.Icon.eye, p.tracks[0].clips[0].icon);
+
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(marks_mod.Icons.Icon.none, p.tracks[0].clips[0].icon);
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(marks_mod.Icons.Icon.none, p.tracks[1].icon);
+}
+
+test "тот же значок не тратит шаг отмены" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try p.place(0, 0, 0, 10 * sec);
+    _ = try p.addMark(sec, .red, "");
+    try p.setMarkIcon(0, .star);
+    const after = p.past;
+    try p.setMarkIcon(0, .star);
+    try p.setTrackIcon(0, .none);
+    try p.setClipIcon(0, 0, .none);
+    try std.testing.expectEqual(after, p.past);
+}
+
+test "чужой номер при постановке значка — отказ" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    try std.testing.expectError(Error.NoSuchThing, p.setMarkIcon(0, .star));
+    try std.testing.expectError(Error.NoSuchThing, p.setTrackIcon(9, .star));
+    try std.testing.expectError(Error.NoSuchThing, p.setClipIcon(0, 0, .star));
 }
