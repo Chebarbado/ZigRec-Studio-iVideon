@@ -55,6 +55,8 @@ const id_sound = 110;
 const id_server = 111;
 const id_editor = 112;
 const id_server_help = 113;
+/// Надпись с адресом в уголке: по ней щёлкают, чтобы попасть в настройки.
+const id_server_addr = 115;
 
 // Пункты меню. Отдельный ряд номеров, чтобы не путать их с кнопками.
 const id_menu_open_dir = 300;
@@ -220,6 +222,23 @@ const loadCursorById = @extern(
 const loadIconById = @extern(
     *const fn (?*anyopaque, usize) callconv(.winapi) ?*anyopaque,
     .{ .name = "LoadIconW" },
+);
+
+/// Та же ловушка с выравниванием, что у курсоров в редакторе: дескриптор
+/// курсора — номер в таблице ядра, а не адрес, и приводить его к указателю
+/// Zig нельзя. Объявляем `SetCursor` так, чтобы приводить было нечего.
+const setCursorRaw = @extern(
+    *const fn (?*anyopaque) callconv(.winapi) ?*anyopaque,
+    .{ .name = "SetCursor" },
+);
+/// И контекст рисования из `WM_CTLCOLORSTATIC` — тоже число, а не указатель.
+const setTextColorRaw = @extern(
+    *const fn (usize, c.COLORREF) callconv(.winapi) c.COLORREF,
+    .{ .name = "SetTextColor" },
+);
+const setBkColorRaw = @extern(
+    *const fn (usize, c.COLORREF) callconv(.winapi) c.COLORREF,
+    .{ .name = "SetBkColor" },
 );
 
 /// Номера из заголовков Windows, не менялись с девяностых.
@@ -1217,9 +1236,32 @@ fn drawDropZone(dc: c.HDC) void {
     );
 }
 
+/// Шрифт с подчёркиванием — для надписи, по которой можно щёлкнуть.
+///
+/// Создаётся один раз и живёт до конца: пересоздавать шрифт на каждое
+/// обновление уголка значило бы течь ресурсами Windows раз в секунду.
+var link_font: ?*anyopaque = null;
+
+fn linkFont() ?*anyopaque {
+    if (link_font) |f| return f;
+    var lf: c.LOGFONTW = undefined;
+    const base = c.GetStockObject(c.DEFAULT_GUI_FONT);
+    if (c.GetObjectW(base, @sizeOf(c.LOGFONTW), &lf) == 0) return null;
+    lf.lfUnderline = 1;
+    link_font = @ptrCast(c.CreateFontIndirectW(&lf));
+    return link_font;
+}
+
 fn refreshServerRow(hwnd: c.HWND) void {
     var corner_text: [96]u8 = undefined;
     setText(app.lbl_server, corner.look(&corner_text, cornerFacts()).text);
+    // Надпись-ссылка подчёркнута, обычная — нет. Иначе о том, что по ней
+    // можно щёлкнуть, никто не догадается, а подчёркнутое «MCP off»
+    // обещало бы то, чего нет.
+    const clickable = corner.addressClickable(cornerFacts());
+    const font: ?*anyopaque = if (clickable) linkFont() else @ptrCast(c.GetStockObject(c.DEFAULT_GUI_FONT));
+    if (font) |f| _ = c.SendMessageW(app.lbl_server, c.WM_SETFONT, @intFromPtr(f), 1);
+    _ = c.InvalidateRect(app.lbl_server, null, 1);
     var corner_button: [96]u8 = undefined;
     setText(app.btn_server, corner.look(&corner_button, cornerFacts()).button);
     var lamp = serverLampRect();
@@ -1418,12 +1460,40 @@ fn browseForDir(hwnd: c.HWND) void {
 }
 
 /// Окно настроек.
+/// На каком поле открыть настройки.
+const SettingsFocus = enum { none, listen };
+
 fn showSettings(owner: c.HWND) void {
+    showSettingsAt(owner, .none);
+}
+
+/// Открыть настройки и сразу встать в поле, ради которого их открыли.
+///
+/// Со щелчка по адресу человек идёт менять адрес — и должен оказаться
+/// в нём, с выделенным содержимым, а не искать поле глазами.
+fn showSettingsAt(owner: c.HWND, focus: SettingsFocus) void {
     if (settings_win.hwnd != null) {
         _ = c.SetForegroundWindow(settings_win.hwnd);
+        focusSettingsField(focus);
         return;
     }
+    createSettings(owner);
+    focusSettingsField(focus);
+}
 
+fn focusSettingsField(focus: SettingsFocus) void {
+    const box = switch (focus) {
+        .none => return,
+        .listen => settings_win.listen_box,
+    };
+    if (box == null) return;
+    _ = c.SetFocus(box);
+    // Всё содержимое выделено: адрес чаще меняют целиком, чем правят
+    // в середине.
+    _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
+}
+
+fn createSettings(owner: c.HWND) void {
     const hinst: c.HINSTANCE = @ptrCast(c.GetModuleHandleW(null));
     var wc = std.mem.zeroes(c.WNDCLASSEXW);
     wc.cbSize = @sizeOf(c.WNDCLASSEXW);
@@ -2419,7 +2489,26 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
 
             // Принимаем файлы, брошенные мышью из проводника.
             c.DragAcceptFiles(hwnd, 1);
-            app.lbl_server = label(hwnd, "", 234, 404, 206, 20);
+            // SS_NOTIFY: обычная надпись глотает щелчки, а по этой щёлкают,
+            // чтобы попасть в настройки адреса (#82). Номер надписи едет
+            // в параметре меню — та же ловушка выравнивания, что и везде,
+            // поэтому создаём через `button`, которая её уже обходит.
+            app.lbl_server = c.CreateWindowExW(
+                0,
+                wide("STATIC"),
+                wide(""),
+                c.WS_CHILD | c.WS_VISIBLE | c.SS_NOTIFY,
+                234,
+                404,
+                206,
+                20,
+                hwnd,
+                null,
+                @ptrCast(c.GetModuleHandleW(null)),
+                null,
+            );
+            // GWLP_ID = -12: номер ставим после создания, как у кнопок.
+            _ = c.SetWindowLongPtrW(app.lbl_server, -12, id_server_addr);
 
             _ = label(hwnd, "Кадров/с", 14, 152, 90, 20);
             app.cb_fps = combo(hwnd, id_fps, 104, 148, 84, 200);
@@ -2510,6 +2599,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 },
                 id_server => toggleServer(hwnd),
                 id_server_help => showServerHelp(hwnd),
+                id_server_addr => if (corner.addressClickable(cornerFacts())) showSettingsAt(hwnd, .listen),
                 id_editor => openEditor(),
                 id_menu_open_dir => openOutputDir(),
                 id_recent_base...id_recent_base + recent_mod.max_items - 1 => {
@@ -2559,6 +2649,33 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             // отступы в чужой функции.
             if (item.CtlID == id_window) drawWindowButton(item) else drawRecordButton(item);
             return 1;
+        },
+        c.WM_CTLCOLORSTATIC => {
+            // Синим — только надпись-ссылку, и только пока по ней есть куда
+            // щёлкнуть. Остальные надписи остаются как были.
+            //
+            // Дескрипторы сравниваем числами, а не указателями: HWND и HDC
+            // из wParam/lParam не выровнены, и `@ptrFromInt` на них падает —
+            // восьмая встреча с этой ловушкой в проекте. Первый заход здесь
+            // ронял окно на первой же перерисовке.
+            const which: usize = @bitCast(lp);
+            if (which == @intFromPtr(app.lbl_server) and corner.addressClickable(cornerFacts())) {
+                const dc: usize = @bitCast(wp);
+                _ = setTextColorRaw(dc, 0x00B06000);
+                _ = setBkColorRaw(dc, c.GetSysColor(c.COLOR_BTNFACE));
+                return @intCast(@intFromPtr(c.GetSysColorBrush(c.COLOR_BTNFACE)));
+            }
+        },
+        c.WM_SETCURSOR => {
+            // Рука над адресом: иначе о том, что по нему можно щёлкнуть,
+            // никто не догадается.
+            const under: usize = @bitCast(wp);
+            if (under == @intFromPtr(app.lbl_server) and corner.addressClickable(cornerFacts())) {
+                var cursor: ?*anyopaque = null;
+                setSystemCursor(&cursor, 32649);
+                _ = setCursorRaw(cursor);
+                return 1;
+            }
         },
         c.WM_HOTKEY => {
             switch (wp) {

@@ -88,6 +88,19 @@ pub fn look(buf: []u8, f: Facts) Look {
     };
 }
 
+/// Можно ли щёлкнуть по надписи в уголке, чтобы попасть в настройки.
+///
+/// Задача #82. Адрес показан там, куда смотрят, когда что-то не сходится:
+/// «а на каком порту он слушает?». Следующее действие после этого взгляда —
+/// поменять порт, и путь к нему не должен лежать через другой конец окна.
+///
+/// Щёлкать есть по чему, только пока сервер слушает: тогда в надписи адрес.
+/// «MCP off» и «не завёлся» — не адреса, и рука над ними обещала бы то,
+/// чего нет.
+pub fn addressClickable(f: Facts) bool {
+    return f.state == .listening;
+}
+
 /// Короткая справка по кнопке «?».
 pub const help_text =
     "Сервер MCP даёт Claude Code управлять записью: начать, остановить, " ++
@@ -181,4 +194,12 @@ test "у каждого состояния есть надпись и подпи
 test "справка говорит и про закрытый порт, и про 0.0.0.0" {
     try testing.expect(std.mem.indexOf(u8, help_text, "порт закрыт") != null);
     try testing.expect(std.mem.indexOf(u8, help_text, "0.0.0.0") != null);
+}
+
+test "по адресу можно щёлкнуть, только пока сервер слушает" {
+    // «MCP off» — не адрес: рука над ним обещала бы то, чего нет.
+    try std.testing.expect(addressClickable(.{ .state = .listening }));
+    try std.testing.expect(!addressClickable(.{ .state = .off }));
+    try std.testing.expect(!addressClickable(.{ .state = .off, .running = true }));
+    try std.testing.expect(!addressClickable(.{ .state = .failed, .why = "порт занят" }));
 }
