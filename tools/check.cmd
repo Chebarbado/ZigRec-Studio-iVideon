@@ -209,6 +209,20 @@ if defined FFMPEG (
   )
 )
 
+rem Слой событий (#88): наш писатель и читатель, потом сторонний читатель
+rem на Python — формат должен быть понятен не только нам.
+echo [check] самопроверка слоя событий
+"zig-out\bin\zigrec.exe" events-smoke ".check\smoke.events"
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: слой событий не пишется или не читается
+  exit /b 1
+)
+python "tools\check_events.py" ".check\smoke.events" --expect-area --min-moves 30
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: сторонний читатель не принял слой событий
+  exit /b 1
+)
+
 rem Автопанорама (#29): правило без мыши и настоящая запись с --follow
 rem на две секунды — код пути должен хотя бы не падать.
 echo [check] самопроверка автопанорамы

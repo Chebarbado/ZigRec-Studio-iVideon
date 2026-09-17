@@ -44,6 +44,8 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec events-smoke ФАЙЛ.events
+    \\        самопроверка слоя событий: записать известный путь курсора и прочитать обратно
     \\  zigrec pan-smoke
     \\        самопроверка автопанорамы: область едет за курсором плавно и не за край
     \\  zigrec export-smoke ИСХОДНИК.mp4 ВЫХОД.mp4 [--offkey]
@@ -335,6 +337,13 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
+    } else if (eq(cmd, "events-smoke")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к файлу .events\n");
+            code = 2;
+        } else {
+            code = try eventsSmoke(init.io, arena, w, args[2]);
+        }
     } else if (eq(cmd, "pan-smoke")) {
         code = try panSmoke(w);
     } else if (eq(cmd, "export-smoke")) {
@@ -3291,6 +3300,79 @@ fn micCheck(w: anytype, seconds: u32) !u8 {
         return 1;
     }
     try w.print("[mic] СЛЫШНО: звук был в {d} замерах из {d}\n", .{ loud, i });
+    return 0;
+}
+
+/// Самопроверка слоя событий (#88): известный путь курсора, клики, клавиша
+/// и смена окна пишутся в файл, читаются обратно и сходятся по числу и
+/// содержанию. Файл остаётся: его перечитает сторонний читатель
+/// `tools/check_events.py` — своим же читателем свою запись не проверяют.
+fn eventsSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8) !u8 {
+    const events = zigrec.events;
+    const ms = std.time.ns_per_ms;
+    {
+        var buf: [1 << 14]u8 = undefined;
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        var fw = file.writer(io, &buf);
+        var ev = try events.Writer.init(&fw.interface);
+        try ev.area(0, 100, 50, 640, 360);
+        var i: u64 = 0;
+        while (i < 30) : (i += 1) {
+            try ev.move(i * 33 * ms, 120 + @as(i32, @intCast(i)) * 10, 80 + @as(i32, @intCast(i)) * 4);
+        }
+        // Движения кончаются на 957 мс — дальше время только растёт: первый
+        // заход стенда поставил щелчок на 400 мс, и оба читателя честно
+        // отказались от файла со временем назад.
+        try ev.down(1000 * ms, .left, 240, 128);
+        try ev.up(1080 * ms, .left, 240, 128);
+        try ev.wheel(1200 * ms, -120, 300, 150);
+        try ev.key(1300 * ms, 0x41);
+        try ev.focus(1400 * ms, "Блокнот — заметки");
+        try ev.area(1500 * ms, 140, 50, 640, 360);
+        try fw.interface.flush();
+        try w.print("[events] записано {d} событий в {s}\n", .{ ev.count, path });
+    }
+
+    const data = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 20));
+    defer allocator.free(data);
+    var got = events.read(allocator, data) catch |err| {
+        try w.print("[events] ПРОВАЛ: обратно не читается: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer got.deinit(allocator);
+    try w.print("[events] прочитано {d}: area {d}, move {d}, down {d}, up {d}, wheel {d}, key {d}, focus {d}\n", .{
+        got.list().len,
+        got.count(.area),
+        got.count(.move),
+        got.count(.down),
+        got.count(.up),
+        got.count(.wheel),
+        got.count(.key),
+        got.count(.focus),
+    });
+    if (got.list().len != 37 or got.count(.move) != 30 or got.count(.area) != 2) {
+        try w.writeAll("[events] ПРОВАЛ: число событий не сошлось с записанным\n");
+        return 1;
+    }
+    const at_half = got.cursorAt(500 * ms) orelse {
+        try w.writeAll("[events] ПРОВАЛ: указатель на полсекунде не найден\n");
+        return 1;
+    };
+    // На 500 мс последний move — пятнадцатый (495 мс): 120+150, 80+60.
+    if (at_half.x != 270 or at_half.y != 140) {
+        try w.print("[events] ПРОВАЛ: указатель на полсекунде {d},{d}, ждали 270,140\n", .{ at_half.x, at_half.y });
+        return 1;
+    }
+    if (got.recentDown(1050 * ms, 100 * ms) == null or got.recentDown(1300 * ms, 100 * ms) != null) {
+        try w.writeAll("[events] ПРОВАЛ: вспышка клика не там, где нажатие\n");
+        return 1;
+    }
+    if (got.areaAt(1550 * ms).?.x != 140) {
+        try w.writeAll("[events] ПРОВАЛ: сдвиг области не прочитался\n");
+        return 1;
+    }
+    try w.writeAll("[events] СЛОЙ ПИШЕТСЯ И ЧИТАЕТСЯ\n");
     return 0;
 }
 
