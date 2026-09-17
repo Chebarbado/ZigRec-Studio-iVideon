@@ -28,6 +28,8 @@ const frames = @import("../file/frames.zig");
 const keyframes = @import("../file/keyframes.zig");
 const takes_mod = @import("takes.zig");
 const export_mod = @import("../file/export.zig");
+const events_mod = @import("../file/events.zig");
+const cursor_paint = @import("../capture/cursor_paint.zig");
 const clock_play = @import("../sound/clock_play.zig");
 const play = @import("../sound/play.zig");
 const stepping = @import("stepping.zig");
@@ -61,6 +63,7 @@ const id_menu_save_bundle = 305;
 const id_menu_close = 303;
 const id_menu_mixdown = 306;
 const id_menu_export = 319;
+const id_menu_cursor_layer = 320;
 const id_menu_marks = 310;
 const id_menu_takes = 318;
 /// Номера строк в списках недавних. Два ряда подряд, по одному на список.
@@ -231,6 +234,11 @@ const Editor = struct {
     /// Ключевые кадры каждого исходника (#24): к ним липнет указатель,
     /// по ним ходит K, они рисуются рисками на клипе.
     keys: [timeline.max_sources][]u64 = @splat(&.{}),
+    /// Слой событий каждого исходника (#90): курсор и клики из файла
+    /// «запись.events» рядом с записью. `null` — слоя нет.
+    layers: [timeline.max_sources]?events_mod.Events = @splat(null),
+    /// Показывать курсор из слоя поверх кадра.
+    cursor_layer_on: bool = true,
 
     /// Дорожка, с которой работают: её переименовывает F2.
     cur_track: usize = 0,
@@ -449,12 +457,14 @@ fn drawPreview(dc: c.HDC, width: i32) void {
         dc: c.HDC,
         width: i32,
         top: i32,
+        cursor: ?LayerCursor,
 
         fn draw(self: @This(), pixels: []const u8, w: u32, h: u32, at_ns: u64) void {
             _ = at_ns;
             const box_h = preview_h - 28;
             const fit = player_mod.fitInto(w, h, self.width, box_h);
             if (fit.w <= 0 or fit.h <= 0) return;
+            defer if (self.cursor) |cur| drawLayerCursor(self.dc, fit, self.top, cur);
 
             // Строки у нас всегда сверху вниз: их так укладывает плеер.
             // Отрицательная высота и означает это направление.
@@ -487,7 +497,7 @@ fn drawPreview(dc: c.HDC, width: i32) void {
 
     const painted = ed.frames.withFrame(
         Paint,
-        .{ .dc = dc, .width = width, .top = top },
+        .{ .dc = dc, .width = width, .top = top, .cursor = layerCursorAt(ed.playhead_ns) },
         Paint.draw,
     );
     if (!painted) {
@@ -918,7 +928,10 @@ fn drawClips(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, wid
 
         const rect = c.RECT{ .left = left, .top = top + 4, .right = right, .bottom = top + view_mod.lane_h - 4 };
         solid(dc, rect, if (track.muted) col_muted else body);
-        if (track.kind == .video and !track.muted) drawKeyTicks(dc, clip, rect);
+        if (track.kind == .video and !track.muted) {
+            drawKeyTicks(dc, clip, rect);
+            if (ed.cursor_layer_on) drawClickTicks(dc, clip, rect);
+        }
 
         const selected = ed.has_selection and ed.sel_track == track_index and ed.sel_clip == i;
         const frame_color = if (selected) col_selected else edge;
@@ -1202,6 +1215,110 @@ fn frameNsOf(info: *const media.Info) u64 {
         if (t.fps > 0) return stepping.frameNs(t.fps);
     }
     return 0;
+}
+
+// ------------------------------------------------------ слой событий (#90)
+
+/// Слой событий файла: «запись.events» рядом с ним. Нет — `null`.
+fn loadLayer(path: []const u8) ?events_mod.Events {
+    var side_buf: [1024]u8 = undefined;
+    const side = events_mod.sidecarPath(&side_buf, path);
+    var threaded: std.Io.Threaded = .init(ed.allocator, .{});
+    defer threaded.deinit();
+    const data = std.Io.Dir.cwd().readFileAlloc(threaded.io(), side, ed.allocator, .limited(1 << 26)) catch return null;
+    defer ed.allocator.free(data);
+    return events_mod.read(ed.allocator, data) catch null;
+}
+
+fn replaceLayer(index: usize, made: ?events_mod.Events) void {
+    if (index >= ed.layers.len) return;
+    if (ed.layers[index]) |*old| old.deinit(ed.allocator);
+    ed.layers[index] = made;
+}
+
+fn dropLayers() void {
+    for (&ed.layers) |*l| {
+        if (l.*) |*old| old.deinit(ed.allocator);
+        l.* = null;
+    }
+}
+
+/// Что рисовать поверх кадра под указателем: курсор из слоя и вспышка.
+const LayerCursor = struct {
+    at: events_mod.Point,
+    area: events_mod.Event,
+    flash: u32,
+};
+
+fn layerCursorAt(playhead_ns: u64) ?LayerCursor {
+    if (!ed.cursor_layer_on) return null;
+    const found = clipUnderPlayhead() orelse return null;
+    const clip = found.clip;
+    if (clip.source >= ed.layers.len) return null;
+    const layer = ed.layers[clip.source] orelse return null;
+    const inside = clip.in_ns + (playhead_ns -| clip.at_ns);
+    const at = layer.cursorAt(inside) orelse return null;
+    const area = layer.areaAt(inside) orelse return null;
+    if (area.w <= 0 or area.h <= 0) return null;
+    // Вспышка клика — треть секунды, как у впечатанного курсора.
+    const flash_life: u64 = 300 * std.time.ns_per_ms;
+    const flash: u32 = if (layer.recentDown(inside, flash_life)) |d| cursor_paint.flashStrength(inside - d.at_ns, flash_life) else 0;
+    return .{ .at = at, .area = area, .flash = flash };
+}
+
+/// Нарисовать курсор из слоя в окне предпросмотра: стрелка многоугольником
+/// GDI, вспышка — кольцом. Координаты стола переводятся в кадр по области
+/// записи, а кадр — в окно по вписыванию.
+fn drawLayerCursor(dc: c.HDC, fit: player_mod.Fit, top: i32, cur: LayerCursor) void {
+    const fx = fit.x + @divTrunc((cur.at.x - cur.area.x) * fit.w, cur.area.w);
+    const fy = top + fit.y + @divTrunc((cur.at.y - cur.area.y) * fit.h, cur.area.h);
+    if (fx < fit.x or fy < top + fit.y or fx >= fit.x + fit.w or fy >= top + fit.y + fit.h) return;
+
+    if (cur.flash > 0) {
+        const r: i32 = 10 + @as(i32, @intCast((255 - cur.flash) / 20));
+        const pen = c.CreatePen(c.PS_SOLID, 2, 0x004040FF);
+        defer _ = c.DeleteObject(@ptrCast(pen));
+        const old_pen = c.SelectObject(dc, @ptrCast(pen));
+        const old_brush = c.SelectObject(dc, c.GetStockObject(c.NULL_BRUSH));
+        _ = c.Ellipse(dc, fx - r, fy - r, fx + r, fy + r);
+        _ = c.SelectObject(dc, old_pen);
+        _ = c.SelectObject(dc, old_brush);
+    }
+
+    const pts = cursor_paint.arrowPoints(fx, fy, 1);
+    var poly: [pts.len]c.POINT = undefined;
+    for (pts, 0..) |p, i| poly[i] = .{ .x = p.x, .y = p.y };
+    const pen = c.CreatePen(c.PS_SOLID, 1, 0x00000000);
+    defer _ = c.DeleteObject(@ptrCast(pen));
+    const brush = c.CreateSolidBrush(0x00FFFFFF);
+    defer _ = c.DeleteObject(@ptrCast(brush));
+    const old_pen = c.SelectObject(dc, @ptrCast(pen));
+    const old_brush = c.SelectObject(dc, @ptrCast(brush));
+    _ = c.Polygon(dc, &poly, @intCast(poly.len));
+    _ = c.SelectObject(dc, old_pen);
+    _ = c.SelectObject(dc, old_brush);
+}
+
+/// Риски кликов по нижнему краю видеоклипа: красные, где нажимали.
+fn drawClickTicks(dc: c.HDC, clip: timeline.Clip, rect: c.RECT) void {
+    if (clip.source >= ed.layers.len) return;
+    const layer = ed.layers[clip.source] orelse return;
+    for (layer.list()) |e| {
+        if (e.kind != .down) continue;
+        if (e.at_ns < clip.in_ns) continue;
+        if (e.at_ns > clip.in_ns + clip.len_ns) break;
+        const x = ed.view.timeToX(clip.at_ns + (e.at_ns - clip.in_ns));
+        if (x < rect.left or x >= rect.right) continue;
+        line(dc, x, rect.bottom - 6, x, rect.bottom, 0x002020E0, 2);
+    }
+}
+
+fn toggleCursorLayer() void {
+    ed.cursor_layer_on = !ed.cursor_layer_on;
+    saveMarksPanel();
+    buildMenu(ed.hwnd);
+    ed.say(if (ed.cursor_layer_on) "курсор из слоя событий показывается поверх кадра" else "курсор из слоя скрыт");
+    refresh();
 }
 
 // ------------------------------------------------------ ключевые кадры (#24)
@@ -1491,6 +1608,7 @@ fn loadProject(path: []const u8) void {
         replaceWave(i, made);
         ed.frame_ns[i] = frameNsFor(src.fullPath());
         replaceKeys(i, loadKeys(src.fullPath()));
+        replaceLayer(i, loadLayer(src.fullPath()));
     }
     dropAudio();
 
@@ -2724,6 +2842,7 @@ fn saveMarksPanel() void {
     var prefs = settings_mod.load(threaded.io(), ed.allocator, dir);
     prefs.marks_panel_on = ed.marks_open;
     prefs.marks_panel_w = marks_w;
+    prefs.cursor_layer_off = !ed.cursor_layer_on;
     _ = settings_mod.save(&prefs, dir);
 }
 
@@ -3073,6 +3192,7 @@ fn afterProjectLoaded(made_by: []const u8, inside: usize, unpacked: bool) void {
         startWave(src.fullPath(), @intCast(i));
         ed.frame_ns[i] = frameNsFor(src.fullPath());
         replaceKeys(i, loadKeys(src.fullPath()));
+        replaceLayer(i, loadLayer(src.fullPath()));
         if (!recent_mod.onDisk(src.fullPath())) missing += 1;
     }
     dropAudio();
@@ -3139,6 +3259,7 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
     const source = ed.project.addSource(path, info.duration_ns) catch |err| return complain(err);
     if (source < ed.frame_ns.len) ed.frame_ns[source] = frameNsOf(&info);
     if (source < ed.keys.len) replaceKeys(source, loadKeys(path));
+    if (source < ed.layers.len) replaceLayer(source, loadLayer(path));
     // Исходников стало больше — звук для игры читается заново.
     dropAudio();
 
@@ -4254,6 +4375,12 @@ fn buildMenu(hwnd: c.HWND) void {
         id_menu_takes,
         ui.wide("Окно дублей\tCtrl+D"),
     );
+    _ = c.AppendMenuW(
+        view_menu,
+        if (ed.cursor_layer_on) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
+        id_menu_cursor_layer,
+        ui.wide("Курсор из слоя событий"),
+    );
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(view_menu), ui.wide("Вид"));
 
     const old = c.GetMenu(hwnd);
@@ -4345,6 +4472,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_export => exportToMp4(),
                 id_menu_marks => toggleMarksPanel(),
                 id_menu_takes => toggleTakesPanel(),
+                id_menu_cursor_layer => toggleCursorLayer(),
                 id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_recent_rec...id_recent_rec + recent_mod.max_items - 1 => {
                     openFromRecent(&ed.recent.recorded, @intCast((wp & 0xFFFF) - id_recent_rec));
@@ -4483,6 +4611,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             stopAudio();
             dropAudio();
             dropKeys();
+            dropLayers();
             c.PostQuitMessage(0);
             return 0;
         },
@@ -4540,6 +4669,7 @@ fn loadPreviewHeight(allocator: std.mem.Allocator) void {
     preview_h = prefs.preview_h;
     ed.marks_open = prefs.marksPanel();
     marks_w = prefs.marksPanelW();
+    ed.cursor_layer_on = prefs.cursorLayer();
 }
 
 /// Запомнить высоту кадра. Читаем весь файл заново и меняем одну строку:

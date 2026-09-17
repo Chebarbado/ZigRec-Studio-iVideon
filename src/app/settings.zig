@@ -54,6 +54,9 @@ pub const Settings = struct {
     /// именно это. Переворот нужен там, где умолчание — «включено»
     /// (как у разгона), а здесь он только запутал бы.
     marks_panel_on: bool = false,
+    /// Курсор из слоя событий в редакторе (#90). Записан наоборот —
+    /// «выключен», — чтобы умолчание было нулевым и включённым.
+    cursor_layer_off: bool = false,
     /// Ширина панели меток (#93). Ноль — умолчание из правила вида:
     /// так настройки остаются нулевыми по умолчанию.
     marks_panel_w: i32 = 0,
@@ -92,6 +95,10 @@ pub const Settings = struct {
     /// а не всегда, и занимает треть окна.
     pub fn marksPanel(self: *const Settings) bool {
         return self.marks_panel_on;
+    }
+
+    pub fn cursorLayer(self: *const Settings) bool {
+        return !self.cursor_layer_off;
     }
 
     pub fn marksPanelW(self: *const Settings) i32 {
@@ -221,6 +228,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("areakey {s}\n", .{s.areaKey()});
     try w.print("preview {d}\n", .{s.preview_h});
     try w.print("marks {d}\n", .{@intFromBool(s.marksPanel())});
+    try w.print("cursorlayer {d}\n", .{@intFromBool(s.cursorLayer())});
     try w.print("markswidth {d}\n", .{s.marksPanelW()});
     try w.print("port {d}\n", .{s.port});
     try w.print("listen {s}\n", .{s.listenAddress()});
@@ -262,6 +270,8 @@ pub fn read(data: []const u8) Error!Settings {
             _ = out.setPreviewH(rest);
         } else if (std.mem.eql(u8, word, "marks")) {
             out.marks_panel_on = std.mem.eql(u8, rest, "1");
+        } else if (std.mem.eql(u8, word, "cursorlayer")) {
+            out.cursor_layer_off = std.mem.eql(u8, rest, "0");
         } else if (std.mem.eql(u8, word, "markswidth")) {
             _ = out.setMarksPanelW(rest);
         } else if (std.mem.eql(u8, word, "follow")) {
@@ -578,4 +588,17 @@ test "автопанорама по умолчанию выключена и п�
     try std.testing.expect(back.follow_cursor);
     const old = try read("zigrec-settings 1\r\nport 15599\r\n");
     try std.testing.expect(!old.follow_cursor);
+}
+
+test "курсор из слоя включён по умолчанию, выключенный переживает запись" {
+    var s = Settings.init();
+    try std.testing.expect(s.cursorLayer());
+    s.cursor_layer_off = true;
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&s, &w);
+    const back = try read(w.buffered());
+    try std.testing.expect(!back.cursorLayer());
+    const old = try read("zigrec-settings 1\r\nport 15599\r\n");
+    try std.testing.expect(old.cursorLayer());
 }
