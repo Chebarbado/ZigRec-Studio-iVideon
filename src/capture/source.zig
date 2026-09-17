@@ -167,6 +167,13 @@ pub const WindowInfo = struct {
     title: [256]u8 = @splat(0),
     title_len: usize = 0,
     area: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    /// Окно свёрнуто. Размер тогда взят из того, каким оно развернётся.
+    ///
+    /// Свёрнутое окно в списке нужно: человек ищет в нём «моё окно»,
+    /// а не «окно, которое сейчас на экране». Пропускать свёрнутые молча —
+    /// значит показать пять окон из тридцати и не объяснить, куда делись
+    /// остальные.
+    minimized: bool = false,
 
     pub fn name(self: *const WindowInfo) []const u8 {
         return self.title[0..self.title_len];
@@ -189,6 +196,37 @@ pub fn worthShowing(title_len: usize, visible: bool, area: Rect) bool {
     return area.width >= min_window_side and area.height >= min_window_side;
 }
 
+/// Каким окно станет, если его развернуть.
+///
+/// У свёрнутого окна `DwmGetWindowAttribute` отдаёт координаты где-то
+/// за краем экрана, и по ним нельзя ни показать размер, ни решить, стоит
+/// ли окно показывать. Windows помнит, каким оно было до сворачивания, —
+/// это и спрашиваем.
+fn restoredArea(hwnd: c.HWND) Error!Rect {
+    var wp = std.mem.zeroes(c.WINDOWPLACEMENT);
+    wp.length = @sizeOf(c.WINDOWPLACEMENT);
+    if (c.GetWindowPlacement(hwnd, &wp) == 0) return Error.WindowNotFound;
+    const r = wp.rcNormalPosition;
+    if (r.right <= r.left or r.bottom <= r.top) return Error.WindowNotFound;
+    return .{
+        .x = r.left,
+        .y = r.top,
+        .width = @intCast(r.right - r.left),
+        .height = @intCast(r.bottom - r.top),
+    };
+}
+
+/// Развернуть свёрнутое окно.
+///
+/// Снимать свёрнутое окно нечего, поэтому выбор такого окна значит
+/// «разверни и снимай»: спрашивать об этом отдельно — лишний шаг там,
+/// где другого ответа всё равно нет.
+pub fn restoreWindow(hwnd: c.HWND) void {
+    if (builtin.os.tag != .windows) return;
+    if (c.IsIconic(hwnd) == 0) return;
+    _ = c.ShowWindow(hwnd, c.SW_RESTORE);
+}
+
 /// Видимые окна с заголовками, сверху вниз по порядку перекрытия.
 ///
 /// Порядок не случаен: сверху лежит то, на что человек смотрит сейчас,
@@ -200,10 +238,15 @@ pub fn listWindows(out: []WindowInfo) []const WindowInfo {
     while (hwnd != null and count < out.len) : (hwnd = c.GetWindow(hwnd, c.GW_HWNDNEXT)) {
         var title_buf: [1024]u8 = undefined;
         const title = windowTitle(hwnd, &title_buf);
-        const area = windowArea(hwnd) catch continue;
+
+        // У свёрнутого окна размеры не спросишь — берём те, какими оно
+        // развернётся. Иначе список показывает пять окон из тридцати
+        // и не объясняет, куда делись остальные.
+        const folded = c.IsIconic(hwnd) != 0;
+        const area = (if (folded) restoredArea(hwnd) else windowArea(hwnd)) catch continue;
         if (!worthShowing(title.len, c.IsWindowVisible(hwnd) != 0, area)) continue;
 
-        var item = WindowInfo{ .handle = hwnd, .area = area };
+        var item = WindowInfo{ .handle = hwnd, .area = area, .minimized = folded };
         const n = fitTitle(title, item.title.len);
         @memcpy(item.title[0..n], title[0..n]);
         item.title_len = n;
@@ -429,4 +472,11 @@ test "длинный заголовок обрезается по букве, а
 
 test "пустое окно живым не считается" {
     try std.testing.expect(!stillThere(null));
+}
+
+test "свёрнутое окно остаётся в списке, если оно годное по размеру" {
+    // Правило показа не должно зависеть от того, свёрнуто окно или нет:
+    // человек ищет «моё окно», а не «окно, которое сейчас на экране».
+    const big = Rect{ .x = -32000, .y = -32000, .width = 1200, .height = 800 };
+    try std.testing.expect(worthShowing(10, true, big));
 }

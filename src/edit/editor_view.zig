@@ -105,6 +105,9 @@ pub const mark_flag_h: i32 = 12;
 pub const mark_flag_w: i32 = 9;
 
 /// Где нарисован флажок метки, стоящей в точке `x`.
+///
+/// У диапазона флажок начала смотрит вправо, а флажок конца — влево:
+/// так видно, что кусок между ними, а не рядом.
 pub fn markFlag(x: i32) struct { left: i32, top: i32, right: i32, bottom: i32 } {
     return .{
         .left = x,
@@ -113,6 +116,23 @@ pub fn markFlag(x: i32) struct { left: i32, top: i32, right: i32, bottom: i32 } 
         .bottom = ruler_h - 1,
     };
 }
+
+/// Флажок конца диапазона: тот же, но растущий влево от своей точки.
+pub fn markEndFlag(x: i32) struct { left: i32, top: i32, right: i32, bottom: i32 } {
+    return .{
+        .left = x - mark_flag_w,
+        .top = ruler_h - mark_flag_h - 1,
+        .right = x,
+        .bottom = ruler_h - 1,
+    };
+}
+
+/// Высота полосы диапазона под линейкой, поверх дорожек.
+///
+/// Тонкая нарочно: диапазон должен быть виден, но не закрывать клипы.
+/// Заливка во всю высоту дорожки съела бы волну, ради которой на дорожку
+/// и смотрят.
+pub const span_band_h: i32 = 5;
 
 // --------------------------------------------- громкость в левой колонке
 
@@ -427,6 +447,8 @@ pub const Target = enum {
     header_rec,
     /// Метка на линейке: прыжок к ней и перетаскивание.
     mark,
+    /// Конец диапазона на линейке: перетаскивание правого края.
+    mark_end,
     /// Точка кривой громкости: её тянут.
     curve_point,
     /// Сама кривая мимо точек: щелчок ставит новую точку.
@@ -470,8 +492,31 @@ pub fn hitTest(project: *const timeline.Project, view: View, x: i32, y: i32) Hit
         // делений, и ткнуть в то, что видно сверху, должно означать
         // попадание в него.
         const tolerance = @as(u64, mark_grab) * view.ns_per_px;
+
+        // Конец диапазона проверяется раньше начала: у короткого диапазона
+        // оба края рядом, и без этого правый край было бы нечем ухватить —
+        // мышь всегда попадала бы в начало.
+        var best_end: ?usize = null;
+        var best_gap: u64 = std.math.maxInt(u64);
+        for (project.marks.list(), 0..) |m, i| {
+            if (!m.isSpan()) continue;
+            const at = m.endsAt();
+            const gap = if (at > when_here) at - when_here else when_here - at;
+            if (gap > tolerance or gap >= best_gap) continue;
+            best_gap = gap;
+            best_end = i;
+        }
+
         if (project.marks.nearest(when_here, tolerance)) |i| {
-            return .{ .target = .mark, .mark = i, .when_ns = when_here };
+            // Начало ближе конца — значит взялись за начало.
+            const start = project.marks.items[i].at_ns;
+            const start_gap = if (start > when_here) start - when_here else when_here - start;
+            if (best_end == null or start_gap <= best_gap) {
+                return .{ .target = .mark, .mark = i, .when_ns = when_here };
+            }
+        }
+        if (best_end) |i| {
+            return .{ .target = .mark_end, .mark = i, .when_ns = when_here };
         }
         return .{ .target = .ruler, .when_ns = when_here };
     }
@@ -1140,4 +1185,59 @@ test "столбцы списка идут по порядку и не нале�
     try std.testing.expectEqual(MarksColumn.note, marksColumnAt(marks_col_note));
     // И комментарию остаётся место в панели.
     try std.testing.expect(marks_col_note < marks_panel_w - 40);
+}
+
+test "у диапазона ловятся оба края" {
+    const p = try testProject();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "вырезать");
+    try p.setMarkLength(0, 5 * sec); // 2..7
+
+    const v = View{ .at_ns = 0, .ns_per_px = 20 * std.time.ns_per_ms };
+
+    const at_start = hitTest(p, v, v.timeToX(2 * sec), 5);
+    try std.testing.expectEqual(Target.mark, at_start.target);
+    try std.testing.expectEqual(@as(usize, 0), at_start.mark);
+
+    const at_end = hitTest(p, v, v.timeToX(7 * sec), 5);
+    try std.testing.expectEqual(Target.mark_end, at_end.target);
+    try std.testing.expectEqual(@as(usize, 0), at_end.mark);
+
+    // Между краями — обычная линейка: середина диапазона никуда не тянется.
+    const middle = hitTest(p, v, v.timeToX(4 * sec), 5);
+    try std.testing.expectEqual(Target.ruler, middle.target);
+}
+
+test "у точки конца нет, и он не ловится" {
+    const p = try testProject();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(3 * sec, .red, "точка");
+
+    const v = View{ .at_ns = 0, .ns_per_px = 20 * std.time.ns_per_ms };
+    try std.testing.expectEqual(Target.mark, hitTest(p, v, v.timeToX(3 * sec), 5).target);
+    try std.testing.expectEqual(Target.ruler, hitTest(p, v, v.timeToX(3 * sec) + mark_grab + 6, 5).target);
+}
+
+test "у короткого диапазона правый край всё равно ухватывается" {
+    // Оба края рядом; без отдельной проверки конца мышь всегда попадала бы
+    // в начало, и растянуть такой диапазон было бы нечем.
+    const p = try testProject();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "");
+    try p.setMarkLength(0, marks_span_test_len);
+
+    const v = View{ .at_ns = 0, .ns_per_px = 20 * std.time.ns_per_ms };
+    const end_x = v.timeToX(2 * sec + marks_span_test_len);
+    try std.testing.expectEqual(Target.mark_end, hitTest(p, v, end_x, 5).target);
+}
+
+/// Диапазон в четверть секунды: на этом масштабе его края в двенадцати
+/// точках друг от друга — ближе, чем ширина хватки.
+const marks_span_test_len: u64 = std.time.ns_per_s / 4;
+
+test "флажок конца растёт влево от своей точки" {
+    const f = markEndFlag(100);
+    try std.testing.expectEqual(@as(i32, 100), f.right);
+    try std.testing.expect(f.left < f.right);
+    try std.testing.expect(f.top >= 0 and f.bottom <= ruler_h);
 }

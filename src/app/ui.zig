@@ -1801,10 +1801,13 @@ fn showWindowPicker(hwnd: c.HWND) void {
 
     for (list, 0..) |it, i| {
         var line: [320]u8 = undefined;
-        const text = std.fmt.bufPrint(&line, "{s}  —  {d}x{d}", .{
+        const text = std.fmt.bufPrint(&line, "{s}  —  {d}x{d}{s}", .{
             it.name(),
             it.area.width,
             it.area.height,
+            // Свёрнутое окно показываем и помечаем: выбрать его можно,
+            // и при выборе оно развернётся — снимать свёрнутое нечего.
+            if (it.minimized) "  (свёрнуто)" else "",
         }) catch it.name();
         var wide_buf: [512]u16 = undefined;
         const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch continue;
@@ -1840,6 +1843,10 @@ fn showWindowPicker(hwnd: c.HWND) void {
     const index: usize = @intCast(chosen - id_window_base - 1);
     if (index >= list.len) return;
     const picked = list[index];
+
+    // Свёрнутое окно разворачиваем: выбрать его — значит собраться его
+    // снимать, а снимать у свёрнутого нечего.
+    if (picked.minimized) source.restoreWindow(picked.handle);
 
     app.window_handle = picked.handle;
     const n = @min(picked.name().len, app.window_name.len);

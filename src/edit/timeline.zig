@@ -1034,6 +1034,36 @@ pub const Project = struct {
         self.marks.setComment(index, clean) catch unreachable;
     }
 
+    /// Сделать метку диапазоном или вернуть её в точку.
+    ///
+    /// Нулевая длина — это точка, и превращается одно в другое само.
+    pub fn setMarkLength(self: *Project, index: usize, len_ns: u64) Error!void {
+        if (index >= self.marks.count) return Error.NoSuchThing;
+        const want: u64 = if (len_ns < marks_mod.min_span_ns) 0 else len_ns;
+        if (self.marks.items[index].len_ns == want) return;
+        self.remember();
+        self.marks.setLength(index, want) catch unreachable;
+    }
+
+    /// Подвинуть край диапазона. Возвращает новый номер метки.
+    pub fn moveMarkEdge(self: *Project, index: usize, from_left: bool, to_ns: u64) Error!usize {
+        if (index >= self.marks.count) return Error.NoSuchThing;
+        const m = self.marks.items[index];
+        if (!m.isSpan()) return Error.NoSuchThing;
+        // Край не сдвинулся — снимка не тратим: мышь шлёт сообщение
+        // на каждую свою точку, и упёршийся в предел край слал бы их зря.
+        const edge_now = if (from_left) m.at_ns else m.endsAt();
+        if (edge_now == to_ns) return index;
+
+        var probe = self.marks;
+        const where = probe.moveEdge(index, from_left, to_ns) catch return Error.NoSuchThing;
+        if (std.meta.eql(probe.items[where], m) and where == index) return index;
+
+        self.remember();
+        self.marks = probe;
+        return where;
+    }
+
     pub fn setMarkColour(self: *Project, index: usize, colour: marks_mod.Colour) Error!void {
         if (index >= self.marks.count) return Error.NoSuchThing;
         if (self.marks.items[index].colour == colour) return;
@@ -1993,4 +2023,54 @@ test "повторная метка в том же месте не переим�
     // И следующая метка получает следующее число, а не повтор.
     _ = try p.addMark(2 * sec, .green, "");
     try std.testing.expectEqualStrings("метка 2", p.marks.items[1].title());
+}
+
+test "метка становится диапазоном и возвращается в точку" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "вырезать");
+    try std.testing.expect(!p.marks.items[0].isSpan());
+
+    try p.setMarkLength(0, 3 * sec);
+    try std.testing.expect(p.marks.items[0].isSpan());
+    try std.testing.expectEqual(@as(u64, 5 * sec), p.marks.items[0].endsAt());
+
+    // Свели края — стала точка, без отдельной команды.
+    try p.setMarkLength(0, 0);
+    try std.testing.expect(!p.marks.items[0].isSpan());
+
+    try std.testing.expect(p.undo());
+    try std.testing.expect(p.marks.items[0].isSpan());
+}
+
+test "край диапазона двигается через отмену" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "вырезать");
+    try p.setMarkLength(0, 3 * sec);
+
+    _ = try p.moveMarkEdge(0, false, 9 * sec);
+    try std.testing.expectEqual(@as(u64, 9 * sec), p.marks.items[0].endsAt());
+    try std.testing.expect(p.undo());
+    try std.testing.expectEqual(@as(u64, 5 * sec), p.marks.items[0].endsAt());
+}
+
+test "край на том же месте не тратит шаг отмены" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "");
+    try p.setMarkLength(0, 3 * sec);
+    const after = p.past;
+    _ = try p.moveMarkEdge(0, false, 5 * sec);
+    _ = try p.moveMarkEdge(0, true, 2 * sec);
+    try std.testing.expectEqual(after, p.past);
+}
+
+test "у точки края не двигаются, и шаг отмены не тратится" {
+    const p = try sample();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "");
+    const after = p.past;
+    try std.testing.expectError(Error.NoSuchThing, p.moveMarkEdge(0, false, 9 * sec));
+    try std.testing.expectEqual(after, p.past);
 }

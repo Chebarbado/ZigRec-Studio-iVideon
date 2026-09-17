@@ -129,7 +129,7 @@ fn apart() bool {
 const cs_dblclks: c.UINT = 0x0008;
 
 /// Что человек тянет мышью прямо сейчас.
-const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point, mark };
+const Drag = enum { none, playhead, clip, trim_left, trim_right, splitter, scroll, gain, curve_point, mark, mark_edge };
 
 const Editor = struct {
     allocator: std.mem.Allocator,
@@ -151,6 +151,8 @@ const Editor = struct {
     sel_mark: ?usize = null,
     /// Открыта ли панель меток справа.
     marks_open: bool = false,
+    /// Какой край диапазона тянут. Значимо при `drag == .mark_edge`.
+    mark_left_edge: bool = false,
     /// Каким цветом ставить следующую метку.
     ///
     /// Своё поле, а не «следующий за цветом последней в списке»: список
@@ -585,6 +587,27 @@ fn drawMarkFlags(dc: c.HDC, width: i32) void {
         // а флажок шириной в девять точек показывал бы «примерно здесь».
         line(dc, x, f.top, x, view_mod.ruler_h - 1, col, 1);
 
+        // У диапазона — второй флажок на конце, растущий влево, и перемычка
+        // между ними: так видно, что кусок между краями, а не рядом с ними.
+        if (m.isSpan()) {
+            const end_x = ed.view.timeToX(m.endsAt());
+            const e = view_mod.markEndFlag(end_x);
+            if (end_x <= width) {
+                solid(dc, .{ .left = e.left, .top = e.top, .right = e.right, .bottom = e.bottom }, col);
+                line(dc, end_x, e.top, end_x, view_mod.ruler_h - 1, col, 1);
+            }
+            const bar_left = @max(f.left, view_mod.header_w);
+            const bar_right = @min(e.right, width);
+            if (bar_right > bar_left) {
+                solid(dc, .{
+                    .left = bar_left,
+                    .top = f.top,
+                    .right = bar_right,
+                    .bottom = f.top + 3,
+                }, col);
+            }
+        }
+
         // Выбранную метку обводим: иначе после щелчка непонятно, с какой
         // именно работает меню и клавиши.
         if (ed.sel_mark == i) {
@@ -626,10 +649,37 @@ fn drawMarkFlags(dc: c.HDC, width: i32) void {
 /// Тонкая и своим цветом: метка должна быть видна на фоне клипов, но не
 /// закрывать их. Толстая черта поверх волны читалась бы как обрыв звука.
 fn drawMarkLines(dc: c.HDC, width: i32, height: i32) void {
+    // Полосы диапазонов — под линейкой, одна над другой при перекрытии.
+    // Перекрытие нормально: «вырезать» и «здесь тихо» — разные пометки
+    // об одном куске, и слить их в одно пятно значило бы потерять обе.
+    var row: i32 = 0;
+    for (ed.project.marks.list()) |m| {
+        if (!m.isSpan()) continue;
+        const left = @max(ed.view.timeToX(m.at_ns), view_mod.header_w);
+        const right = @min(ed.view.timeToX(m.endsAt()), width);
+        if (right <= left) continue;
+
+        const top = view_mod.ruler_h + row * view_mod.span_band_h;
+        if (top + view_mod.span_band_h > height) break;
+        solid(dc, .{
+            .left = left,
+            .top = top,
+            .right = right,
+            .bottom = top + view_mod.span_band_h - 1,
+        }, m.colour.rgb());
+        row += 1;
+    }
+
     for (ed.project.marks.list()) |m| {
         const x = ed.view.timeToX(m.at_ns);
-        if (x < view_mod.header_w or x > width) continue;
-        line(dc, x, view_mod.ruler_h, x, height, m.colour.rgb(), 1);
+        if (x >= view_mod.header_w and x <= width) {
+            line(dc, x, view_mod.ruler_h, x, height, m.colour.rgb(), 1);
+        }
+        if (!m.isSpan()) continue;
+        const end_x = ed.view.timeToX(m.endsAt());
+        if (end_x >= view_mod.header_w and end_x <= width) {
+            line(dc, end_x, view_mod.ruler_h, end_x, height, m.colour.rgb(), 1);
+        }
     }
 }
 
@@ -1480,12 +1530,23 @@ fn sayMark(index: usize) void {
     if (index >= ed.project.marks.count) return;
     const m = ed.project.marks.items[index];
     var when: [32]u8 = undefined;
-    var say: [160]u8 = undefined;
-    const line_text = std.fmt.bufPrint(&say, "метка «{s}» ({s}) на {s}", .{
-        m.title(),
-        m.colour.label(),
-        view_mod.lengthLabel(&when, m.at_ns),
-    }) catch "метка";
+    var till: [32]u8 = undefined;
+    var how_long: [32]u8 = undefined;
+    var say: [200]u8 = undefined;
+    const line_text = if (m.isSpan())
+        std.fmt.bufPrint(&say, "метка «{s}» ({s}): {s} — {s}, длиной {s}", .{
+            m.title(),
+            m.colour.label(),
+            view_mod.lengthLabel(&when, m.at_ns),
+            view_mod.lengthLabel(&till, m.endsAt()),
+            view_mod.lengthLabel(&how_long, m.len_ns),
+        }) catch "метка"
+    else
+        std.fmt.bufPrint(&say, "метка «{s}» ({s}) на {s}", .{
+            m.title(),
+            m.colour.label(),
+            view_mod.lengthLabel(&when, m.at_ns),
+        }) catch "метка";
     ed.say(line_text);
 }
 
@@ -1514,15 +1575,23 @@ fn takeMarkColour() timeline.Marks.Colour {
 
 /// Прыжок к следующей или предыдущей метке.
 fn stepToMark(forward: bool) void {
-    const found = ed.project.marks.step(ed.playhead_ns, forward) orelse {
+    // По обеим границам: у диапазона конец — такое же место, куда прыгают,
+    // как и начало. Иначе до конца куска приходится доезжать мышью.
+    const at = ed.project.marks.stepTime(ed.playhead_ns, forward) orelse {
         ed.say(if (forward) "дальше меток нет" else "раньше меток нет");
         refresh();
         return;
     };
-    ed.sel_mark = found;
-    ed.playhead_ns = ed.project.marks.items[found].at_ns;
+    ed.playhead_ns = at;
+    // Выбранной считаем ту метку, чья это граница.
+    for (ed.project.marks.list(), 0..) |m, i| {
+        if (m.at_ns == at or (m.isSpan() and m.endsAt() == at)) {
+            ed.sel_mark = i;
+            sayMark(i);
+            break;
+        }
+    }
     showFrame();
-    sayMark(found);
     refresh();
 }
 
@@ -1570,6 +1639,14 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
         _ = c.AppendMenuW(menu, flags, @intCast(id_mark_menu + @as(c_int, @intCast(i))), @ptrCast(&wide_buf));
     }
     _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+    // Диапазон делается по указателю: человек только что стоял там, куда
+    // хочет его дотянуть, и называть время числом ему незачем.
+    const m = ed.project.marks.items[index];
+    if (m.isSpan()) {
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 102, ui.wide("Сделать точкой"));
+    } else if (ed.playhead_ns > m.at_ns + timeline.Marks.min_span_ns) {
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 102, ui.wide("Растянуть до указателя"));
+    }
     _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 100, ui.wide("Переименовать…"));
     _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 101, ui.wide("Убрать метку"));
 
@@ -1594,6 +1671,14 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
     }
     if (chosen == id_mark_menu + 100) {
         startMarkRename(index);
+        return;
+    }
+    if (chosen == id_mark_menu + 102) {
+        const was = ed.project.marks.items[index];
+        const want: u64 = if (was.isSpan()) 0 else ed.playhead_ns -| was.at_ns;
+        ed.project.setMarkLength(index, want) catch return;
+        sayMark(index);
+        refresh();
         return;
     }
     const which: usize = @intCast(chosen - id_mark_menu);
@@ -1659,8 +1744,19 @@ fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
             .bottom = row_top + view_mod.marks_row_h - 3,
         }, m.colour.rgb());
 
+        // У диапазона в столбце времени — начало и длина: «от и сколько»
+        // читается быстрее, чем «от и до», когда важен размер куска.
         var when: [32]u8 = undefined;
-        drawText(dc, left + view_mod.marks_col_time, row_top + 3, view_mod.lengthLabel(&when, m.at_ns), col_text);
+        var how_long: [32]u8 = undefined;
+        var time_buf: [64]u8 = undefined;
+        const time_text = if (m.isSpan())
+            std.fmt.bufPrint(&time_buf, "{s} +{s}", .{
+                view_mod.lengthLabel(&when, m.at_ns),
+                view_mod.lengthLabel(&how_long, m.len_ns),
+            }) catch view_mod.lengthLabel(&when, m.at_ns)
+        else
+            view_mod.lengthLabel(&when, m.at_ns);
+        drawText(dc, left + view_mod.marks_col_time, row_top + 3, time_text, col_text);
 
         const name_room = view_mod.marks_col_note - view_mod.marks_col_name - 6;
         const name_letters = @as(usize, @intCast(@divTrunc(name_room, 7)));
@@ -2394,7 +2490,22 @@ fn onDown(x: i32, y: i32) void {
             // ровно в это место.
             ed.sel_mark = hit.mark;
             ed.playhead_ns = ed.project.marks.items[hit.mark].at_ns;
-            ed.drag = .mark;
+            // У диапазона за начало тянут его левый край, а не всю метку:
+            // тащить кусок целиком нужно реже, чем поправить его границу,
+            // и для этого есть Shift.
+            const m = ed.project.marks.items[hit.mark];
+            const whole = !m.isSpan() or c.GetKeyState(c.VK_SHIFT) < 0;
+            ed.drag = if (whole) .mark else .mark_edge;
+            ed.mark_left_edge = true;
+            showFrame();
+            _ = c.SetCapture(ed.hwnd);
+            sayMark(hit.mark);
+        },
+        .mark_end => {
+            ed.sel_mark = hit.mark;
+            ed.playhead_ns = ed.project.marks.items[hit.mark].endsAt();
+            ed.drag = .mark_edge;
+            ed.mark_left_edge = false;
             showFrame();
             _ = c.SetCapture(ed.hwnd);
             sayMark(hit.mark);
@@ -2577,6 +2688,16 @@ fn onMove(x: i32, y: i32) void {
         refresh();
         return;
     }
+    if (ed.drag == .mark_edge) {
+        const index = ed.sel_mark orelse return;
+        const when = ed.view.xToTime(x);
+        ed.sel_mark = ed.project.moveMarkEdge(index, ed.mark_left_edge, when) catch return;
+        ed.playhead_ns = when;
+        ed.drag_started = true;
+        sayMark(ed.sel_mark.?);
+        refresh();
+        return;
+    }
 
     const when = ed.view.xToTime(x);
     switch (ed.drag) {
@@ -2624,7 +2745,7 @@ fn onMove(x: i32, y: i32) void {
         },
         // Ползунок громкости и точку кривой обработали выше: им не нужно
         // время под курсором, им нужна высота.
-        .gain, .curve_point, .mark, .splitter, .scroll, .none => {},
+        .gain, .curve_point, .mark, .mark_edge, .splitter, .scroll, .none => {},
     }
 }
 

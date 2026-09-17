@@ -48,8 +48,11 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer) !void {
     for (project.marks.list()) |m| {
         // Имя — весь остаток строки: в нём бывают пробелы.
         try w.print("mark {d} {s} {s}\n", .{ m.at_ns, @tagName(m.colour), m.title() });
-        // Комментарий — отдельной строкой, а не в конец `mark`: там имя
-        // уже занимает весь остаток, и второй такой же хвост туда не влезет.
+        // Длина и комментарий — отдельными строками, а не в конец `mark`:
+        // там имя уже занимает весь остаток, и второй хвост туда не влезет.
+        // Прежнее поколение таких слов не знает и пропустит их, получив
+        // точку без пояснения, — а не откажется открыть проект.
+        if (m.isSpan()) try w.print("span {d}\n", .{m.len_ns});
         if (m.comment().len > 0) try w.print("note {s}\n", .{m.comment()});
     }
 
@@ -143,6 +146,14 @@ pub fn read(project: *timeline.Project, data: []const u8) Error!void {
             // своего оттенка. Берём цвет по умолчанию и идём дальше.
             const colour = std.meta.stringToEnum(timeline.Marks.Colour, colour_text) orelse .yellow;
             _ = project.marks.add(at_ns, colour, parts.rest()) catch return Error.TooBig;
+            continue;
+        }
+
+        if (std.mem.eql(u8, word, "span")) {
+            // Как и `note`, относится к последней прочитанной метке.
+            if (project.marks.count == 0) continue;
+            const len_ns = parseU64(parts.next()) orelse return Error.Malformed;
+            project.marks.setLength(project.marks.count - 1, len_ns) catch {};
             continue;
         }
 
@@ -652,4 +663,44 @@ test "строка комментария без метки перед ней н
     );
     try std.testing.expectEqual(@as(usize, 1), p.track_count);
     try std.testing.expectEqual(@as(usize, 0), p.marks.count);
+}
+
+test "диапазон переживает запись и чтение" {
+    const p = try withTracks();
+    defer std.testing.allocator.destroy(p);
+    _ = try p.addMark(2 * sec, .red, "вырезать");
+    try p.setMarkLength(0, 3 * sec);
+    try p.setMarkComment(0, "вместе со вздохом");
+    _ = try p.addMark(8 * sec, .green, "точка");
+
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(p, &w);
+
+    const back = try makeProject();
+    defer std.testing.allocator.destroy(back);
+    try read(back, w.buffered());
+
+    try std.testing.expect(back.marks.items[0].isSpan());
+    try std.testing.expectEqual(@as(u64, 5 * sec), back.marks.items[0].endsAt());
+    try std.testing.expectEqualStrings("вместе со вздохом", back.marks.items[0].comment());
+    // Точка точкой и осталась.
+    try std.testing.expect(!back.marks.items[1].isSpan());
+    // И лишней строки про длину у неё нет.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, w.buffered(), "span "));
+}
+
+test "файл прежнего поколения без длины даёт точку" {
+    // Слова `span` он не знал, и метка была точкой. Так она и читается.
+    const p = try makeProject();
+    defer std.testing.allocator.destroy(p);
+    try read(p,
+        \\zigrec-project 1
+        \\source 60000000000 а.mp4
+        \\mark 2000000000 red вырезать
+        \\track video 0 Видео
+        \\
+    );
+    try std.testing.expectEqual(@as(usize, 1), p.marks.count);
+    try std.testing.expect(!p.marks.items[0].isSpan());
 }

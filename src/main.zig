@@ -645,12 +645,15 @@ fn listWindows(w: anytype) !u8 {
     var buf: [zigrec.source.max_windows]zigrec.source.WindowInfo = undefined;
     const list = zigrec.source.listWindows(&buf);
     for (list) |it| {
-        try w.print("{d}x{d} в точке ({d},{d})  {s}\n", .{
+        try w.print("{d}x{d} в точке ({d},{d})  {s}{s}\n", .{
             it.area.width,
             it.area.height,
             it.area.x,
             it.area.y,
             it.name(),
+            // Свёрнутое помечаем: у него и размер, и место — те, какими
+            // оно развернётся, а не те, что сейчас на экране.
+            if (it.minimized) "  (свёрнуто)" else "",
         });
     }
     if (list.len == 0) try w.writeAll("видимых окон не нашлось\n");
@@ -2339,6 +2342,9 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
     // Комментарий — отдельной строкой в файле, потому что имя уже заняло
     // весь остаток строки метки. Значит, и проверять его надо отдельно.
     try made.setMarkComment(0, "свет с другой стороны, микрофон ближе");
+    // Метка бывает и диапазоном: длина идёт отдельной строкой, а значит
+    // и проверять её надо отдельно от самой метки.
+    try made.setMarkLength(0, 3 * std.time.ns_per_s);
     _ = try made.addMark(7 * std.time.ns_per_s, .violet, "сюда заставку");
 
     try w.print("[project] собран проект: дорожек {d}, клипов {d}\n", .{
@@ -2412,6 +2418,10 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
             try w.writeAll("[project] ПРОВАЛ: метка не пережила запись целиком\n");
             return 1;
         }
+        if (a.len_ns != b.len_ns) {
+            try w.print("[project] ПРОВАЛ: длина метки была {d}, стала {d}\n", .{ a.len_ns, b.len_ns });
+            return 1;
+        }
         if (!std.mem.eql(u8, a.comment(), b.comment())) {
             try w.print("[project] ПРОВАЛ: комментарий метки был «{s}», стал «{s}»\n", .{
                 a.comment(),
@@ -2431,6 +2441,14 @@ fn projectSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []co
         try w.writeAll("[project] ПРОВАЛ: у метки без комментария он откуда-то взялся\n");
         return 1;
     }
+    // И точка осталась точкой, а не стала диапазоном нулевой длины.
+    if (back.marks.items[1].isSpan()) {
+        try w.writeAll("[project] ПРОВАЛ: точка после чтения оказалась диапазоном\n");
+        return 1;
+    }
+    try w.print("[project] первая метка — диапазон {d:.1} с, вторая — точка\n", .{
+        @as(f64, @floatFromInt(back.marks.items[0].len_ns)) / @as(f64, std.time.ns_per_s),
+    });
 
     try w.print("[project] прочитано обратно: дорожек {d}, пути и имена целы\n", .{back.track_count});
 

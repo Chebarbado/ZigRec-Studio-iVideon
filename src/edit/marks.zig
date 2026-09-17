@@ -98,10 +98,28 @@ pub const Error = error{
     TooManyMarks,
     /// Такой метки нет.
     NoSuchMark,
+    /// Это точка, а не диапазон: края у неё двигать нечем.
+    NotSpan,
 };
+
+/// Самый короткий диапазон, который имеет смысл оставлять.
+///
+/// Та же сотая доля секунды, что у клипа: короче человек не увидит,
+/// а диапазон нулевой длины — это точка, и путать их нельзя.
+pub const min_span_ns: u64 = std.time.ns_per_s / 100;
 
 pub const Mark = struct {
     at_ns: u64 = 0,
+    /// Длина диапазона. Ноль — метка стоит в точке.
+    ///
+    /// Задача #80. «Здесь вырезать» — это не точка, а кусок; точкой его
+    /// приходится помечать дважды и держать в голове, что первая метка —
+    /// начало, а вторая — конец. Стоит вставить между ними третью, и пара
+    /// распадается.
+    ///
+    /// Ноль по умолчанию не случаен: метка без длины — точка, и умолчание
+    /// модели проекта обязано быть нулевым.
+    len_ns: u64 = 0,
     colour: Colour = .yellow,
     name: [max_name]u8 = @splat(0),
     name_len: u8 = 0,
@@ -111,6 +129,34 @@ pub const Mark = struct {
 
     pub fn title(self: *const Mark) []const u8 {
         return self.name[0..self.name_len];
+    }
+
+    /// Диапазон это или точка.
+    pub fn isSpan(self: *const Mark) bool {
+        return self.len_ns > 0;
+    }
+
+    /// Докуда тянется метка. У точки — там же, где началась.
+    pub fn endsAt(self: *const Mark) u64 {
+        return self.at_ns + self.len_ns;
+    }
+
+    /// Попадает ли это время внутрь метки.
+    ///
+    /// У точки внутри нет ничего: ткнуть «в середину точки» нельзя,
+    /// и делать вид, что можно, — значит врать про попадание.
+    pub fn covers(self: *const Mark, when_ns: u64) bool {
+        return self.isSpan() and when_ns >= self.at_ns and when_ns < self.endsAt();
+    }
+
+    /// Пересекаются ли два диапазона.
+    ///
+    /// Перекрытие — это нормально: «вырезать» и «здесь тихо» — разные
+    /// пометки об одном куске, и запрещать их значило бы заставлять
+    /// человека выбирать, что важнее.
+    pub fn overlaps(self: *const Mark, other: *const Mark) bool {
+        if (!self.isSpan() or !other.isSpan()) return false;
+        return self.at_ns < other.endsAt() and other.at_ns < self.endsAt();
     }
 
     pub fn setTitle(self: *Mark, text: []const u8) void {
@@ -195,10 +241,11 @@ pub const Marks = struct {
         try self.removeAt(index);
         // Место только что освободили — занять его обратно всегда можно.
         const where = self.add(at_ns, moved.colour, moved.title()) catch unreachable;
-        // Комментарий едет вместе с меткой: он про это место, а не про
-        // то время, где метка стояла раньше.
+        // Комментарий и длина едут вместе с меткой: они про это место,
+        // а не про то время, где метка стояла раньше.
         self.items[where].note = moved.note;
         self.items[where].note_len = moved.note_len;
+        self.items[where].len_ns = moved.len_ns;
         return where;
     }
 
@@ -215,6 +262,50 @@ pub const Marks = struct {
     pub fn setColour(self: *Marks, index: usize, colour: Colour) Error!void {
         if (index >= self.count) return Error.NoSuchMark;
         self.items[index].colour = colour;
+    }
+
+    /// Сделать метку диапазоном или вернуть её в точку.
+    ///
+    /// Длина короче различимой — это точка, и превращается одно в другое
+    /// само: свёл края — стала точка. Отдельной команды «сделать точкой»
+    /// не нужно, иначе получается диапазон, который выглядит точкой,
+    /// но ведёт себя как диапазон.
+    pub fn setLength(self: *Marks, index: usize, len_ns: u64) Error!void {
+        if (index >= self.count) return Error.NoSuchMark;
+        self.items[index].len_ns = if (len_ns < min_span_ns) 0 else len_ns;
+    }
+
+    /// Подвинуть край диапазона.
+    ///
+    /// Левый край едет вместе с началом, правый — только длину. Оба
+    /// не пускаем за другой край: перевёрнутый диапазон нечем нарисовать
+    /// и не за что ухватить.
+    ///
+    /// Возвращает новый номер метки: левый край двигает начало, а значит,
+    /// метка могла перепрыгнуть соседа по времени.
+    pub fn moveEdge(self: *Marks, index: usize, from_left: bool, to_ns: u64) Error!usize {
+        if (index >= self.count) return Error.NoSuchMark;
+        const m = self.items[index];
+        if (!m.isSpan()) return Error.NotSpan;
+
+        if (from_left) {
+            const right = m.endsAt();
+            if (to_ns + min_span_ns > right) return index;
+            const moved = try self.moveTo(index, to_ns);
+            self.items[moved].len_ns = right - to_ns;
+            return moved;
+        }
+        if (to_ns < m.at_ns + min_span_ns) return index;
+        self.items[index].len_ns = to_ns - m.at_ns;
+        return index;
+    }
+
+    /// Какая метка накрывает это время. Точки не в счёт: у них нет середины.
+    pub fn spanAt(self: *const Marks, when_ns: u64) ?usize {
+        for (self.list(), 0..) |m, i| {
+            if (m.covers(when_ns)) return i;
+        }
+        return null;
     }
 
     /// Какая метка попала под указатель. `tolerance_ns` — полуширина
@@ -249,6 +340,28 @@ pub const Marks = struct {
             if (self.items[i].at_ns < from_ns) return i;
         }
         return null;
+    }
+
+    /// Куда встать при прыжке по меткам.
+    ///
+    /// У диапазона две границы, и обе — места, куда человек прыгает:
+    /// «начало куска, который вырезать» и «его конец». Останавливаться
+    /// только на начале значило бы, что до конца надо доезжать мышью.
+    pub fn stepTime(self: *const Marks, from_ns: u64, forward: bool) ?u64 {
+        var best: ?u64 = null;
+        for (self.list()) |m| {
+            const edges = [_]u64{ m.at_ns, m.endsAt() };
+            for (edges) |at| {
+                if (forward) {
+                    if (at <= from_ns) continue;
+                    if (best == null or at < best.?) best = at;
+                } else {
+                    if (at >= from_ns) continue;
+                    if (best == null or at > best.?) best = at;
+                }
+            }
+        }
+        return best;
     }
 };
 
@@ -455,4 +568,140 @@ test "комментарий едет вместе с меткой" {
 test "комментарий у несуществующей метки — отказ" {
     var m = Marks{};
     try testing.expectError(Error.NoSuchMark, m.setComment(0, "нет"));
+}
+
+// ------------------------------------------------------- диапазоны
+
+test "метка без длины — точка, и у точки нет середины" {
+    var m = Mark{ .at_ns = 5 * sec };
+    try testing.expect(!m.isSpan());
+    try testing.expectEqual(@as(u64, 5 * sec), m.endsAt());
+    // Ткнуть «в середину точки» нельзя: делать вид, что можно, значит
+    // врать про попадание.
+    try testing.expect(!m.covers(5 * sec));
+}
+
+test "диапазон накрывает своё время и не накрывает чужое" {
+    var m = Mark{ .at_ns = 2 * sec, .len_ns = 3 * sec };
+    try testing.expect(m.isSpan());
+    try testing.expectEqual(@as(u64, 5 * sec), m.endsAt());
+    try testing.expect(m.covers(2 * sec));
+    try testing.expect(m.covers(4 * sec));
+    // Правый край снаружи: иначе два соседних диапазона накрывали бы
+    // одну и ту же точку встык.
+    try testing.expect(!m.covers(5 * sec));
+    try testing.expect(!m.covers(sec));
+}
+
+test "слишком короткий диапазон становится точкой сам" {
+    // Свёл края — стала точка. Отдельной команды для этого не нужно,
+    // иначе получается диапазон, который выглядит точкой.
+    var m = Marks{};
+    _ = try m.add(sec, .red, "");
+    try m.setLength(0, 5 * sec);
+    try testing.expect(m.items[0].isSpan());
+
+    try m.setLength(0, min_span_ns - 1);
+    try testing.expect(!m.items[0].isSpan());
+    try testing.expectEqual(@as(u64, 0), m.items[0].len_ns);
+}
+
+test "края диапазона двигаются и не выворачиваются наизнанку" {
+    var m = Marks{};
+    _ = try m.add(2 * sec, .red, "вырезать");
+    try m.setLength(0, 4 * sec); // 2..6
+
+    // Правый край.
+    _ = try m.moveEdge(0, false, 8 * sec);
+    try testing.expectEqual(@as(u64, 6 * sec), m.items[0].len_ns);
+    // За левый край его не пускают: перевёрнутый диапазон нечем нарисовать.
+    _ = try m.moveEdge(0, false, sec);
+    try testing.expectEqual(@as(u64, 6 * sec), m.items[0].len_ns);
+
+    // Левый край едет вместе с началом, конец остаётся на месте.
+    _ = try m.moveEdge(0, true, 4 * sec);
+    try testing.expectEqual(@as(u64, 4 * sec), m.items[0].at_ns);
+    // Диапазон был 2..8, значит с левым краем на четвёртой секунде
+    // конец остался на восьмой: правый край при этом не двигается.
+    try testing.expectEqual(@as(u64, 8 * sec), m.items[0].endsAt());
+    // И за правый край он тоже не проходит.
+    _ = try m.moveEdge(0, true, 20 * sec);
+    try testing.expectEqual(@as(u64, 4 * sec), m.items[0].at_ns);
+}
+
+test "у точки края двигать нечем, и об этом говорят" {
+    var m = Marks{};
+    _ = try m.add(sec, .red, "");
+    try testing.expectError(Error.NotSpan, m.moveEdge(0, false, 5 * sec));
+    try testing.expectError(Error.NoSuchMark, m.moveEdge(3, false, 5 * sec));
+}
+
+test "левый край, перетащенный через соседа, не сбивает порядок" {
+    var m = Marks{};
+    _ = try m.add(1 * sec, .red, "первая");
+    try m.setLength(0, 10 * sec); // 1..11
+    _ = try m.add(3 * sec, .green, "вторая");
+
+    const now = try m.moveEdge(0, true, 5 * sec);
+    try testing.expectEqual(@as(usize, 1), now);
+    try testing.expectEqualStrings("первая", m.items[1].title());
+    try testing.expectEqual(@as(u64, 11 * sec), m.items[1].endsAt());
+
+    var last: u64 = 0;
+    for (m.list()) |it| {
+        try testing.expect(it.at_ns >= last);
+        last = it.at_ns;
+    }
+}
+
+test "диапазоны могут перекрываться — это разные пометки об одном куске" {
+    var a = Mark{ .at_ns = 0, .len_ns = 5 * sec };
+    var b = Mark{ .at_ns = 3 * sec, .len_ns = 5 * sec };
+    try testing.expect(a.overlaps(&b));
+    try testing.expect(b.overlaps(&a));
+
+    var far = Mark{ .at_ns = 10 * sec, .len_ns = sec };
+    try testing.expect(!a.overlaps(&far));
+    // Точка ни с чем не пересекается: пересекать нечему.
+    var dot = Mark{ .at_ns = 2 * sec };
+    try testing.expect(!a.overlaps(&dot));
+    try testing.expect(!dot.overlaps(&a));
+}
+
+test "какой диапазон накрывает это время" {
+    var m = Marks{};
+    _ = try m.add(2 * sec, .red, "");
+    try m.setLength(0, 3 * sec);
+    _ = try m.add(8 * sec, .green, ""); // точка
+
+    try testing.expectEqual(@as(?usize, 0), m.spanAt(3 * sec));
+    try testing.expectEqual(@as(?usize, null), m.spanAt(6 * sec));
+    // Точка не накрывает даже собственного времени.
+    try testing.expectEqual(@as(?usize, null), m.spanAt(8 * sec));
+}
+
+test "прыжок останавливается на обеих границах диапазона" {
+    // Иначе до конца куска приходится доезжать мышью.
+    var m = Marks{};
+    _ = try m.add(2 * sec, .red, "");
+    try m.setLength(0, 3 * sec); // 2..5
+
+    try testing.expectEqual(@as(?u64, 2 * sec), m.stepTime(0, true));
+    try testing.expectEqual(@as(?u64, 5 * sec), m.stepTime(2 * sec, true));
+    try testing.expectEqual(@as(?u64, null), m.stepTime(5 * sec, true));
+
+    try testing.expectEqual(@as(?u64, 5 * sec), m.stepTime(6 * sec, false));
+    try testing.expectEqual(@as(?u64, 2 * sec), m.stepTime(5 * sec, false));
+    try testing.expectEqual(@as(?u64, null), m.stepTime(2 * sec, false));
+}
+
+test "длина едет вместе с меткой" {
+    var m = Marks{};
+    _ = try m.add(sec, .red, "кусок");
+    try m.setLength(0, 4 * sec);
+    _ = try m.add(3 * sec, .green, "сосед");
+
+    const now = try m.moveTo(0, 10 * sec);
+    try testing.expectEqual(@as(u64, 4 * sec), m.items[now].len_ns);
+    try testing.expectEqualStrings("кусок", m.items[now].title());
 }
