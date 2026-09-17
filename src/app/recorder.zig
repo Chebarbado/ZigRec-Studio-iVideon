@@ -47,6 +47,8 @@ pub const Settings = struct {
     monitor: u32 = 0,
     /// Писать ли звук с микрофона в файл.
     sound: bool = false,
+    /// Писать ли системный звук — то, что идёт в колонки.
+    system_sound: bool = false,
 };
 
 /// Счёт времени с учётом пауз.
@@ -284,11 +286,13 @@ pub const Recorder = struct {
         // Звук поднимаем ДО создания файла: писатель принимает новые потоки
         // только до начала записи, и решить «пишем ли звук» задним числом
         // уже нельзя.
-        var sound = audio.Feeder{};
+        var sound = audio.Feeder{
+            .sources = .{ .microphone = settings.sound, .system = settings.system_sound },
+        };
         defer sound.deinit(self.allocator);
         const origin_ns = win32.nowNs();
-        if (settings.sound) sound.start(self.allocator, origin_ns);
-        if (sound.failure != null) self.sound_failed.store(true, .monotonic);
+        if (settings.sound or settings.system_sound) sound.start(self.allocator, origin_ns);
+        if (sound.failure != null or sound.system_failure != null) self.sound_failed.store(true, .monotonic);
 
         var enc = try encode.Writer.create(path, area.width, area.height, .{
             .fps = settings.fps,

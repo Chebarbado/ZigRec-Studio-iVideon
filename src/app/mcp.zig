@@ -45,6 +45,8 @@ pub const Request = union(enum) {
         area: ?[]const u8 = null,
         window: ?[]const u8 = null,
         sound: bool = false,
+        /// Системный звук: то, что идёт в колонки.
+        system: bool = false,
         fps: ?u32 = null,
     };
 };
@@ -176,6 +178,9 @@ fn parseValue(root: std.json.Value) Parsed {
             if (a.get("sound")) |v| if (v == .bool) {
                 start.sound = v.bool;
             };
+            if (a.get("system")) |v| if (v == .bool) {
+                start.system = v.bool;
+            };
             if (a.get("fps")) |v| if (v == .integer and v.integer > 0) {
                 start.fps = @intCast(v.integer);
             };
@@ -227,6 +232,7 @@ pub const tools_json =
     \\   "area":{"type":"string","description":"Прямоугольник рабочего стола: x,y,ширина,высота"},
     \\   "window":{"type":"string","description":"Часть заголовка окна; область поедет за окном"},
     \\   "sound":{"type":"boolean","description":"Писать ли звук с микрофона"},
+    \\   "system":{"type":"boolean","description":"Писать ли системный звук — то, что идёт в колонки; сводится с микрофоном в одну дорожку"},
     \\   "fps":{"type":"integer","description":"Кадров в секунду"}}}},
     \\{"name":"stop_recording",
     \\ "description":"Остановить запись и вернуть путь к готовому файлу mp4.",
@@ -561,4 +567,16 @@ test "ответ об ошибке — годный JSON с кодом и сло
     const err = back.value.object.get("error").?.object;
     try std.testing.expectEqual(@as(i64, -32601), err.get("code").?.integer);
     try std.testing.expect(err.get("message").?.string.len > 0);
+}
+
+test "просьба записать системный звук разбирается" {
+    var s = parse(std.testing.allocator,
+        \\{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"start_recording",
+        \\ "arguments":{"system":true}}}
+    );
+    defer s.deinit();
+    const start = s.result.request.?.start;
+    try std.testing.expect(start.system);
+    // Просили только колонки — микрофон не включается сам.
+    try std.testing.expect(!start.sound);
 }

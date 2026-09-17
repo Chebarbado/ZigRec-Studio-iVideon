@@ -966,10 +966,12 @@ fn drawWave(dc: c.HDC, clip: timeline.Clip, rect: c.RECT) void {
 
     var x: i32 = 0;
     while (x < width) : (x += 1) {
-        // Какой кусок исходника показывает этот столбик.
-        const from = clip.in_ns + @as(u64, @intCast(x)) * clip.len_ns / @as(u64, @intCast(width));
-        const to = clip.in_ns + @as(u64, @intCast(x + 1)) * clip.len_ns / @as(u64, @intCast(width));
-        const peak = env.relativeBetween(from, to);
+        // Какой кусок исходника показывает этот столбик — по времени под
+        // пикселем, а не по доле от ширины прямоугольника: прямоугольник
+        // обрезан краями окна, и доля от него при прокрутке не менялась,
+        // поэтому и волна стояла на месте (#83).
+        const span = view_mod.waveSpanAt(ed.view, clip, rect.left + x) orelse continue;
+        const peak = env.relativeBetween(span.from_ns, span.to_ns);
         const h: i32 = @intFromFloat(peak * @as(f32, @floatFromInt(half)));
         if (h <= 0) continue;
         _ = c.MoveToEx(dc, rect.left + x, middle - h, null);

@@ -99,6 +99,10 @@ pub fn explain(err: anyerror) []const u8 {
         error.MicBadFormat =>
         \\микрофон отдаёт формат, который мы не понимаем.
         ,
+        error.NoSpeakers =>
+        \\устройства вывода нет: системный звук брать неоткуда. Проверьте
+        \\«Параметры звука — Вывод».
+        ,
         error.AlreadyRecording =>
         \\запись уже идёт.
         ,
@@ -116,6 +120,7 @@ pub fn short(err: anyerror) []const u8 {
         error.NoMicrophone => "микрофон не найден или отключён",
         error.MicAccessDenied => "доступ к микрофону запрещён в настройках",
         error.MicBadFormat => "непонятный формат микрофона",
+        error.NoSpeakers => "нет устройства вывода: системный звук брать неоткуда",
         error.AccessDenied => "захват экрана запрещён системой",
         error.NoDevice => "нет устройства Direct3D",
         error.NoOutput => "нет такого монитора",

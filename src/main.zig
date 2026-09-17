@@ -17,6 +17,7 @@ const usage =
     \\        --area x,y,ш,в   прямоугольник рабочего стола
     \\        --window ТЕКСТ   окно, найденное по части заголовка; область едет за окном
     \\        --sound          писать звук с микрофона в ту же дорожку
+    \\        --system         писать и то, что идёт в колонки (сводится с микрофоном)
     \\  zigrec monitors                   какие есть мониторы
     \\  zigrec windows                    какие есть видимые окна
     \\  zigrec edit [ФАЙЛ]                окно редактора: дорожки, резка, перестановка
@@ -41,6 +42,12 @@ const usage =
     \\        самопроверка окна: всё ли поместилось в его рабочую часть
     \\  zigrec mix-smoke ИСХОДНИК.wav СМЕСЬ.wav
     \\        самопроверка громкости: свести с кривой и проверить, что она слышна
+    \\  zigrec loopback-smoke
+    \\        самопроверка системного звука: сыграть в колонки и поймать через loopback
+    \\  zigrec loopback-record ФАЙЛ.mp4
+    \\        то же, но сквозь подачу и кодировщик — в настоящий mp4
+    \\  zigrec onset-spacing ФАЙЛ.wav МС
+    \\        интервал между двумя всплесками в WAV: сходится ли с ожиданием
     \\  zigrec icons-smoke ЗНАЧКИ.png
     \\        самопроверка значков: все нарисованы, все разные, все в одной картинке
     \\  zigrec window-smoke
@@ -210,6 +217,22 @@ pub fn main(init: std.process.Init) !void {
             code = 2;
         } else {
             code = try mixSmoke(init.io, arena, w, args[2], args[3]);
+        }
+    } else if (eq(cmd, "loopback-smoke")) {
+        code = try loopbackSmoke(arena, w);
+    } else if (eq(cmd, "loopback-record")) {
+        if (args.len < 3) {
+            try w.writeAll("нужен путь к mp4\n");
+            code = 2;
+        } else {
+            code = try loopbackRecord(init.io, arena, w, args[2]);
+        }
+    } else if (eq(cmd, "onset-spacing")) {
+        if (args.len < 4) {
+            try w.writeAll("нужны путь к WAV и ожидаемый интервал в мс\n");
+            code = 2;
+        } else {
+            code = try onsetSpacing(init.io, arena, w, args[2], argInt(args, 3, 1000));
         }
     } else if (eq(cmd, "icons-smoke")) {
         if (args.len < 3) {
@@ -545,6 +568,8 @@ const RecordArgs = struct {
     /// Писать ли звук с микрофона. По умолчанию нет: запись экрана
     /// не должна начинать слушать микрофон сама по себе.
     sound: bool = false,
+    /// Системный звук: то, что идёт в колонки.
+    system: bool = false,
 };
 
 const ArgError = error{
@@ -591,6 +616,8 @@ fn parseRecordArgs(args: []const []const u8) ArgError!RecordArgs {
             sources += 1;
         } else if (eq(key, "--sound")) {
             out.sound = true;
+        } else if (eq(key, "--system")) {
+            out.system = true;
         } else if (eq(key, "--no-cursor")) {
             out.cursor = false;
         } else if (eq(key, "--no-clicks")) {
@@ -742,18 +769,31 @@ fn record(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8
     // Звук поднимаем до создания файла: писатель принимает новые потоки
     // только до начала записи. Тот же слой, что и у окна, — иначе формы
     // разъедутся, и «в окне звук есть, а из консоли нет» станет вопросом времени.
-    var sound = zigrec.audio.Feeder{};
+    var sound = zigrec.audio.Feeder{
+        .sources = .{ .microphone = opt.sound, .system = opt.system },
+    };
     defer sound.deinit(allocator);
     const origin_ns = zigrec.win32.nowNs();
-    if (opt.sound) {
+    if (opt.sound or opt.system) {
         sound.start(allocator, origin_ns);
-        if (sound.failure) |err| {
-            try w.print("[rec] звука не будет: {s}\n", .{explain(err)});
-        } else {
-            try w.print("[rec] звук: микрофон, {d} Гц, один канал, {d} кбит/с\n", .{
-                sound.settings.sample_rate,
-                sound.settings.bitrate_kbps,
-            });
+        if (opt.sound) {
+            if (sound.failure) |err| {
+                try w.print("[rec] микрофона не будет: {s}\n", .{explain(err)});
+            } else {
+                try w.print("[rec] звук: микрофон, {d} Гц, один канал, {d} кбит/с\n", .{
+                    sound.settings.sample_rate,
+                    sound.settings.bitrate_kbps,
+                });
+            }
+        }
+        if (opt.system) {
+            if (sound.system_failure) |err| {
+                try w.print("[rec] системного звука не будет: {s}\n", .{explain(err)});
+            } else {
+                try w.print("[rec] звук: и то, что идёт в колонки{s}\n", .{
+                    if (sound.track != null) " — сводится с микрофоном в одну дорожку" else "",
+                });
+            }
         }
     }
 
@@ -1188,6 +1228,35 @@ fn navSmoke(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const 
         size[1],
     });
     try w.print("[nav] просьб в очереди осталось {d}\n", .{service.behind()});
+    // #83: при прокрутке волна обязана меняться. Столбик считался по доле
+    // от видимого прямоугольника клипа, а не по времени под пикселем,
+    // и пользователь возил ползунок, глядя на одну и ту же картинку.
+    // Проверяем тем же правилом, каким рисует окно: строим огибающую
+    // с ростом громкости вдоль файла и смотрим на один пиксель до и после
+    // прокрутки.
+    {
+        const wf = zigrec.waveform;
+        var builder = wf.Builder.init(wf.buckets * 10, 600 * std.time.ns_per_s);
+        var k: usize = 0;
+        while (k < wf.buckets * 10) : (k += 1) {
+            builder.push(@as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(wf.buckets * 10)));
+        }
+        const env = builder.finish();
+        const clip = zigrec.timeline.Clip{ .at_ns = 0, .in_ns = 0, .len_ns = 600 * std.time.ns_per_s };
+        const x = zigrec.editor_view.header_w + 120;
+        const before = zigrec.editor_view.View{ .at_ns = 0, .ns_per_px = std.time.ns_per_s };
+        const after = zigrec.editor_view.View{ .at_ns = 300 * std.time.ns_per_s, .ns_per_px = std.time.ns_per_s };
+        const s0 = zigrec.editor_view.waveSpanAt(before, clip, x).?;
+        const s1 = zigrec.editor_view.waveSpanAt(after, clip, x).?;
+        const h0 = env.relativeBetween(s0.from_ns, s0.to_ns);
+        const h1 = env.relativeBetween(s1.from_ns, s1.to_ns);
+        try w.print("[nav] волна под одним пикселем до и после прокрутки: {d:.2} → {d:.2}\n", .{ h0, h1 });
+        if (h1 <= h0) {
+            try w.writeAll("[nav] ПРОВАЛ: прокрутка не меняет волну под пикселем\n");
+            return 1;
+        }
+    }
+
     try w.writeAll("[nav] ОКНО НЕ ЖДЁТ ДЕКОДЕР\n");
     return 0;
 }
@@ -1338,6 +1407,273 @@ fn checkWindow(w: anytype, name: []const u8, got: anyerror!zigrec.ui.Layout) !bo
     }
     try w.print("[ui] {s}: всё поместилось, под кнопками не рисуем\n", .{name});
     return false;
+}
+
+/// Самопроверка захвата системного звука.
+///
+/// Задача #20. Loopback нечем проверить, если ничего не играет: он молчит
+/// вместе с колонками. Поэтому стенд сам играет известный план — два
+/// всплеска по сто миллисекунд с интервалом в секунду — и одновременно
+/// слушает то, что уходит в колонки. Дальше сверяется числом: всплесков
+/// два, интервал между ними — секунда с допуском в двадцать миллисекунд,
+/// уровень — заданный, и во времени дорожки нет дыр, хотя между всплесками
+/// колонки молчали. Последнее — самое важное: без заполнения тишины
+/// loopback отдал бы два всплеска подряд, и звук уехал бы вперёд на всю
+/// паузу.
+///
+/// Без устройства вывода проверять нечего — об этом говорится словами,
+/// и стенд не считается проваленным: сборочная машина бывает без колонок.
+fn loopbackSmoke(allocator: std.mem.Allocator, w: anytype) !u8 {
+    const mic = zigrec.mic;
+    const tone = zigrec.tone;
+    const rate: u32 = 48_000;
+    const seconds: f32 = 3.2;
+
+    const track = try allocator.create(zigrec.track.Track);
+    defer allocator.destroy(track);
+    track.* = .{};
+
+    var cap = mic.Capture{ .kind = .system, .track = track, .track_rate = rate };
+    cap.start() catch |err| {
+        try w.print("[loopback] ПРОВАЛ: захват не поднялся: {s}\n", .{explain(err)});
+        return 1;
+    };
+    zigrec.win32.c.Sleep(250);
+    if (cap.failure) |err| {
+        if (err == error.NoSpeakers) {
+            try w.writeAll("[loopback] пропущено: нет устройства вывода, ловить нечего\n");
+            return 0;
+        }
+        try w.print("[loopback] ПРОВАЛ: захват не поднялся: {s}\n", .{explain(err)});
+        return 1;
+    }
+    try w.print("[loopback] слушаем колонки: {d} Гц, каналов {d}\n", .{ cap.sample_rate, cap.channels });
+
+    // Играем план. Захват идёт в своём потоке, пока мы тут ждём.
+    const plan = tone.benchPlan();
+    zigrec.play.playPlan(plan, seconds) catch |err| {
+        cap.stop();
+        if (err == error.NoSpeakers) {
+            try w.writeAll("[loopback] пропущено: нет устройства вывода, играть некуда\n");
+            return 0;
+        }
+        try w.print("[loopback] ПРОВАЛ: не удалось проиграть план: {s}\n", .{zigrec.play.explain(err)});
+        return 1;
+    };
+    zigrec.win32.c.Sleep(300);
+    cap.stop();
+
+    // Забираем всё, что поймали.
+    const room: usize = @intFromFloat((seconds + 1.0) * @as(f32, @floatFromInt(rate)));
+    const got = try allocator.alloc(i16, room);
+    defer allocator.free(got);
+    var n: usize = 0;
+    while (n < got.len) {
+        const k = track.pop(got[n..]);
+        if (k == 0) break;
+        n += k;
+    }
+    const samples = try allocator.alloc(f32, n);
+    defer allocator.free(samples);
+    for (got[0..n], 0..) |v, i| samples[i] = @as(f32, @floatFromInt(v)) / 32768.0;
+
+    const got_seconds = @as(f64, @floatFromInt(n)) / @as(f64, rate);
+    try w.print("[loopback] поймано {d} отсчётов — {d:.2} с, потерь {d}\n", .{
+        n,
+        got_seconds,
+        track.dropped.load(.monotonic),
+    });
+
+    var bad: u8 = 0;
+
+    // 1. Дыр во времени нет: поймано примерно столько, сколько играли.
+    // Меньше — значит паузы между всплесками не заполнены тишиной.
+    if (got_seconds < seconds * 0.9) {
+        try w.print("[loopback] ПРОВАЛ: играли {d:.1} с, а в дорожке только {d:.2} с — дыры во времени\n", .{
+            seconds,
+            got_seconds,
+        });
+        bad = 1;
+    }
+
+    // 2. Всплесков два, и ровно через секунду.
+    var onsets: [8]u64 = undefined;
+    const found = tone.findOnsets(samples, rate, 0.1, rate / 100, &onsets);
+    try w.print("[loopback] всплесков найдено {d}\n", .{found});
+    if (found < 2) {
+        try w.writeAll("[loopback] ПРОВАЛ: всплески не пойманы\n");
+        bad = 1;
+    } else {
+        const gap_ms = @as(f64, @floatFromInt(onsets[1] - onsets[0])) / 1e6;
+        try w.print("[loopback] интервал между всплесками {d:.1} мс (ждали 1000)\n", .{gap_ms});
+        if (@abs(gap_ms - 1000.0) > 20.0) {
+            try w.writeAll("[loopback] ПРОВАЛ: интервал уехал больше чем на 20 мс\n");
+            bad = 1;
+        }
+    }
+
+    // 3. Уровень — заданный: половина шкалы, минус шесть децибел, с допуском
+    // на громкость системы. Если Windows режет громкость вдвое — это
+    // тоже надо знать, а не гадать потом, почему запись тихая.
+    var peak: f32 = 0;
+    for (samples) |v| peak = @max(peak, @abs(v));
+    const peak_db = if (peak > 0) 20.0 * std.math.log10(peak) else -120.0;
+    try w.print("[loopback] пик {d:.1} дБ (ждали около -6)\n", .{peak_db});
+    if (peak_db < -30.0) {
+        try w.writeAll("[loopback] ПРОВАЛ: слишком тихо — loopback поймал не то или громкость выведена в ноль\n");
+        bad = 1;
+    }
+
+    if (bad != 0) return 1;
+    try w.writeAll("[loopback] СИСТЕМНЫЙ ЗВУК ЛОВИТСЯ, ВРЕМЯ БЕЗ ДЫР\n");
+    return 0;
+}
+
+/// Сквозная проверка системного звука: loopback → подача → mp4.
+///
+/// Первая половина стенда ловит звук в память; этого мало — в файл он идёт
+/// через подачу, смешение и кодировщик, и любой из них может молча потерять
+/// звук. Здесь пишется настоящий mp4 с чёрными кадрами и системным звуком,
+/// пока в колонках играет план. Проверяет его чужой декодер: `check.cmd`
+/// вынимает дорожку ffmpeg-ом и меряет интервал всплесков.
+fn loopbackRecord(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8) !u8 {
+    const bench = zigrec.testbench;
+    const width: u32 = bench.min_width;
+    const height: u32 = 64;
+    const fps: u32 = 30;
+    const seconds: f32 = 3.2;
+
+    var sound = zigrec.audio.Feeder{ .sources = .{ .microphone = false, .system = true } };
+    defer sound.deinit(allocator);
+    const origin_ns = zigrec.win32.nowNs();
+    sound.start(allocator, origin_ns);
+    if (sound.system_failure) |err| {
+        if (err == error.NoSpeakers) {
+            try w.writeAll("[loopback] запись пропущена: нет устройства вывода\n");
+            return 0;
+        }
+        try w.print("[loopback] ПРОВАЛ: системный звук не поднялся: {s}\n", .{explain(err)});
+        return 1;
+    }
+
+    const screen = try bench.Screen.init(width, height, fps);
+    const buf = try allocator.alloc(u8, screen.frameBytes());
+    defer allocator.free(buf);
+
+    var enc = zigrec.encode.Writer.create(path, width, height, .{
+        .fps = fps,
+        .audio = sound.encoderSettings(),
+    }) catch |err| {
+        try w.print("[loopback] ПРОВАЛ: кодировщик не создался: {s}\n", .{explain(err)});
+        return 1;
+    };
+
+    // План играет в своём потоке: вывод звука ждёт устройство, а кадры
+    // и слив звука должны идти своим чередом, как при настоящей записи.
+    const Player = struct {
+        fn run(plan: zigrec.tone.Plan, secs: f32, failed: *bool) void {
+            zigrec.play.playPlan(plan, secs) catch {
+                failed.* = true;
+            };
+        }
+    };
+    var play_failed = false;
+    const player = std.Thread.spawn(.{}, Player.run, .{ zigrec.tone.benchPlan(), seconds, &play_failed }) catch {
+        try w.writeAll("[loopback] ПРОВАЛ: поток вывода звука не завёлся\n");
+        return 1;
+    };
+
+    const frame_ns = std.time.ns_per_s / fps;
+    const frames: u32 = @intFromFloat(seconds * @as(f32, @floatFromInt(fps)));
+    var i: u32 = 0;
+    while (i < frames) : (i += 1) {
+        try screen.render(buf, i);
+        enc.writeFrame(buf, width * 4, frame_ns * i) catch |err| {
+            try w.print("[loopback] ПРОВАЛ на кадре {d}: {s}\n", .{ i, @errorName(err) });
+            return 1;
+        };
+        try sound.drain(&enc);
+        // Кадры идут в реальном времени: звук ловится по часам, и файл
+        // должен получить его в том же темпе, что при настоящей записи.
+        io.sleep(.fromMilliseconds(1000 / fps), .awake) catch {};
+    }
+    player.join();
+    try sound.finish(&enc);
+
+    const summary = enc.finish() catch |err| {
+        try w.print("[loopback] ПРОВАЛ на закрытии файла: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    try w.print("[loopback] записано кадров {d}, звуковых отсчётов {d} ({d:.2} с), потерь {d}\n", .{
+        summary.frames,
+        summary.audio_samples,
+        sound.seconds(),
+        sound.dropped(),
+    });
+    if (play_failed) {
+        try w.writeAll("[loopback] ПРОВАЛ: план не доиграл\n");
+        return 1;
+    }
+    if (summary.audio_samples == 0) {
+        try w.writeAll("[loopback] ПРОВАЛ: звуковая дорожка в файле пуста\n");
+        return 1;
+    }
+    // Звука должно быть примерно столько, сколько шла запись: короче —
+    // значит паузы колонок не заполнены и звук уехал вперёд.
+    if (sound.seconds() < seconds * 0.85) {
+        try w.print("[loopback] ПРОВАЛ: писали {d:.1} с, а звука в файле {d:.2} с — дыры во времени\n", .{
+            seconds,
+            sound.seconds(),
+        });
+        return 1;
+    }
+
+    try fastStart(io, allocator, w, path);
+    try w.print("[loopback] ФАЙЛ ЗАПИСАН: {s}\n", .{path});
+    return 0;
+}
+
+/// Интервал между двумя всплесками в WAV — для дорожек, чьё начало
+/// не привязано к нулю записи.
+///
+/// `audio-sync` меряет всплески от начала файла; тут начало — момент,
+/// когда стенд поднял захват, и до первого всплеска лежит неизвестная
+/// задержка устройства. Зато интервал между всплесками от неё не зависит:
+/// если он уехал, значит, время дорожки сломано.
+fn onsetSpacing(io: std.Io, allocator: std.mem.Allocator, w: anytype, path: []const u8, want_ms: u64) !u8 {
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 28)) catch |err| {
+        try w.print("[spacing] ПРОВАЛ: не читается {s}: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+    defer allocator.free(data);
+    const info = zigrec.wav.parse(data) catch |err| {
+        try w.print("[spacing] ПРОВАЛ: {s} — не WAV: {s}\n", .{ path, @errorName(err) });
+        return 1;
+    };
+    const count = info.frameCount();
+    const samples = try allocator.alloc(f32, count);
+    defer allocator.free(samples);
+    for (samples, 0..) |*v, k| v.* = zigrec.wav.sampleAt(data, info, k);
+
+    var onsets: [8]u64 = undefined;
+    const found = zigrec.tone.findOnsets(samples, info.sample_rate, 0.1, info.sample_rate / 100, &onsets);
+    try w.print("[spacing] {s}: {d:.2} с, всплесков {d}\n", .{
+        std.fs.path.basename(path),
+        info.durationSeconds(),
+        found,
+    });
+    if (found < 2) {
+        try w.writeAll("[spacing] ПРОВАЛ: нужны хотя бы два всплеска\n");
+        return 1;
+    }
+    const gap_ms = @as(f64, @floatFromInt(onsets[1] - onsets[0])) / 1e6;
+    try w.print("[spacing] интервал {d:.1} мс, ждали {d} ± 20\n", .{ gap_ms, want_ms });
+    if (@abs(gap_ms - @as(f64, @floatFromInt(want_ms))) > 20.0) {
+        try w.writeAll("[spacing] ПРОВАЛ: интервал уехал больше чем на 20 мс\n");
+        return 1;
+    }
+    try w.writeAll("[spacing] ИНТЕРВАЛ СОШЁЛСЯ\n");
+    return 0;
 }
 
 /// Самопроверка значков.
@@ -3015,4 +3351,13 @@ test "звук пишется только когда его попросили"
     try std.testing.expect(!quiet.sound);
     const loud = try parseRecordArgs(&.{"--sound"});
     try std.testing.expect(loud.sound);
+}
+
+test "ключ --system включает системный звук и не трогает микрофон" {
+    const both = try parseRecordArgs(&.{ "--sound", "--system" });
+    try std.testing.expect(both.sound);
+    try std.testing.expect(both.system);
+    const only_system = try parseRecordArgs(&.{"--system"});
+    try std.testing.expect(!only_system.sound);
+    try std.testing.expect(only_system.system);
 }

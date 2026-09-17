@@ -8,6 +8,12 @@
 //! откуда их забирает поток записи и кладёт в mp4. Выходы разные, потому что
 //! нужды разные: индикатору хватает последних миллисекунд и можно потерять
 //! кусок, записи нужен непрерывный поток без единой потери.
+//!
+//! Задача #20 добавила второй вид захвата — системный звук. Это тот же
+//! WASAPI, только устройство вывода с признаком loopback: Windows отдаёт
+//! нам то, что идёт в колонки. Отличие одно, но важное: пока в колонках
+//! тишина, loopback не отдаёт ничего — ни отсчётов, ни нулей. Для файла
+//! это дыра во времени, и её приходится заполнять нулями самим.
 const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
@@ -21,6 +27,8 @@ const c = win32.c;
 pub const Error = error{
     /// Микрофона нет, он отключён или не выбран устройством по умолчанию.
     NoMicrophone,
+    /// Устройства вывода нет: системный звук брать неоткуда.
+    NoSpeakers,
     /// Устройство есть, но не отдаёт формат, который мы понимаем.
     MicBadFormat,
     /// Windows не пустила к микрофону: запрещено в настройках приватности.
@@ -102,7 +110,11 @@ pub const Ring = struct {
 };
 
 /// Живой захват микрофона в своём потоке.
+/// Что захватываем: микрофон или то, что идёт в колонки.
+pub const Kind = enum { microphone, system };
+
 pub const Capture = struct {
+    kind: Kind = .microphone,
     ring: Ring = .{},
     running: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
@@ -159,13 +171,18 @@ pub const Capture = struct {
         ))) return Error.NoMicrophone;
         defer _ = enumerator.?.lpVtbl.*.Release.?(@ptrCast(enumerator.?));
 
+        // Системный звук берётся с устройства ВЫВОДА: loopback слушает то,
+        // что уходит в колонки, а не то, что приходит с входа.
+        const flow: c.EDataFlow = if (self.kind == .system) c.eRender else c.eCapture;
+        const missing: Error = if (self.kind == .system) Error.NoSpeakers else Error.NoMicrophone;
+
         var device: ?*c.IMMDevice = null;
         if (win32.failed(enumerator.?.lpVtbl.*.GetDefaultAudioEndpoint.?(
             enumerator.?,
-            c.eCapture,
+            flow,
             c.eConsole,
             &device,
-        ))) return Error.NoMicrophone;
+        ))) return missing;
         defer _ = device.?.lpVtbl.*.Release.?(@ptrCast(device.?));
 
         var client: ?*c.IAudioClient = null;
@@ -179,7 +196,7 @@ pub const Capture = struct {
         if (win32.failed(hres)) {
             // Запрет доступа к микрофону в настройках приватности выглядит
             // именно так, и сказать об этом надо словами, а не кодом.
-            return if (win32.hrCode(hres) == win32.hr.e_access_denied) Error.MicAccessDenied else Error.NoMicrophone;
+            return if (win32.hrCode(hres) == win32.hr.e_access_denied) Error.MicAccessDenied else missing;
         }
         defer _ = client.?.lpVtbl.*.Release.?(@ptrCast(client.?));
 
@@ -193,10 +210,13 @@ pub const Capture = struct {
         // Буфер на 200 миллисекунд: для индикатора хватает с запасом, а память
         // не тратится зря.
         const buffer_duration: c.REFERENCE_TIME = 2_000_000;
+        // Признак loopback — единственное, чем захват системы отличается
+        // от захвата микрофона на этом уровне.
+        const stream_flags: c.DWORD = if (self.kind == .system) c.AUDCLNT_STREAMFLAGS_LOOPBACK else 0;
         if (win32.failed(client.?.lpVtbl.*.Initialize.?(
             client.?,
             c.AUDCLNT_SHAREMODE_SHARED,
-            0,
+            stream_flags,
             buffer_duration,
             0,
             format,
@@ -227,10 +247,36 @@ pub const Capture = struct {
         var converted: [32768]f32 = undefined;
         var out: [32768]i16 = undefined;
 
+        // Loopback молчит, пока молчат колонки: ни отсчётов, ни нулей.
+        // Для файла это дыра во времени, и время дорожки, которое считается
+        // по числу отсчётов, уехало бы вперёд на всю паузу. Поэтому паузу
+        // заполняем нулями сами, по часам устройства.
+        var last_ns: u64 = 0;
+        var zeros: [4096]i16 = @splat(0);
+
         while (self.running.load(.acquire)) {
             var packet: c.UINT32 = 0;
             if (win32.failed(capture.?.lpVtbl.*.GetNextPacketSize.?(capture.?, &packet))) break;
             if (packet == 0) {
+                if (self.kind == .system and last_ns != 0) {
+                    if (self.track) |t| {
+                        const now = win32.nowNs();
+                        const gap_ns = now -| last_ns;
+                        // Заполняем не сразу, а когда пауза больше одного
+                        // куска: короткие паузы между кусками — обычный ход
+                        // дела, а не молчание колонок.
+                        if (gap_ns > 20 * std.time.ns_per_ms) {
+                            const need: usize = @intCast(gap_ns * self.track_rate / std.time.ns_per_s);
+                            var left = need;
+                            while (left > 0) {
+                                const chunk = @min(left, zeros.len);
+                                t.push(zeros[0..chunk], last_ns);
+                                left -= chunk;
+                            }
+                            last_ns = now;
+                        }
+                    }
+                }
                 c.Sleep(5);
                 continue;
             }
@@ -273,6 +319,9 @@ pub const Capture = struct {
                 // миллисекунд, то есть ровно на весь допуск по рассинхрону.
                 const at_ns: u64 = if (qpc_100ns != 0) @as(u64, qpc_100ns) * 100 else win32.nowNs();
                 t.push(out[0..m], at_ns);
+                // Помним, докуда дошло время звука: отсюда считается пауза,
+                // которую loopback не заполняет сам.
+                last_ns = at_ns + @as(u64, m) * std.time.ns_per_s / @max(self.track_rate, 1);
             }
 
             _ = capture.?.lpVtbl.*.ReleaseBuffer.?(capture.?, frames);
@@ -337,4 +386,15 @@ test "пустое кольцо не падает и молчит" {
     var out: [32]f32 = undefined;
     ring.snapshot(&out);
     for (out) |v| try std.testing.expectEqual(@as(f32, 0), v);
+}
+
+test "у захвата системы устройство — вывод, у микрофона — ввод" {
+    // Правило маленькое, но ошибка в нём тихая: loopback с устройства ввода
+    // просто молчит, и «системный звук» окажется пустой дорожкой.
+    var sys = Capture{ .kind = .system };
+    var mic_cap = Capture{};
+    try std.testing.expectEqual(Kind.system, sys.kind);
+    try std.testing.expectEqual(Kind.microphone, mic_cap.kind);
+    _ = &sys;
+    _ = &mic_cap;
 }

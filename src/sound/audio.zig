@@ -8,13 +8,18 @@
 //! сливала звук по-своему, они разошлись бы на первой же правке, и «в окне
 //! звук есть, а из консоли нет» стало бы вопросом времени.
 //!
-//! **Чего здесь пока нет** и что остаётся в #20 и #21: системный звук через
-//! loopback, несколько дорожек в одном файле и коррекция накапливающегося
-//! дрейфа на длинной записи.
+//! Задача #20 добавила второй источник — системный звук. Оба источника идут
+//! в одну дорожку: каждый со своим временем старта по общим часам, и тот,
+//! кто начался позже, получает тишину спереди. Сведение — в `blend`, здесь
+//! только очереди и порядок вызовов.
+//!
+//! **Чего здесь пока нет** и что остаётся в #21: несколько дорожек в одном
+//! файле и коррекция накапливающегося дрейфа на длинной записи.
 const std = @import("std");
 const encode = @import("../file/encode.zig");
 const mic = @import("mic.zig");
 const track_mod = @import("track.zig");
+const blend = @import("blend.zig");
 const win32 = @import("../win32.zig");
 
 pub const Source = enum { microphone, system_loopback };
@@ -24,13 +29,32 @@ pub const Format = struct {
     channels: u8 = 2,
 };
 
+/// Какие источники писать.
+pub const Sources = struct {
+    microphone: bool = true,
+    system: bool = false,
+};
+
 /// Подача звука в файл. Живёт ровно столько же, сколько запись.
 pub const Feeder = struct {
     settings: encode.AudioSettings = .{},
+    sources: Sources = .{},
     track: ?*track_mod.Track = null,
     capture: ?*mic.Capture = null,
+    /// Второй источник — системный звук. `null`, если его не просили
+    /// или он не поднялся.
+    system_track: ?*track_mod.Track = null,
+    system_capture: ?*mic.Capture = null,
+    /// Тишина спереди у того, кто начался позже.
+    pad_mic: blend.Padded = .{},
+    pad_sys: blend.Padded = .{},
+    /// Известна ли разница стартов. До неё сводить нечего.
+    pads_known: bool = false,
     /// Звук просили, но он не поднялся. Причина — словами, для человека.
     failure: ?anyerror = null,
+    /// Системный звук просили, но он не поднялся. Отдельно от микрофона:
+    /// один источник может отвалиться, а второй — писаться.
+    system_failure: ?anyerror = null,
     /// Сколько отсчётов уже ушло в файл.
     written: u64 = 0,
     /// На сколько звук начался позже видео.
@@ -45,17 +69,28 @@ pub const Feeder = struct {
     /// говорится словами. Терять готовое видео из-за микрофона нельзя.
     pub fn start(self: *Feeder, allocator: std.mem.Allocator, origin_ns: u64) void {
         self.origin_ns = origin_ns;
+        if (self.sources.microphone) {
+            self.startOne(allocator, .microphone);
+        }
+        if (self.sources.system) {
+            self.startOne(allocator, .system);
+        }
+    }
+
+    /// Поднять один источник. Не возвращает ошибку: если его нет, запись
+    /// всё равно должна состояться — без него, и об этом говорится словами.
+    fn startOne(self: *Feeder, allocator: std.mem.Allocator, kind: mic.Kind) void {
         const t = allocator.create(track_mod.Track) catch |err| {
-            self.failure = err;
+            self.noteFailure(kind, err);
             return;
         };
         t.* = .{};
         const m = allocator.create(mic.Capture) catch |err| {
             allocator.destroy(t);
-            self.failure = err;
+            self.noteFailure(kind, err);
             return;
         };
-        m.* = .{ .track = t, .track_rate = self.settings.sample_rate };
+        m.* = .{ .kind = kind, .track = t, .track_rate = self.settings.sample_rate };
 
         if (m.start()) {
             // Ждём, пока поток захвата поднимется и скажет, что вышло.
@@ -64,25 +99,45 @@ pub const Feeder = struct {
             // хуже, чем честный файл без дорожки вовсе.
             win32.c.Sleep(250);
             if (m.failure) |err| {
-                self.failure = err;
+                self.noteFailure(kind, err);
                 m.stop();
                 allocator.destroy(m);
                 allocator.destroy(t);
                 return;
             }
-            self.track = t;
-            self.capture = m;
+            switch (kind) {
+                .microphone => {
+                    self.track = t;
+                    self.capture = m;
+                },
+                .system => {
+                    self.system_track = t;
+                    self.system_capture = m;
+                },
+            }
             return;
         } else |err| {
-            self.failure = err;
+            self.noteFailure(kind, err);
             allocator.destroy(m);
             allocator.destroy(t);
         }
     }
 
-    /// Пишется ли звук на самом деле.
+    fn noteFailure(self: *Feeder, kind: mic.Kind, err: anyerror) void {
+        switch (kind) {
+            .microphone => self.failure = err,
+            .system => self.system_failure = err,
+        }
+    }
+
+    /// Пишется ли звук на самом деле — хоть с одного источника.
     pub fn active(self: *const Feeder) bool {
-        return self.track != null;
+        return self.track != null or self.system_track != null;
+    }
+
+    /// Пишется ли системный звук.
+    pub fn systemActive(self: *const Feeder) bool {
+        return self.system_track != null;
     }
 
     /// Метка времени очередного куска — от начала записи, тем же счётом,
@@ -98,7 +153,9 @@ pub const Feeder = struct {
 
     /// Забрать накопленное и отдать в файл. Зовётся из потока записи.
     pub fn drain(self: *Feeder, enc: *encode.Writer) !void {
-        const t = self.track orelse return;
+        // Два источника — сводим; один — отдаём как есть.
+        if (self.track != null and self.system_track != null) return self.drainBoth(enc);
+        const t = self.track orelse self.system_track orelse return;
         if (!self.offset_known) {
             const started = t.start_ns.load(.acquire);
             if (started == 0) return;
@@ -117,12 +174,60 @@ pub const Feeder = struct {
         }
     }
 
+    /// Свести микрофон и систему в одну дорожку.
+    ///
+    /// Ждём, пока оба источника отдадут первый кусок: только тогда известно,
+    /// кто начался позже и на сколько. Сводить раньше значило бы гадать.
+    fn drainBoth(self: *Feeder, enc: *encode.Writer) !void {
+        const a = self.track.?;
+        const b = self.system_track.?;
+        if (!self.pads_known) {
+            const sa = a.start_ns.load(.acquire);
+            const sb = b.start_ns.load(.acquire);
+            if (sa == 0 or sb == 0) return;
+            const pad = blend.padFor(sa, sb, self.settings.sample_rate);
+            self.pad_mic = .{ .pad_left = pad.a };
+            self.pad_sys = .{ .pad_left = pad.b };
+            self.pads_known = true;
+            // Дорожка начинается с того, кто начался раньше.
+            self.offset_ns = @min(sa, sb) -| self.origin_ns;
+            self.offset_known = true;
+        }
+
+        var mic_buf: [4096]i16 = undefined;
+        var sys_buf: [4096]i16 = undefined;
+        while (true) {
+            const can = @min(
+                @min(self.pad_mic.ready(a.available()), self.pad_sys.ready(b.available())),
+                mic_buf.len,
+            );
+            if (can == 0) break;
+
+            takeInto(a, &self.pad_mic, mic_buf[0..can]);
+            takeInto(b, &self.pad_sys, sys_buf[0..can]);
+            const n = blend.mix(mic_buf[0..can], sys_buf[0..can], &self.buf);
+            try enc.writeAudio(self.buf[0..n], self.timestampFor(self.written));
+            self.written += n;
+        }
+    }
+
+    /// Взять ровно `out.len` отсчётов: сперва тишину спереди, потом очередь.
+    fn takeInto(t: *track_mod.Track, pad: *blend.Padded, out: []i16) void {
+        const parts = pad.split(out.len);
+        @memset(out[0..parts.zeros], 0);
+        const got = t.pop(out[parts.zeros..]);
+        // Очередь обещала столько по `available`, но на всякий случай
+        // добиваем нулями: недостача лучше мусора.
+        if (got < parts.real) @memset(out[parts.zeros + got ..], 0);
+    }
+
     /// Остановить захват и дописать хвост.
     ///
     /// Без этого запись кончалась бы тишиной: между последним кадром и
     /// остановкой в очереди ещё лежат отсчёты.
     pub fn finish(self: *Feeder, enc: *encode.Writer) !void {
         if (self.capture) |m| m.stop();
+        if (self.system_capture) |m| m.stop();
         try self.drain(enc);
     }
 
@@ -136,6 +241,15 @@ pub const Feeder = struct {
             allocator.destroy(t);
             self.track = null;
         }
+        if (self.system_capture) |m| {
+            m.stop();
+            allocator.destroy(m);
+            self.system_capture = null;
+        }
+        if (self.system_track) |t| {
+            allocator.destroy(t);
+            self.system_track = null;
+        }
     }
 
     /// Сколько секунд звука ушло в файл.
@@ -144,10 +258,13 @@ pub const Feeder = struct {
             @as(f64, @floatFromInt(@max(self.settings.sample_rate, 1)));
     }
 
-    /// Сколько отсчётов потерялось из-за переполнения очереди.
+    /// Сколько отсчётов потерялось из-за переполнения очереди — с обоих
+    /// источников: потеря есть потеря, откуда бы ни пришла.
     pub fn dropped(self: *const Feeder) u64 {
-        const t = self.track orelse return 0;
-        return t.dropped.load(.monotonic);
+        var n: u64 = 0;
+        if (self.track) |t| n += t.dropped.load(.monotonic);
+        if (self.system_track) |t| n += t.dropped.load(.monotonic);
+        return n;
     }
 };
 
@@ -207,4 +324,24 @@ test "шаг меток не накапливает ошибку на длинн
     const want = ten_minutes * std.time.ns_per_s;
     const off = if (got > want) got - want else want - got;
     try std.testing.expect(off < std.time.ns_per_us);
+}
+
+test "по умолчанию пишется микрофон, а система — только по просьбе" {
+    const s = Sources{};
+    try std.testing.expect(s.microphone);
+    try std.testing.expect(!s.system);
+}
+
+test "отвалившийся системный звук не отменяет микрофон, и наоборот" {
+    // Один источник может не подняться, второй — писаться. Запись должна
+    // состояться с тем, что есть, и сказать словами, чего нет.
+    var f = Feeder{};
+    f.system_failure = error.NoSpeakers;
+    var t = @import("track.zig").Track{};
+    f.track = &t;
+    try std.testing.expect(f.active());
+    try std.testing.expect(!f.systemActive());
+    try std.testing.expect(f.encoderSettings() != null);
+    f.track = null;
+    try std.testing.expect(!f.active());
 }

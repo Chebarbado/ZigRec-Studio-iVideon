@@ -144,6 +144,16 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem Системный звук: loopback молчит вместе с колонками, поэтому стенд сам
+rem играет известный тон и ловит его. Без устройства вывода проверка
+rem честно пропускается — сборочная машина бывает без колонок.
+echo [check] самопроверка системного звука
+"zig-out\bin\zigrec.exe" loopback-smoke
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: системный звук не ловится
+  exit /b 1
+)
+
 rem Значок, который никто не нарисовал, выглядит так же, как значок,
 rem который просто не туда поставили: пустое место. А два похожих —
 rem это два названия одного и того же.
@@ -362,6 +372,30 @@ if defined FFMPEG (
   if errorlevel 1 (
     echo [check] ПРОВАЛ: звук в файле не тот или разъехался с видео
     exit /b 1
+  )
+)
+
+rem Системный звук сквозь подачу и кодировщик: поймать в память мало,
+rem в файл он идёт через смешение и AAC, и любой из них может молча потерять звук.
+rem Дорожку вынимает чужой декодер, интервал всплесков мерим мы.
+if defined FFMPEG (
+  echo [check] системный звук сквозь запись
+  "zig-out\bin\zigrec.exe" loopback-record ".check\system.mp4"
+  if errorlevel 1 (
+    echo [check] ПРОВАЛ: системный звук не записался
+    exit /b 1
+  )
+  if exist ".check\system.mp4" (
+    "%FFMPEG%" -y -v error -i ".check\system.mp4" -map 0:a:0 -c:a pcm_s16le ".check\system_track.wav"
+    if errorlevel 1 (
+      echo [check] ПРОВАЛ: ffmpeg не вынул системную дорожку
+      exit /b 1
+    )
+    "zig-out\bin\zigrec.exe" onset-spacing ".check\system_track.wav" 1000
+    if errorlevel 1 (
+      echo [check] ПРОВАЛ: всплески системного звука разъехались
+      exit /b 1
+    )
   )
 )
 

@@ -605,6 +605,31 @@ fn curve_grab_ns(view: View) u64 {
     return @as(u64, curve_grab) * view.ns_per_px;
 }
 
+/// Какой кусок исходника показывает столбик волны в точке `x` окна.
+///
+/// Задача #83. Столбик считается по ВРЕМЕНИ под пикселем, а не по доле
+/// от ширины прямоугольника клипа. Прямоугольник обрезан краями окна,
+/// и доля от него — это доля от видимой части, а не от клипа: при прокрутке
+/// видимая часть менялась, а картинка волны — нет. Пользователь возил
+/// ползунок и колёсико и видел одно и то же.
+///
+/// Возвращает `null`, если пиксель вне клипа. Кусок прижат к границам
+/// клипа: за его краем исходника для показа нет.
+pub const SourceSpan = struct { from_ns: u64, to_ns: u64 };
+
+pub fn waveSpanAt(view: View, clip: timeline.Clip, x: i32) ?SourceSpan {
+    const t0 = view.xToTime(x);
+    const t1 = view.xToTime(x + 1);
+    if (t1 <= clip.at_ns or t0 >= clip.endsAt()) return null;
+    const a = @max(t0, clip.at_ns);
+    const b = @min(t1, clip.endsAt());
+    if (b <= a) return null;
+    return .{
+        .from_ns = clip.in_ns + (a - clip.at_ns),
+        .to_ns = clip.in_ns + (b - clip.at_ns),
+    };
+}
+
 /// Подпись времени для линейки: минуты, секунды и доли, если масштаб мелкий.
 pub fn timeLabel(buf: []u8, when_ns: u64, step_ns: u64) []const u8 {
     const total_ms = when_ns / std.time.ns_per_ms;
@@ -1240,4 +1265,57 @@ test "флажок конца растёт влево от своей точки
     try std.testing.expectEqual(@as(i32, 100), f.right);
     try std.testing.expect(f.left < f.right);
     try std.testing.expect(f.top >= 0 and f.bottom <= ruler_h);
+}
+
+// ------------------------------------------------------- волна и прокрутка
+
+test "прокрутка меняет кусок исходника под тем же пикселем" {
+    // Пользователь возил ползунок, а волна не менялась: столбик считался
+    // по доле от видимой части клипа, а не по времени под пикселем.
+    const clip = timeline.Clip{ .at_ns = 0, .in_ns = 0, .len_ns = 600 * sec };
+    const x = header_w + 100;
+
+    const before = View{ .at_ns = 0, .ns_per_px = sec };
+    const after = View{ .at_ns = 100 * sec, .ns_per_px = sec };
+
+    const a = waveSpanAt(before, clip, x).?;
+    const b = waveSpanAt(after, clip, x).?;
+    try std.testing.expect(b.from_ns > a.from_ns);
+    try std.testing.expectEqual(a.from_ns + 100 * sec, b.from_ns);
+}
+
+test "обрезанный слева клип начинает не с нулевого куска" {
+    // Клип уехал за левый край окна: первый видимый столбик показывает
+    // середину исходника, а не его начало.
+    const clip = timeline.Clip{ .at_ns = 0, .in_ns = 0, .len_ns = 600 * sec };
+    const view = View{ .at_ns = 200 * sec, .ns_per_px = sec };
+    const first = waveSpanAt(view, clip, header_w).?;
+    try std.testing.expectEqual(@as(u64, 200 * sec), first.from_ns);
+}
+
+test "масштаб меняет длину куска на столбик" {
+    const clip = timeline.Clip{ .at_ns = 0, .in_ns = 0, .len_ns = 600 * sec };
+    const coarse = View{ .at_ns = 0, .ns_per_px = sec };
+    const fine = View{ .at_ns = 0, .ns_per_px = sec / 10 };
+    const c1 = waveSpanAt(coarse, clip, header_w + 5).?;
+    const f1 = waveSpanAt(fine, clip, header_w + 5).?;
+    try std.testing.expectEqual(@as(u64, sec), c1.to_ns - c1.from_ns);
+    try std.testing.expectEqual(@as(u64, sec / 10), f1.to_ns - f1.from_ns);
+}
+
+test "кусок учитывает начало клипа внутри исходника и не выходит за клип" {
+    // Клип показывает исходник с пятидесятой секунды и стоит на десятой.
+    const clip = timeline.Clip{ .at_ns = 10 * sec, .in_ns = 50 * sec, .len_ns = 20 * sec };
+    const view = View{ .at_ns = 0, .ns_per_px = sec };
+
+    // Пиксель до клипа — ничего.
+    try std.testing.expect(waveSpanAt(view, clip, header_w + 5) == null);
+    // Первый столбик клипа — пятидесятая секунда исходника.
+    const first = waveSpanAt(view, clip, header_w + 10).?;
+    try std.testing.expectEqual(@as(u64, 50 * sec), first.from_ns);
+    // Последний столбик не вылезает за конец клипа.
+    const last = waveSpanAt(view, clip, header_w + 29).?;
+    try std.testing.expect(last.to_ns <= 70 * sec);
+    // За клипом — снова ничего.
+    try std.testing.expect(waveSpanAt(view, clip, header_w + 30) == null);
 }
