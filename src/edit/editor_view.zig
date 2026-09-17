@@ -38,8 +38,10 @@ pub const edge_grab: i32 = 6;
 /// обрезается на втором слове. Но это умолчание: край панели тянут
 /// мышью (#93), и ширина запоминается.
 pub const marks_panel_w: i32 = 300;
-/// Уже этого панель не бывает: столбец «t» и половина имени.
-pub const min_marks_panel_w: i32 = 180;
+/// Уже этого панель не бывает: заголовки столбцов обеих панелей
+/// («комментарий» у меток, «заметка» у дублей) должны влезать и при
+/// минимальной ширине — стенд `ui-smoke` меряет их именно при ней.
+pub const min_marks_panel_w: i32 = 290;
 /// Шире — панель перестаёт быть панелью.
 pub const max_marks_panel_w: i32 = 700;
 
@@ -93,6 +95,19 @@ pub const marks_col_note: i32 = 168;
 
 /// В какой столбец попали.
 pub const MarksColumn = enum { time, name, note };
+
+/// Колонки панели дублей (#26): начало, длина, заметка.
+pub const takes_col_time: i32 = 8;
+pub const takes_col_len: i32 = 76;
+pub const takes_col_note: i32 = 150;
+
+pub const TakesColumn = enum { time, len, note };
+
+pub fn takesColumnAt(x_in_panel: i32) TakesColumn {
+    if (x_in_panel >= takes_col_note) return .note;
+    if (x_in_panel >= takes_col_len) return .len;
+    return .time;
+}
 
 pub fn marksColumnAt(x_in_panel: i32) MarksColumn {
     if (x_in_panel >= marks_col_note) return .note;
@@ -1224,8 +1239,8 @@ test "в узком окне панель ужимается, а совсем в
     try std.testing.expectEqual(@as(i32, 0), marksPanelWidth(narrow, true, 0));
     try std.testing.expectEqual(narrow, stageWidth(narrow, true, 0));
 
-    const tight = min_timeline_w + 200;
-    try std.testing.expectEqual(@as(i32, 200), marksPanelWidth(tight, true, 0));
+    const tight = min_timeline_w + 295;
+    try std.testing.expectEqual(@as(i32, 295), marksPanelWidth(tight, true, 0));
     try std.testing.expectEqual(min_timeline_w, stageWidth(tight, true, 0));
 
     const roomy = min_timeline_w + marks_panel_w;
@@ -1398,4 +1413,13 @@ test "ползунок на минимуме — грубый, во весь э�
     // Десять минут из часа — сто точек, тянуть можно.
     try std.testing.expect(!thumbTooCoarse(600, 600 * sec, 3600 * sec));
     try std.testing.expect(!thumbTooCoarse(600, 3600 * sec, 3600 * sec));
+}
+
+test "колонки панели дублей делятся по тем же правилам, что у меток" {
+    try std.testing.expectEqual(TakesColumn.time, takesColumnAt(takes_col_time));
+    try std.testing.expectEqual(TakesColumn.len, takesColumnAt(takes_col_len));
+    try std.testing.expectEqual(TakesColumn.note, takesColumnAt(takes_col_note + 40));
+    // Заметка начинается там, где заканчивается длина, и всё это уже
+    // минимальной ширины панели.
+    try std.testing.expect(takes_col_note < min_marks_panel_w);
 }

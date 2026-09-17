@@ -1436,6 +1436,16 @@ fn uiSmoke(allocator: std.mem.Allocator, w: anytype) !u8 {
     if (try checkWindow(w, "запись", zigrec.ui.checkLayout(allocator))) bad = 1;
     if (try checkWindow(w, "редактор", zigrec.editor.checkLayout(allocator))) bad = 1;
 
+    // Столбцы панели дублей (#26): при минимальной ширине панели.
+    var tcols: [zigrec.editor.takes_columns.len]zigrec.editor.ColumnFit = undefined;
+    for (zigrec.editor.takesColumnFits(&tcols)) |fit| {
+        try w.print("[ui] столбец дублей «{s}»: надо {d}, есть {d}\n", .{ fit.label, fit.need, fit.have });
+        if (!fit.fits()) {
+            try w.print("[ui] ПРОВАЛ: заголовок столбца дублей «{s}» не влезает\n", .{fit.label});
+            bad = 1;
+        }
+    }
+
     // Столбцы панели меток тоже рисуются своим кодом.
     var cols: [zigrec.editor.marks_columns.len]zigrec.editor.ColumnFit = undefined;
     for (zigrec.editor.marksColumnFits(&cols)) |fit| {

@@ -26,6 +26,7 @@ const pack = @import("../file/project_pack.zig");
 const player_mod = @import("../file/player.zig");
 const frames = @import("../file/frames.zig");
 const keyframes = @import("../file/keyframes.zig");
+const takes_mod = @import("takes.zig");
 const clock_play = @import("../sound/clock_play.zig");
 const play = @import("../sound/play.zig");
 const stepping = @import("stepping.zig");
@@ -59,6 +60,7 @@ const id_menu_save_bundle = 305;
 const id_menu_close = 303;
 const id_menu_mixdown = 306;
 const id_menu_marks = 310;
+const id_menu_takes = 318;
 /// Номера строк в списках недавних. Два ряда подряд, по одному на список.
 const id_recent_rec = 700;
 const id_recent_view = 740;
@@ -155,6 +157,13 @@ const Editor = struct {
     curve_point: usize = 0,
     /// Выбранная метка. `null` — ни одна не выбрана.
     sel_mark: ?usize = null,
+    /// Правая панель показывает дубли, а не метки (#26).
+    panel_takes: bool = false,
+    /// Выбранная строка списка дублей.
+    sel_take: ?usize = null,
+    /// Поле ввода правит заметку дубля; номер исходника — в `name_take_source`.
+    name_of_take: bool = false,
+    name_take_source: u16 = 0,
     /// Открыта ли панель меток справа.
     marks_open: bool = false,
     /// Какой край диапазона тянут. Значимо при `drag == .mark_edge`.
@@ -1634,9 +1643,10 @@ fn startRecordTo(track_index: usize) void {
     if (track_index >= ed.project.track_count) return;
     if (ed.project.tracks[track_index].kind != .audio) return;
 
-    // Во время воспроизведения писать нельзя: указатель едет, и запись
-    // легла бы не туда, куда человек её ставил.
-    if (ed.playing) togglePlay();
+    // Дубль пишут поверх идущего видео (#26): картинка идёт, человек
+    // говорит по ней. Начало дубля — где стоял указатель до запуска;
+    // дальше указатель едет вместе с видео, а запись — вместе с ним.
+    const anchor = ed.playhead_ns;
 
     if (mic_ring == null) {
         mic_ring = ed.allocator.create(sound_track.Track) catch {
@@ -1661,10 +1671,12 @@ fn startRecordTo(track_index: usize) void {
     };
 
     ed.rec_track = track_index;
-    ed.rec_at_ns = ed.playhead_ns;
+    ed.rec_at_ns = anchor;
     ed.rec_started_ns = win32.nowNs();
     _ = c.SetTimer(ed.hwnd, timer_mic, 50, null);
-    ed.say("идёт запись с микрофона; нажмите микрофон ещё раз, чтобы остановить");
+    if (!ed.playing) togglePlay();
+    ed.playhead_ns = anchor;
+    ed.say("идёт запись дубля поверх видео; нажмите микрофон ещё раз, чтобы остановить");
     refresh();
 }
 
@@ -1705,6 +1717,8 @@ fn onMicTick() void {
 fn stopRecordTo() void {
     const track_index = ed.rec_track orelse return;
     _ = c.KillTimer(ed.hwnd, timer_mic);
+    // Видео шло ради дубля — с ним и останавливается.
+    if (ed.playing) togglePlay();
     mic_capture.stop();
     // Ещё раз: после остановки в кольце остаётся последний кусок.
     drainMic();
@@ -1741,7 +1755,9 @@ fn stopRecordTo() void {
         return;
     };
     dropAudio();
-    ed.project.place(track_index, source, ed.rec_at_ns, len_ns) catch {
+    // Поверх чужого звука дубль не кладём: занято — на дорожку «дубли».
+    const target = takes_mod.trackForTake(ed.project, track_index, ed.rec_at_ns, len_ns) catch track_index;
+    ed.project.place(target, source, ed.rec_at_ns, len_ns) catch {
         ed.say("клипов на дорожке больше не помещается");
         refresh();
         return;
@@ -1749,23 +1765,30 @@ fn stopRecordTo() void {
     // Волна считается в стороне: клип должен появиться сразу.
     startWave(where, source);
 
+    // Новый дубль — выбран в списке, если список открыт: его сразу видно.
+    ed.sel_take = null;
     var say: [256]u8 = undefined;
-    const line_text = std.fmt.bufPrint(&say, "записано {d:.1} с на дорожку «{s}»: {s}", .{
+    const line_text = std.fmt.bufPrint(&say, "записан дубль {d:.1} с на дорожку «{s}»: {s}", .{
         @as(f64, @floatFromInt(len_ns)) / @as(f64, std.time.ns_per_s),
-        ed.project.tracks[track_index].title(),
+        ed.project.tracks[target].title(),
         std.fs.path.basename(where),
     }) catch "запись легла на дорожку";
     ed.say(line_text);
     refresh();
 }
 
-/// Куда положить записанное: рядом с прочими записями, с датой в имени.
+/// Куда положить записанное: в папку «дубли» рядом с проектом, чтобы
+/// дубли переезжали с ним; без проекта — рядом с прочими записями.
 fn micFileName(buf: []u8) ?[]const u8 {
-    const dir = settingsDir(ed.allocator) orelse return null;
-    defer ed.allocator.free(dir);
+    const fallback = settingsDir(ed.allocator) orelse return null;
+    defer ed.allocator.free(fallback);
+    var dir_buf: [600]u8 = undefined;
+    const dir = takes_mod.dirFor(&dir_buf, projectPath(), fallback);
+    ensureDir(dir);
     const now = recorder.DateTime.now();
-    return std.fmt.bufPrint(buf, "{s}\\озвучка {d:0>4}-{d:0>2}-{d:0>2} {d:0>2}-{d:0>2}-{d:0>2}.wav", .{
+    return std.fmt.bufPrint(buf, "{s}\\{s}{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}-{d:0>2}-{d:0>2}.wav", .{
         dir,
+        takes_mod.take_prefix,
         now.year,
         now.month,
         now.day,
@@ -1773,6 +1796,16 @@ fn micFileName(buf: []u8) ?[]const u8 {
         now.minute,
         now.second,
     }) catch null;
+}
+
+/// Завести папку, если её нет. Есть — ничего не делаем; не вышло —
+/// скажет уже запись файла.
+fn ensureDir(path: []const u8) void {
+    var wide: [1024]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide, path) catch return;
+    if (n >= wide.len) return;
+    wide[n] = 0;
+    _ = c.CreateDirectoryW(@ptrCast(&wide), null);
 }
 
 fn writeMicWav(where: []const u8) !void {
@@ -2252,6 +2285,10 @@ fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
     const bottom = height - status_h;
     solid(dc, .{ .left = left, .top = top, .right = window_w, .bottom = bottom }, 0x00FAFAFA);
     line(dc, left, top, left, bottom, col_lane_line, 1);
+    if (ed.panel_takes) {
+        drawTakesPanel(dc, left, top, bottom, window_w, panel_w);
+        return;
+    }
 
     // Заголовок столбцов.
     solid(dc, .{
@@ -2327,6 +2364,117 @@ fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
     }
 }
 
+/// Панель дублей (#26): начало, длина, заметка; выбранный подсвечен.
+fn drawTakesPanel(dc: c.HDC, left: i32, top: i32, bottom: i32, window_w: i32, panel_w: i32) void {
+    solid(dc, .{ .left = left, .top = top, .right = window_w, .bottom = top + view_mod.marks_head_h }, 0x00F0F0F0);
+    drawText(dc, left + view_mod.takes_col_time, top + 4, "t", 0x00707070);
+    drawText(dc, left + view_mod.takes_col_len, top + 4, "длина", 0x00707070);
+    drawText(dc, left + view_mod.takes_col_note, top + 4, "заметка", 0x00707070);
+    line(dc, left, top + view_mod.marks_head_h - 1, window_w, top + view_mod.marks_head_h - 1, col_lane_line, 1);
+
+    var out: [takes_mod.max_takes]takes_mod.Take = undefined;
+    const list = takes_mod.list(ed.project, &out);
+    if (list.len == 0) {
+        drawText(dc, left + 8, top + view_mod.marks_head_h + 8, "дублей нет: микрофон на звуковой дорожке пишет дубль", 0x00909090);
+        return;
+    }
+
+    for (list, 0..) |t, i| {
+        const row_top = top + view_mod.marksRowTop(i);
+        if (row_top + view_mod.marks_row_h > bottom) break;
+        if (ed.sel_take == i) {
+            solid(dc, .{ .left = left + 1, .top = row_top, .right = window_w, .bottom = row_top + view_mod.marks_row_h }, 0x00E8E8FF);
+        }
+        var when: [32]u8 = undefined;
+        var how_long: [32]u8 = undefined;
+        drawText(dc, left + view_mod.takes_col_time, row_top + 3, view_mod.lengthLabel(&when, t.at_ns), col_text);
+        drawText(dc, left + view_mod.takes_col_len, row_top + 3, view_mod.lengthLabel(&how_long, t.len_ns), col_text);
+        const note_room = panel_w - view_mod.takes_col_note - 6;
+        const note_letters = @as(usize, @intCast(@divTrunc(note_room, 7)));
+        const note = takes_mod.noteOf(ed.project, t);
+        drawText(dc, left + view_mod.takes_col_note, row_top + 3, note[0..timeline.Marks.fitName(note, note_letters)], 0x00505050);
+        line(dc, left, row_top + view_mod.marks_row_h - 1, window_w, row_top + view_mod.marks_row_h - 1, 0x00E4E4E4, 1);
+    }
+}
+
+/// Щелчок по списку дублей: выбрать клип и встать на его начало.
+fn onTakesPanelDown(at: PanelPoint) void {
+    var out: [takes_mod.max_takes]takes_mod.Take = undefined;
+    const list = takes_mod.list(ed.project, &out);
+    const row = view_mod.marksRowAt(at.y, list.len) orelse {
+        ed.sel_take = null;
+        refresh();
+        return;
+    };
+    const t = list[row];
+    ed.sel_take = row;
+    ed.has_selection = true;
+    ed.sel_track = t.track;
+    ed.sel_clip = t.clip;
+    ed.playhead_ns = t.at_ns;
+    showFrame();
+    var buf: [160]u8 = undefined;
+    var len_buf: [32]u8 = undefined;
+    ed.say(std.fmt.bufPrint(&buf, "дубль {d} · {s}; пробел — прослушать с видео, Delete — убрать", .{
+        row + 1,
+        view_mod.lengthLabel(&len_buf, t.len_ns),
+    }) catch "дубль выбран");
+    refresh();
+}
+
+/// Двойной щелчок по списку дублей: заметка правится на месте.
+fn onTakesPanelDouble(at: PanelPoint) void {
+    var out: [takes_mod.max_takes]takes_mod.Take = undefined;
+    const list = takes_mod.list(ed.project, &out);
+    const row = view_mod.marksRowAt(at.y, list.len) orelse return;
+    if (view_mod.takesColumnAt(at.x) != .note) {
+        ed.say("дубль двигают как клип на дорожке; здесь правится заметка");
+        refresh();
+        return;
+    }
+    if (ed.name_box != null) return;
+    var rect: c.RECT = undefined;
+    if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
+    const panel_w = view_mod.marksPanelWidth(rect.right, ed.marks_open, marks_w);
+    if (panel_w == 0) return;
+    const left = rect.right - panel_w;
+    const box = ui.editBox(
+        ed.hwnd,
+        id_rename_box,
+        left + view_mod.takes_col_note,
+        toolbar_h + view_mod.marksRowTop(row) + 1,
+        panel_w - view_mod.takes_col_note - 4,
+        view_mod.marks_row_h - 2,
+    );
+    if (box == null) return;
+    ed.name_box = box;
+    ed.name_of_mark = false;
+    ed.name_of_take = true;
+    ed.name_take_source = list[row].source;
+    ed.name_prev_proc = @bitCast(c.SetWindowLongPtrW(box, gwlp_wndproc, @bitCast(@intFromPtr(&renameProc))));
+    ui.setText(box, takes_mod.noteOf(ed.project, list[row]));
+    _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
+    _ = c.SetFocus(box);
+    ed.say("заметка к дублю, затем Enter; Esc — оставить как было");
+    refresh();
+}
+
+/// Окно дублей: та же правая панель, другой список.
+fn toggleTakesPanel() void {
+    if (ed.marks_open and ed.panel_takes) {
+        toggleMarksPanel();
+        return;
+    }
+    if (!ed.marks_open) {
+        toggleMarksPanel();
+        if (!ed.marks_open) return;
+    }
+    ed.panel_takes = true;
+    buildMenu(ed.hwnd);
+    ed.say("панель дублей открыта");
+    refresh();
+}
+
 /// Куда попали внутри панели меток.
 const PanelPoint = struct { x: i32, y: i32 };
 
@@ -2350,11 +2498,39 @@ pub const ColumnFit = struct {
 /// Панель рисуется своим кодом, и её подписи не проходят через замер
 /// органов управления: обрезанный заголовок столбца видно только глазами.
 /// Эта же ошибка уже была у поля для броска.
+/// Заголовки панели дублей — тем же замером, что у меток (#26).
+pub const takes_columns = [_][]const u8{ "t", "длина", "заметка" };
+
+pub fn takesColumnFits(out: *[takes_columns.len]ColumnFit) []const ColumnFit {
+    const room = [_]i32{
+        view_mod.takes_col_len - view_mod.takes_col_time,
+        view_mod.takes_col_note - view_mod.takes_col_len,
+        view_mod.min_marks_panel_w - view_mod.takes_col_note,
+    };
+    const dc = c.CreateCompatibleDC(null);
+    if (dc == null) {
+        for (takes_columns, 0..) |label, i| out[i] = .{ .label = label, .have = room[i] };
+        return out[0..takes_columns.len];
+    }
+    defer _ = c.DeleteDC(dc);
+    const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
+    const old_font = c.SelectObject(dc, font);
+    defer _ = c.SelectObject(dc, old_font);
+    for (takes_columns, 0..) |label, i| {
+        var wide: [64]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&wide, label) catch 0;
+        var size: c.SIZE = std.mem.zeroes(c.SIZE);
+        _ = c.GetTextExtentPoint32W(dc, @ptrCast(&wide), @intCast(n), &size);
+        out[i] = .{ .label = label, .need = size.cx + 6, .have = room[i] };
+    }
+    return out[0..takes_columns.len];
+}
+
 pub fn marksColumnFits(out: *[marks_columns.len]ColumnFit) []const ColumnFit {
     const room = [_]i32{
         view_mod.marks_col_name - view_mod.marks_col_time,
         view_mod.marks_col_note - view_mod.marks_col_name,
-        view_mod.marks_panel_w - view_mod.marks_col_note,
+        view_mod.min_marks_panel_w - view_mod.marks_col_note,
     };
     const dc = c.CreateCompatibleDC(null);
     if (dc == null) {
@@ -2410,6 +2586,15 @@ fn toggleMarksPanel() void {
     var rect: c.RECT = undefined;
     if (c.GetClientRect(ed.hwnd, &rect) == 0) return;
 
+    // Панель открыта, но показывает дубли — Ctrl+M возвращает метки,
+    // а не закрывает панель.
+    if (ed.marks_open and ed.panel_takes) {
+        ed.panel_takes = false;
+        buildMenu(ed.hwnd);
+        ed.say("панель меток открыта");
+        refresh();
+        return;
+    }
     const want = !ed.marks_open;
     if (want and view_mod.marksPanelWidth(rect.right, true, marks_w) == 0) {
         // Наполовину заехавшая панель хуже, чем её отсутствие: об этом
@@ -2439,6 +2624,7 @@ fn insideMarksPanel(x: i32, y: i32) ?PanelPoint {
 
 /// Щелчок по списку меток: прыжок к метке.
 fn onMarksPanelDown(at: PanelPoint) void {
+    if (ed.panel_takes) return onTakesPanelDown(at);
     const row = view_mod.marksRowAt(at.y, ed.project.marks.count) orelse {
         ed.sel_mark = null;
         refresh();
@@ -2453,6 +2639,7 @@ fn onMarksPanelDown(at: PanelPoint) void {
 
 /// Двойной щелчок по списку: правка имени или комментария на месте.
 fn onMarksPanelDouble(at: PanelPoint) void {
+    if (ed.panel_takes) return onTakesPanelDouble(at);
     const row = view_mod.marksRowAt(at.y, ed.project.marks.count) orelse return;
     switch (view_mod.marksColumnAt(at.x)) {
         // Время правят не текстом, а перетаскиванием метки: набирать
@@ -2494,6 +2681,7 @@ fn startMarksPanelEdit(row: usize, is_note: bool) void {
 
     ed.name_box = box;
     ed.name_of_mark = true;
+    ed.name_of_take = false;
     ed.name_mark = row;
     ed.name_is_note = is_note;
     ed.name_prev_proc = @bitCast(c.SetWindowLongPtrW(box, gwlp_wndproc, @bitCast(@intFromPtr(&renameProc))));
@@ -3783,6 +3971,19 @@ fn finishRename(accept: bool) void {
     ed.name_prev_proc = 0;
     _ = c.SetFocus(ed.hwnd);
 
+    const of_take = ed.name_of_take;
+    ed.name_of_take = false;
+    if (accept and of_take) {
+        // Пустая заметка — тоже заметка: её стирают.
+        ed.project.setSourceNote(ed.name_take_source, typed) catch {
+            ed.say("заметка не принята");
+            refresh();
+            return;
+        };
+        ed.say(if (typed.len > 0) "заметка к дублю записана" else "заметка стёрта");
+        refresh();
+        return;
+    }
     if (accept and typed.len > 0) {
         if (ed.name_of_mark and ed.name_is_note) {
             ed.project.setMarkComment(ed.name_mark, typed) catch {
@@ -3981,9 +4182,15 @@ fn buildMenu(hwnd: c.HWND) void {
     const view_menu = c.CreatePopupMenu();
     _ = c.AppendMenuW(
         view_menu,
-        if (ed.marks_open) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
+        if (ed.marks_open and !ed.panel_takes) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
         id_menu_marks,
         ui.wide("Окно меток\tCtrl+M"),
+    );
+    _ = c.AppendMenuW(
+        view_menu,
+        if (ed.marks_open and ed.panel_takes) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
+        id_menu_takes,
+        ui.wide("Окно дублей\tCtrl+D"),
     );
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(view_menu), ui.wide("Вид"));
 
@@ -4074,6 +4281,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_save_bundle => saveProjectBundle(),
                 id_menu_mixdown => mixdownToWav(),
                 id_menu_marks => toggleMarksPanel(),
+                id_menu_takes => toggleTakesPanel(),
                 id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_recent_rec...id_recent_rec + recent_mod.max_items - 1 => {
                     openFromRecent(&ed.recent.recorded, @intCast((wp & 0xFFFF) - id_recent_rec));
@@ -4186,6 +4394,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 c.VK_F2 => if (ed.sel_mark) |i| startMarkRename(i) else startRename(ed.cur_track),
                 // M — «метка»: ставится там, где стоит указатель.
                 'M' => if (ctrl) toggleMarksPanel() else addMarkAtPlayhead(),
+                'D' => if (ctrl) toggleTakesPanel(),
                 // Прыжок по меткам: их и ставят затем, чтобы пройти подряд.
                 c.VK_OEM_4 => stepToMark(false),
                 c.VK_OEM_6 => stepToMark(true),

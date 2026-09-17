@@ -198,6 +198,20 @@ pub const Source = struct {
     path: [260]u8 = @splat(0),
     path_len: usize = 0,
     duration_ns: u64 = 0,
+    /// Заметка к исходнику — у дублей озвучки (#26): «первый заход,
+    /// с запинкой». Восемьдесят байт: строка списка, не дневник.
+    note: [80]u8 = @splat(0),
+    note_len: usize = 0,
+
+    pub fn comment(self: *const Source) []const u8 {
+        return self.note[0..self.note_len];
+    }
+
+    pub fn setNote(self: *Source, text: []const u8) void {
+        const n = @min(text.len, self.note.len);
+        @memcpy(self.note[0..n], text[0..n]);
+        self.note_len = n;
+    }
 
     /// Перенаправить исходник на другой файл.
     ///
@@ -1037,6 +1051,16 @@ pub const Project = struct {
         if (std.mem.eql(u8, self.marks.items[index].comment(), clean)) return;
         self.remember();
         self.marks.setComment(index, clean) catch unreachable;
+    }
+
+    /// Заметка к исходнику (дублю). Пробелы по краям — не заметка.
+    ///
+    /// Без снимка отмены: снимок хранит дорожки и метки, а исходники —
+    /// нет, и «отменить заметку» откатило бы правку клипов, а заметку
+    /// оставило. Заметка — пометка на полях, её правят прямо.
+    pub fn setSourceNote(self: *Project, index: u16, text: []const u8) Error!void {
+        if (index >= self.source_count) return Error.NoSuchThing;
+        self.sources[index].setNote(std.mem.trim(u8, text, " "));
     }
 
     /// Сделать метку диапазоном или вернуть её в точку.

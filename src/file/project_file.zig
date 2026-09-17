@@ -45,6 +45,9 @@ pub fn write(project: *const timeline.Project, w: *std.Io.Writer, base_dir: []co
     for (project.sourceList()) |src| {
         const shown = relativeTo(base_dir, src.fullPath()) orelse src.fullPath();
         try w.print("source {d} {s}\n", .{ src.duration_ns, shown });
+        // Заметка дубля — своей строкой за исходником: остаток строки
+        // `source` уже занят путём с пробелами.
+        if (src.comment().len > 0) try w.print("take {s}\n", .{src.comment()});
     }
 
     // Метки — до дорожек: они принадлежат всему проекту, а не дорожке,
@@ -132,6 +135,13 @@ pub fn read(project: *timeline.Project, data: []const u8, base_dir: []const u8) 
             var full_buf: [520]u8 = undefined;
             const full = resolve(&full_buf, base_dir, path);
             _ = project.addSource(full, duration) catch return Error.TooBig;
+            continue;
+        }
+
+        if (std.mem.eql(u8, word, "take")) {
+            // Относится к последнему исходнику; без исходника — пропускаем,
+            // как любое непонятное слово.
+            if (project.source_count > 0) project.sources[project.source_count - 1].setNote(parts.rest());
             continue;
         }
 
@@ -870,4 +880,20 @@ test "незнакомый значок не мешает открыть про�
     try std.testing.expectEqual(@as(usize, 1), p.marks.count);
     try std.testing.expectEqual(timeline.Marks.Icons.Icon.none, p.marks.items[0].icon);
     try std.testing.expectEqual(timeline.Marks.Icons.Icon.none, p.tracks[0].icon);
+}
+
+test "заметка дубля пишется за исходником и читается обратно" {
+    var p = timeline.Project{};
+    const s = try p.addSource("D:\\v\\дубли\\озвучка 2026-09-17 12-00-00.wav", 3 * std.time.ns_per_s);
+    try p.setSourceNote(s, "второй заход, чище");
+    _ = try p.addSource("D:\\v\\фильм.mp4", 60 * std.time.ns_per_s);
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&p, &w, "");
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "take второй заход, чище") != null);
+
+    var back = timeline.Project{};
+    try read(&back, w.buffered(), "");
+    try std.testing.expectEqualStrings("второй заход, чище", back.sourceList()[0].comment());
+    try std.testing.expectEqualStrings("", back.sourceList()[1].comment());
 }

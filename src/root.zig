@@ -28,6 +28,7 @@ pub const devices = @import("sound/devices.zig");
 pub const mic_probe = @import("sound/probe.zig");
 pub const clock_play = @import("sound/clock_play.zig");
 pub const keyframes = @import("file/keyframes.zig");
+pub const takes = @import("edit/takes.zig");
 pub const stepping = @import("edit/stepping.zig");
 pub const mcp_corner = @import("app/mcp_corner.zig");
 pub const boost = @import("app/boost.zig");
