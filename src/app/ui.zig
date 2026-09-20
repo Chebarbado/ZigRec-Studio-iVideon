@@ -31,6 +31,7 @@ const gain = @import("../sound/gain.zig");
 const control = @import("control.zig");
 const mcp = @import("mcp.zig");
 const settings_mod = @import("settings.zig");
+const lang = @import("../lang.zig");
 const paths = @import("paths.zig");
 const recent_mod = @import("recent.zig");
 const events_mod = @import("../file/events.zig");
@@ -81,6 +82,9 @@ const id_set_listen = 342;
 const id_set_boost = 343;
 const id_set_pick = 344;
 const id_set_follow = 345;
+/// Язык окон (#100): два переключателя.
+const id_set_lang_ru = 346;
+const id_set_lang_en = 347;
 /// Микрофон и проба (#22).
 const id_mic = 118;
 const id_probe = 119;
@@ -413,7 +417,7 @@ pub fn button(parent: c.HWND, comptime text: []const u8, id: c_int, x: i32, y: i
     const hwnd = c.CreateWindowExW(
         0,
         wide("BUTTON"),
-        wide(text),
+        lang.tw(text),
         @as(c.DWORD, @bitCast(@as(u32, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP) | style)),
         x,
         y,
@@ -480,7 +484,7 @@ fn label(parent: c.HWND, comptime text: []const u8, x: i32, y: i32, w: i32, h: i
     return c.CreateWindowExW(
         0,
         wide("STATIC"),
-        wide(text),
+        lang.tw(text),
         c.WS_CHILD | c.WS_VISIBLE,
         x,
         y,
@@ -1387,6 +1391,8 @@ const SettingsWindow = struct {
     listen_box: c.HWND = null,
     boost_box: c.HWND = null,
     follow_box: c.HWND = null,
+    lang_ru_box: c.HWND = null,
+    lang_en_box: c.HWND = null,
     /// Нажали «Сохранить», а не «Отмена».
     accepted: bool = false,
 };
@@ -1497,6 +1503,8 @@ fn collectSettings() void {
     app.prefs.serve_at_start = c.SendMessageW(settings_win.serve_box, c.BM_GETCHECK, 0, 0) != 0;
     app.prefs.boost_off = c.SendMessageW(settings_win.boost_box, c.BM_GETCHECK, 0, 0) == 0;
     app.prefs.follow_cursor = c.SendMessageW(settings_win.follow_box, c.BM_GETCHECK, 0, 0) != 0;
+    const lang_before = app.prefs.language;
+    app.prefs.language = if (c.SendMessageW(settings_win.lang_en_box, c.BM_GETCHECK, 0, 0) != 0) .en else .ru;
 
     // Сначала способ хранения: от него зависит, куда лягут настройки.
     const want: paths.Mode = if (c.SendMessageW(settings_win.portable_box, c.BM_GETCHECK, 0, 0) != 0)
@@ -1526,7 +1534,12 @@ fn collectSettings() void {
     // Сочетание могло смениться — перерегистрируем прямо сейчас,
     // а не при следующем запуске.
     registerAreaHotkey(app.hwnd);
-    setText(app.status, "настройки сохранены");
+    // Окна уже собраны на прежнем языке; новый — со следующего запуска,
+    // и сказать об этом надо сразу, иначе выглядит как «не сработало».
+    setText(app.status, if (app.prefs.language != lang_before)
+        lang.t("настройки сохранены; язык сменится после перезапуска программы")
+    else
+        lang.t("настройки сохранены"));
 }
 
 /// Выбрать папку записей.
@@ -1609,7 +1622,7 @@ fn createSettings(owner: c.HWND) void {
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         520,
-        432,
+        462,
         owner,
         null,
         hinst,
@@ -1660,10 +1673,15 @@ fn createSettings(owner: c.HWND) void {
     // Прямо говорим, где программа оставляет следы: это её решение,
     // но знать о нём должен владелец машины.
     settings_win.follow_box = button(hwnd, "Область записи едет за курсором", id_set_follow, 14, 284, 380, 24, c.BS_AUTOCHECKBOX);
-    settings_win.home_label = label(hwnd, "", 14, 312, 490, 20);
+    // Язык (#100). Подпись понятна на обоих языках: искать её будет как раз
+    // тот, кто не читает на текущем.
+    _ = label(hwnd, "Язык (Language)", 14, 316, 200, 20);
+    settings_win.lang_ru_box = button(hwnd, "Ru", id_set_lang_ru, 218, 314, 60, 24, c.BS_AUTORADIOBUTTON | c.WS_GROUP);
+    settings_win.lang_en_box = button(hwnd, "En", id_set_lang_en, 282, 314, 60, 24, c.BS_AUTORADIOBUTTON);
+    settings_win.home_label = label(hwnd, "", 14, 342, 490, 20);
 
-    _ = button(hwnd, "Сохранить", id_set_ok, 300, 344, 100, 30, 0);
-    _ = button(hwnd, "Отмена", id_set_cancel, 408, 344, 90, 30, 0);
+    _ = button(hwnd, "Сохранить", id_set_ok, 300, 374, 100, 30, 0);
+    _ = button(hwnd, "Отмена", id_set_cancel, 408, 374, 90, 30, 0);
 
     // Показываем то, что есть сейчас.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1682,6 +1700,8 @@ fn createSettings(owner: c.HWND) void {
     _ = c.SendMessageW(settings_win.portable_box, c.BM_SETCHECK, if (mode == .portable) 1 else 0, 0);
     _ = c.SendMessageW(settings_win.boost_box, c.BM_SETCHECK, if (app.prefs.boost()) 1 else 0, 0);
     _ = c.SendMessageW(settings_win.follow_box, c.BM_SETCHECK, if (app.prefs.follow_cursor) 1 else 0, 0);
+    _ = c.SendMessageW(settings_win.lang_ru_box, c.BM_SETCHECK, if (app.prefs.language == .ru) 1 else 0, 0);
+    _ = c.SendMessageW(settings_win.lang_en_box, c.BM_SETCHECK, if (app.prefs.language == .en) 1 else 0, 0);
     var home_text: [640]u8 = undefined;
     setText(settings_win.home_label, std.fmt.bufPrint(&home_text, "Своё лежит в: {s}", .{app.home}) catch app.home);
 
@@ -3389,6 +3409,8 @@ fn runInner(
             settings_mod.load(threaded.io(), allocator, app.out_dir);
         app.recent = recent_mod.load(threaded.io(), allocator, app.home);
     }
+    // Язык — до первого окна: подписи берутся при сборке окон (#100).
+    lang.adopt(app.prefs.language);
 
     const hinst: c.HINSTANCE = @ptrCast(c.GetModuleHandleW(null));
     var wc = std.mem.zeroes(c.WNDCLASSEXW);

@@ -37,6 +37,7 @@ const play = @import("../sound/play.zig");
 const stepping = @import("stepping.zig");
 const settings_mod = @import("../app/settings.zig");
 const paths = @import("../app/paths.zig");
+const lang = @import("../lang.zig");
 const recent_mod = @import("../app/recent.zig");
 const png = @import("../file/png.zig");
 const ui = @import("../app/ui.zig");
@@ -4989,7 +4990,10 @@ fn runInner(allocator: std.mem.Allocator, path: ?[]const u8, report: ?*ui.Layout
         const dir = paths.base(&home_buf) catch break :blk true;
         var threaded: std.Io.Threaded = .init(allocator, .{});
         defer threaded.deinit();
-        break :blk settings_mod.load(threaded.io(), allocator, dir).boost();
+        const prefs = settings_mod.load(threaded.io(), allocator, dir);
+        // Язык — до первого окна: подписи берутся при сборке окон (#100).
+        lang.adopt(prefs.language);
+        break :blk prefs.boost();
     };
     ed.frames = .{
         .allocator = allocator,

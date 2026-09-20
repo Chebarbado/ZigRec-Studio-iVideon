@@ -15,6 +15,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const hotkey = @import("hotkey.zig");
+const lang = @import("../lang.zig");
 const listen_mod = @import("listen.zig");
 const devices_mod = @import("../sound/devices.zig");
 const view_mod = @import("../edit/editor_view.zig");
@@ -83,6 +84,10 @@ pub const Settings = struct {
     /// Область записи едет за курсором (#29). По умолчанию нет: ехать
     /// за мышью — не всегда то, чего ждут от записи области.
     follow_cursor: bool = false,
+
+    /// Язык окон (#100). Ноль — русский: так было до появления выбора,
+    /// и настройки по умолчанию остаются нулевыми.
+    language: lang.Language = .ru,
 
     /// Включён ли разгон. По умолчанию да: медленный редактор по умолчанию —
     /// не то, чем стоит гордиться, а выключатель нужен, чтобы разобраться,
@@ -235,6 +240,7 @@ pub fn write(s: *const Settings, w: *std.Io.Writer) !void {
     try w.print("micdev {s}\n", .{s.micDevice()});
     try w.print("boost {d}\n", .{@intFromBool(s.boost())});
     try w.print("follow {d}\n", .{@intFromBool(s.follow_cursor)});
+    try w.print("lang {s}\n", .{s.language.code()});
     try w.print("serve {d}\n", .{@intFromBool(s.serve_at_start)});
 }
 
@@ -276,6 +282,8 @@ pub fn read(data: []const u8) Error!Settings {
             _ = out.setMarksPanelW(rest);
         } else if (std.mem.eql(u8, word, "follow")) {
             out.follow_cursor = std.mem.eql(u8, rest, "1");
+        } else if (std.mem.eql(u8, word, "lang")) {
+            out.language = lang.Language.parse(rest);
         } else if (std.mem.eql(u8, word, "boost")) {
             out.boost_off = std.mem.eql(u8, rest, "0");
         } else if (std.mem.eql(u8, word, "listen")) {
@@ -601,4 +609,21 @@ test "курсор из слоя включён по умолчанию, вык�
     try std.testing.expect(!back.cursorLayer());
     const old = try read("zigrec-settings 1\r\nport 15599\r\n");
     try std.testing.expect(old.cursorLayer());
+}
+
+test "#100: язык по умолчанию русский, выбранный переживает запись, незнакомый — русский" {
+    var s = Settings.init();
+    try std.testing.expectEqual(lang.Language.ru, s.language);
+    s.language = .en;
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&s, &w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "lang en\n") != null);
+    const back = try read(w.buffered());
+    try std.testing.expectEqual(lang.Language.en, back.language);
+    // Файл от прежнего выпуска строки о языке не знает.
+    const old = try read("zigrec-settings 1\r\nport 15599\r\n");
+    try std.testing.expectEqual(lang.Language.ru, old.language);
+    const odd = try read("zigrec-settings 1\r\nlang de\r\n");
+    try std.testing.expectEqual(lang.Language.ru, odd.language);
 }

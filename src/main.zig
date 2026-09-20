@@ -134,7 +134,9 @@ const usage =
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
-    const args = try init.minimal.args.toSlice(arena);
+    // `--lang ru|en` годится к любой команде и до разбора снимается: язык —
+    // дело окон, а не команд, и знать о нём каждой незачем (#100).
+    const args = try takeLang(arena, try init.minimal.args.toSlice(arena));
 
     var buf: [8192]u8 = undefined;
     var file_writer: Io.File.Writer = .init(.stdout(), init.io, &buf);
@@ -441,6 +443,26 @@ pub fn main(init: std.process.Init) !void {
 
     try w.flush();
     if (code != 0) std.process.exit(code);
+}
+
+/// Снять `--lang ЯЗЫК` из ключей и выставить язык окон. Названный ключом
+/// язык сильнее настроек: так самопроверки меряют окна на обоих языках,
+/// какой бы ни стоял у владельца машины.
+fn takeLang(arena: std.mem.Allocator, raw: anytype) !@TypeOf(raw) {
+    const Item = @typeInfo(@TypeOf(raw)).pointer.child;
+    var out = try arena.alloc(Item, raw.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        if (eq(raw[i], "--lang") and i + 1 < raw.len) {
+            zigrec.lang.force(zigrec.lang.Language.parse(raw[i + 1]));
+            i += 1;
+            continue;
+        }
+        out[n] = raw[i];
+        n += 1;
+    }
+    return out[0..n];
 }
 
 /// Ошибки разбора ключей — тоже словами.
