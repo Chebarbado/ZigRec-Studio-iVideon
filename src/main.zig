@@ -147,7 +147,14 @@ pub fn main(init: std.process.Init) !void {
     const cmd: []const u8 = if (args.len > 1) args[1] else "";
     var code: u8 = 0;
 
-    if (args.len <= 1 or eq(cmd, "--help") or eq(cmd, "-h")) {
+    if (args.len <= 1) {
+        // Без аргументов (например, двойной клик по .exe) — открываем окно.
+        try w.flush();
+        zigrec.ui.runFull(arena, false, false) catch |err| {
+            try w.print("окно не открылось: {s}\n", .{@errorName(err)});
+            code = 1;
+        };
+    } else if (eq(cmd, "--help") or eq(cmd, "-h")) {
         try w.writeAll(usage);
     } else if (eq(cmd, "--version") or eq(cmd, "-v")) {
         try w.print("zigrec {s} ({s})\n", .{ zigrec.version.VERSION, zigrec.version.VERSION_DATE });

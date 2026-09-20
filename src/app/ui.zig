@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const c = win32.c;
 const recorder = @import("recorder.zig");
+const ivideon = @import("../net/ivideon.zig");
 const source = @import("../capture/source.zig");
 const capture_types = @import("../capture/capture_types.zig");
 const version = @import("../version.zig");
@@ -76,6 +77,8 @@ const id_menu_exit = 301;
 const id_menu_settings = 310;
 const id_menu_about = 320;
 const id_menu_boost = 321;
+const id_menu_camera = 330;
+const id_menu_docs = 331;
 const id_set_portable = 340;
 const id_set_area_key = 341;
 const id_set_listen = 342;
@@ -1829,6 +1832,14 @@ fn buildMenu(hwnd: c.HWND) void {
     _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_boost, lang.tw("Чем ускорено…"));
     _ = c.AppendMenuW(help_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_about, lang.tw("О программе"));
+
+    // iVideon: своя камера как источник + её документация.
+    const cameras_menu = c.CreatePopupMenu();
+    _ = c.AppendMenuW(cameras_menu, c.MF_STRING, id_menu_camera, lang.tw("Камера iVideon"));
+    _ = c.AppendMenuW(cameras_menu, c.MF_SEPARATOR, 0, null);
+    _ = c.AppendMenuW(cameras_menu, c.MF_STRING, id_menu_docs, lang.tw("Документация iVideon…"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(cameras_menu), lang.tw("Камеры"));
+
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(help_menu), lang.tw("Справка"));
 
     _ = c.SetMenu(hwnd, bar);
@@ -2271,6 +2282,135 @@ fn showAbout(hwnd: c.HWND) void {
 /// получить окно, которое подвисает во время записи.
 fn openEditor() void {
     openEditorWith("");
+}
+
+// --- iVideon: пункт меню «Камеры → Камера iVideon» + документация ---
+
+/// Привести рабочую папку к каталогу проекта (…/ZigRec-Studio), чтобы
+/// относительные `.ivideon`, `tools` и `docs` находились и при запуске
+/// двойным кликом (в разработке exe лежит в zig-out\bin).
+fn ensureProjectCwd() void {
+    var buf: [std.fs.max_path_bytes]u16 = undefined;
+    const n = c.GetModuleFileNameW(null, &buf, buf.len);
+    if (n == 0) return;
+    var end: usize = n;
+    var cuts: u32 = 0;
+    while (end > 0) {
+        end -= 1;
+        if (buf[end] == '\\' or buf[end] == '/') {
+            cuts += 1;
+            if (cuts == 3) {
+                buf[end] = 0;
+                _ = c.SetCurrentDirectoryW(@ptrCast(&buf));
+                return;
+            }
+        }
+    }
+}
+
+/// Открыть PDF с документацией системным просмотрщиком.
+fn openDocs() void {
+    ensureProjectCwd();
+    var wbuf: [512]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wbuf, "docs\\ivideon-developer-docs.pdf") catch return;
+    wbuf[n] = 0;
+    const r = c.ShellExecuteW(null, wide("open"), @ptrCast(&wbuf), null, null, c.SW_SHOWNORMAL);
+    if (@intFromPtr(r) <= 32) setText(app.status, lang.t("документация не найдена рядом с exe"));
+}
+
+/// Диалог «Камера iVideon»: сведения о камере и выбор — смотреть или записать.
+fn openCameraDialog() void {
+    ensureProjectCwd();
+    var threaded: std.Io.Threaded = .init(app.allocator, .{});
+    defer threaded.deinit();
+    var info = ivideon.loadFirstCamera(app.allocator, threaded.io()) catch {
+        _ = c.MessageBoxW(
+            app.hwnd,
+            lang.tw("Камера не настроена.\n\nСначала войдите и получите список камер:\n  python watch_camera.py --code <код из SMS>"),
+            lang.tw("Камера iVideon"),
+            c.MB_OK | c.MB_ICONWARNING,
+        );
+        return;
+    };
+    defer info.deinit();
+
+    var text_buf: [640]u8 = undefined;
+    const status = if (info.online) "онлайн" else "оффлайн";
+    const text = std.fmt.bufPrintZ(&text_buf, "Камера: {s}\nСтатус: {s}\nРазрешение: {d}x{d}\nКодек: {s}\nID: {s}\n\n" ++
+        "«Да» — смотреть в окне\n«Нет» — записать в файл\n«Отмена» — закрыть", .{ info.name, status, info.width, info.height, info.video_codec, info.id }) catch return;
+    var wtext: [1024]u16 = undefined;
+    const wn = std.unicode.utf8ToUtf16Le(&wtext, text) catch return;
+    wtext[wn] = 0;
+    const r = c.MessageBoxW(app.hwnd, @ptrCast(&wtext), lang.tw("Камера iVideon"), c.MB_YESNOCANCEL | c.MB_ICONINFORMATION);
+    if (r == c.IDYES) {
+        spawnCamera(info.id, null);
+    } else if (r == c.IDNO) {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (askCameraSavePath(&path_buf)) |path| spawnCamera(info.id, path);
+    }
+}
+
+/// Спросить, куда сохранить запись камеры.
+fn askCameraSavePath(out: []u8) ?[]const u8 {
+    var chosen: [std.fs.max_path_bytes]u16 = @splat(0);
+    const def = wide("ivideon-camera.mp4");
+    @memcpy(chosen[0..def.len], def);
+    var ofn = std.mem.zeroes(c.OPENFILENAMEW);
+    ofn.lStructSize = @sizeOf(c.OPENFILENAMEW);
+    ofn.hwndOwner = app.hwnd;
+    ofn.lpstrFilter = lang.tw("Видео MP4\x00*.mp4\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrFile = &chosen;
+    ofn.nMaxFile = chosen.len;
+    ofn.lpstrTitle = lang.tw("Куда сохранить запись камеры");
+    ofn.lpstrDefExt = wide("mp4");
+    ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_PATHMUSTEXIST;
+    if (c.GetSaveFileNameW(&ofn) == 0) return null;
+    const wlen = std.mem.sliceTo(&chosen, 0).len;
+    const wrote = std.unicode.utf16LeToUtf8(out, chosen[0..wlen]) catch return null;
+    return out[0..wrote];
+}
+
+/// Запустить дочерний `zigrec camera <id> [<path> --sec 60]`.
+fn spawnCamera(id: []const u8, path: ?[]const u8) void {
+    var exe: [std.fs.max_path_bytes]u16 = undefined;
+    const n = c.GetModuleFileNameW(null, &exe, exe.len);
+    if (n == 0) return;
+    exe[n] = 0;
+    var line: [std.fs.max_path_bytes * 2 + 128]u16 = undefined;
+    var at: usize = 0;
+    line[at] = '"';
+    at += 1;
+    @memcpy(line[at .. at + n], exe[0..n]);
+    at += n;
+    const mid = wide("\" camera ");
+    @memcpy(line[at .. at + mid.len], mid);
+    at += mid.len;
+    if (std.unicode.utf8ToUtf16Le(line[at..], id)) |w| {
+        at += w;
+    } else |_| return;
+    if (path) |p| {
+        const open_q = wide(" \"");
+        @memcpy(line[at .. at + open_q.len], open_q);
+        at += open_q.len;
+        if (std.unicode.utf8ToUtf16Le(line[at..], p)) |w| {
+            at += w;
+        } else |_| return;
+        const tail = wide("\" --sec 60");
+        @memcpy(line[at .. at + tail.len], tail);
+        at += tail.len;
+    }
+    line[at] = 0;
+    var si = std.mem.zeroes(c.STARTUPINFOW);
+    si.cb = @sizeOf(c.STARTUPINFOW);
+    var pi = std.mem.zeroes(c.PROCESS_INFORMATION);
+    const ok = c.CreateProcessW(@ptrCast(&exe), @ptrCast(&line), null, null, 0, c.CREATE_NO_WINDOW, null, null, &si, &pi);
+    if (ok == 0) {
+        setText(app.status, lang.t("камеру запустить не вышло"));
+        return;
+    }
+    _ = c.CloseHandle(pi.hThread);
+    _ = c.CloseHandle(pi.hProcess);
+    setText(app.status, if (path == null) lang.t("камера: открываю просмотр…") else lang.t("камера: пишу в файл…"));
 }
 
 /// Открыть редактор дорожек, при желании сразу с файлом.
@@ -3098,6 +3238,8 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_settings => showSettings(hwnd),
                 id_menu_about => showAbout(hwnd),
                 id_menu_boost => showBoost(hwnd),
+                id_menu_camera => openCameraDialog(),
+                id_menu_docs => openDocs(),
                 id_cursor => {
                     const checked = c.SendMessageW(app.chk_cursor, c.BM_GETCHECK, 0, 0) != 0;
                     app.settings.cursor = checked;

@@ -322,4 +322,19 @@ pub const pairs = [_]Pair{
     .{ "файл не закрылся как надо", "the file was not closed properly" },
     .{ "только для Windows", "Windows only" },
     .{ "сбой", "failure" },
+
+    // src/app/ui.zig — камера iVideon (плагин)
+    .{ "Камеры", "Cameras" },
+    .{ "Камера iVideon", "iVideon camera" },
+    .{ "Документация iVideon…", "iVideon documentation…" },
+    .{ "Куда сохранить запись камеры", "Where to save the camera recording" },
+    .{ "Видео MP4\x00*.mp4\x00Все файлы\x00*.*\x00\x00", "MP4 video\x00*.mp4\x00All files\x00*.*\x00\x00" },
+    .{ "документация не найдена рядом с exe", "documentation was not found next to the exe" },
+    .{ "камеру запустить не вышло", "could not launch the camera" },
+    .{ "камера: открываю просмотр…", "camera: opening preview…" },
+    .{ "камера: пишу в файл…", "camera: recording to file…" },
+    .{
+        "Камера не настроена.\n\nСначала войдите и получите список камер:\n  python watch_camera.py --code <код из SMS>",
+        "Camera is not set up.\n\nFirst sign in and fetch the camera list:\n  python watch_camera.py --code <SMS code>",
+    },
 };
