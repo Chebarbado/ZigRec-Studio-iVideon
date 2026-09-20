@@ -7,6 +7,7 @@
 //!
 //! Правила — чистые функции с тестами; Windows спрашивается только в `list`.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const c = win32.c;
@@ -62,9 +63,9 @@ pub fn indexOf(found: []const Device, id: []const u8) ?usize {
 /// Как назвать выбранное: имя устройства, «по умолчанию» или честное
 /// «не найден».
 pub fn nameFor(found: []const Device, id: []const u8) []const u8 {
-    if (id.len == 0) return default_label;
+    if (id.len == 0) return lang.tr(default_label);
     if (indexOf(found, id)) |i| return found[i].deviceName();
-    return missing_label;
+    return lang.tr(missing_label);
 }
 
 // PKEY_Device_FriendlyName: {a45c254e-df1c-4efd-8020-67d146a850e0}, 14.
@@ -151,7 +152,7 @@ pub fn list(out: *[max_devices]Device) []Device {
             }
         }
         if (name_len == 0) {
-            const fallback = "микрофон без имени";
+            const fallback = lang.t("микрофон без имени");
             @memcpy(name_buf[0..fallback.len], fallback);
             name_len = fallback.len;
         }
@@ -177,6 +178,12 @@ test "устройство ищется по номеру, пустой номе
     try testing.expectEqual(@as(?usize, 1), indexOf(&found, "{0.0.1.00000000}.{bbbb}"));
     try testing.expectEqual(@as(?usize, null), indexOf(&found, ""));
     try testing.expectEqual(@as(?usize, null), indexOf(&found, "{0.0.1.00000000}.{cccc}"));
+}
+
+test "подписи выбора микрофона переведены" {
+    // Обе идут через `lang.tr`, а он о пропаже молчит: сторож — здесь (#100).
+    try testing.expect(lang.known(default_label));
+    try testing.expect(lang.known(missing_label));
 }
 
 test "имя для выбранного: устройство, умолчание или честное «не найден»" {

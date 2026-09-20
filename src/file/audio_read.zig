@@ -13,6 +13,7 @@
 //! значит иногда получить тишину при слышимом звуке — эта же ошибка уже
 //! была бы в рисовании волны, если бы её там не заметили.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const c = win32.c;
@@ -148,11 +149,11 @@ pub fn read(allocator: std.mem.Allocator, path: []const u8) Error!Audio {
 /// Объяснение словами — для окна.
 pub fn explain(err: anyerror) []const u8 {
     return switch (err) {
-        Error.NoAudio => "в этом файле нет звука или он не раскодируется",
-        Error.StartupFailed => "не поднялась подсистема мультимедиа Windows",
-        Error.Unsupported => "чтение звука работает только в Windows",
-        Error.OutOfMemory => "не хватило памяти на звук этого файла",
-        else => "звук не читается",
+        Error.NoAudio => lang.t("в этом файле нет звука или он не раскодируется"),
+        Error.StartupFailed => lang.t("не поднялась подсистема мультимедиа Windows"),
+        Error.Unsupported => lang.t("чтение звука работает только в Windows"),
+        Error.OutOfMemory => lang.t("не хватило памяти на звук этого файла"),
+        else => lang.t("звук не читается"),
     };
 }
 

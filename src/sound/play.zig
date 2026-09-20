@@ -9,6 +9,7 @@
 //! Ровно столько, сколько нужно, чтобы отдать план всплесков в устройство
 //! вывода по умолчанию и дождаться конца.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const tone = @import("tone.zig");
@@ -244,10 +245,10 @@ fn fillFrom(out: *Renderer, chunk: []f32, written: *usize, total: usize, source:
 /// Объяснение словами.
 pub fn explain(err: anyerror) []const u8 {
     return switch (err) {
-        Error.NoSpeakers => "нет устройства вывода",
-        Error.BadFormat => "устройство вывода отдаёт формат, который мы не понимаем",
-        Error.Unsupported => "вывод звука работает только в Windows",
-        else => "вывод звука не удался",
+        Error.NoSpeakers => lang.t("нет устройства вывода"),
+        Error.BadFormat => lang.t("устройство вывода отдаёт формат, который мы не понимаем"),
+        Error.Unsupported => lang.t("вывод звука работает только в Windows"),
+        else => lang.t("вывод звука не удался"),
     };
 }
 

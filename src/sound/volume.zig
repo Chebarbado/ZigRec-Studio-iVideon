@@ -19,6 +19,7 @@
 //! (это уже случалось и стоило восьмисот килобайт). Ноль децибел — это
 //! «как записано», и умолчание сходится с единицей усиления само.
 const std = @import("std");
+const lang = @import("../lang.zig");
 
 /// Громкость в десятых долях децибела. Ноль — как записано.
 pub const Db10 = i16;
@@ -78,11 +79,11 @@ pub fn sum(a: Db10, b: Db10) Db10 {
 /// Минус — типографский, а не дефис: подпись читают, а не вычитают.
 pub fn text(buf: []u8, value: Db10) []const u8 {
     const v = clamp(value);
-    if (silent(v)) return "тишина";
+    if (silent(v)) return lang.t("тишина");
     const whole = @divTrunc(@as(i32, if (v < 0) -v else v), 10);
     const tenth = @mod(@as(i32, if (v < 0) -v else v), 10);
     const sign: []const u8 = if (v < 0) "−" else if (v > 0) "+" else "";
-    return std.fmt.bufPrint(buf, "{s}{d}.{d} дБ", .{ sign, whole, tenth }) catch "0.0 дБ";
+    return lang.print(buf, "{s}{d}.{d} дБ", .{ sign, whole, tenth }) catch lang.t("0.0 дБ");
 }
 
 // ------------------------------------------------------------- ползунок
@@ -301,6 +302,15 @@ test "подпись читается" {
     try testing.expectEqualStrings("−6.0 дБ", text(&buf, -60));
     try testing.expectEqualStrings("+3.5 дБ", text(&buf, 35));
     try testing.expectEqualStrings("тишина", text(&buf, min_db10));
+}
+
+test "подпись читается и по-английски" {
+    // Язык — один на процесс (#100): ставим и возвращаем.
+    lang.set(.en);
+    defer lang.set(.ru);
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("−6.0 dB", text(&buf, -60));
+    try testing.expectEqualStrings("silence", text(&buf, min_db10));
 }
 
 test "ползунок линеен по децибелам и ходит туда-обратно" {

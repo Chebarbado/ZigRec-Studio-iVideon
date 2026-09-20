@@ -6,6 +6,7 @@
 //! а тихо портит правки: клип берётся не тот, край хватается не с той
 //! стороны, и замечают это уже на испорченном проекте.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const timeline = @import("timeline.zig");
 const volume = @import("../sound/volume.zig");
 
@@ -704,8 +705,8 @@ pub fn timeLabel(buf: []u8, when_ns: u64, step_ns: u64) []const u8 {
 /// Длительность словами: для подписи на клипе.
 pub fn lengthLabel(buf: []u8, len_ns: u64) []const u8 {
     const secs = @as(f64, @floatFromInt(len_ns)) / @as(f64, std.time.ns_per_s);
-    if (secs < 10) return std.fmt.bufPrint(buf, "{d:.2} с", .{secs}) catch "";
-    if (secs < 60) return std.fmt.bufPrint(buf, "{d:.1} с", .{secs}) catch "";
+    if (secs < 10) return lang.print(buf, "{d:.2} с", .{secs}) catch "";
+    if (secs < 60) return lang.print(buf, "{d:.1} с", .{secs}) catch "";
     const minutes = @as(u64, @intFromFloat(secs)) / 60;
     const rest = @as(u64, @intFromFloat(secs)) % 60;
     return std.fmt.bufPrint(buf, "{d}:{d:0>2}", .{ minutes, rest }) catch "";

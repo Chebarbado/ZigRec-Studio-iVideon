@@ -12,6 +12,7 @@
 //! дорожки, их вид, кодек, размер кадра. Декодировать здесь нечего: чтобы
 //! показать полосу дорожки, картинка не нужна.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const probe = @import("probe.zig");
 const gif_mod = @import("gif.zig");
 const wav = @import("../sound/wav.zig");
@@ -617,10 +618,10 @@ pub fn readHead(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Inf
 /// Объяснение ошибки словами — для окна и для командной строки.
 pub fn explain(err: anyerror) []const u8 {
     return switch (err) {
-        Error.Unknown => "формат файла не узнан: это не видео и не звук из тех, что мы открываем",
-        Error.Truncated => "файл обрывается на заголовке: скорее всего, он скопирован не до конца",
-        Error.Unsupported => "формат узнан, но внутри то, чего мы пока не умеем",
-        else => "файл не читается",
+        Error.Unknown => lang.t("формат файла не узнан: это не видео и не звук из тех, что мы открываем"),
+        Error.Truncated => lang.t("файл обрывается на заголовке: скорее всего, он скопирован не до конца"),
+        Error.Unsupported => lang.t("формат узнан, но внутри то, чего мы пока не умеем"),
+        else => lang.t("файл не читается"),
     };
 }
 

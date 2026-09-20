@@ -10,6 +10,7 @@
 //! Решение, какой путь, — чистое правило `plan` с тестами; звук в обоих
 //! путях сводится из всех незаглушённых дорожек и пишется AAC.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const c = win32.c;
@@ -45,8 +46,8 @@ pub const Mode = enum {
 
     pub fn label(self: Mode) []const u8 {
         return switch (self) {
-            .passthrough => "без перекодирования",
-            .reencode => "с перекодированием",
+            .passthrough => lang.t("без перекодирования"),
+            .reencode => lang.t("с перекодированием"),
         };
     }
 };

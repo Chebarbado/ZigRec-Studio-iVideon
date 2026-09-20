@@ -5,6 +5,7 @@
 //! десяти шагов указатель стоит между кадрами и показывает то один,
 //! то другой. Ни одного обращения к окну: чистая арифметика с тестами.
 const std = @import("std");
+const lang = @import("../lang.zig");
 
 /// Кадр, если частота неизвестна: тридцать в секунду — самая частая.
 pub const default_frame_ns: u64 = std.time.ns_per_s / 30;
@@ -34,7 +35,7 @@ pub fn step(inside_ns: u64, frame_ns: u64, dir: i32) u64 {
 /// Подпись для строки состояния: «кадр 1234 · 41.13 с».
 pub fn label(buf: []u8, inside_ns: u64, frame_ns: u64) []const u8 {
     const secs = @as(f64, @floatFromInt(inside_ns)) / @as(f64, std.time.ns_per_s);
-    return std.fmt.bufPrint(buf, "кадр {d} · {d:.2} с", .{ frameIndex(inside_ns, frame_ns), secs }) catch "кадр";
+    return lang.print(buf, "кадр {d} · {d:.2} с", .{ frameIndex(inside_ns, frame_ns), secs }) catch lang.t("кадр");
 }
 
 // ---------------------------------------------------------------- тесты

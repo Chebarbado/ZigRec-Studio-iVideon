@@ -9,6 +9,7 @@
 //! слова для строки состояния. Это проверяется тестами целиком; окно
 //! только дёргает переходы по таймеру и кормит отсчёты.
 const std = @import("std");
+const lang = @import("../lang.zig");
 
 /// Сколько пишем. Пять секунд: хватает на фразу, не надоедает ждать.
 pub const seconds: u64 = 5;
@@ -79,11 +80,11 @@ pub const Probe = struct {
         self.since_ns = now_ns;
         if (self.samples == 0) {
             self.state = .failed;
-            self.why = "микрофон не дал ни одного отсчёта";
+            self.why = lang.t("микрофон не дал ни одного отсчёта");
         } else if (self.peak < silent_peak) {
             // Слушать тишину незачем; сказать о ней — надо.
             self.state = .failed;
-            self.why = "записалась тишина: проверьте, тот ли микрофон выбран";
+            self.why = lang.t("записалась тишина: проверьте, тот ли микрофон выбран");
         } else {
             self.state = .playing;
         }
@@ -119,14 +120,14 @@ pub const Probe = struct {
             .recording => blk: {
                 const elapsed = now_ns -| self.since_ns;
                 const left = (record_ns -| elapsed + std.time.ns_per_s - 1) / std.time.ns_per_s;
-                break :blk std.fmt.bufPrint(buf, "проба: говорите… ещё {d} с", .{left}) catch "проба: говорите…";
+                break :blk lang.print(buf, "проба: говорите… ещё {d} с", .{left}) catch lang.t("проба: говорите…");
             },
-            .playing => std.fmt.bufPrint(buf, "проба: слушайте, что записалось (пик {d:.0} дБ)", .{self.peakDb()}) catch "проба: слушайте",
-            .done => std.fmt.bufPrint(buf, "проба сыграна: пик {d:.0} дБ{s}", .{
+            .playing => lang.print(buf, "проба: слушайте, что записалось (пик {d:.0} дБ)", .{self.peakDb()}) catch lang.t("проба: слушайте"),
+            .done => lang.print(buf, "проба сыграна: пик {d:.0} дБ{s}", .{
                 self.peakDb(),
-                if (self.peak >= 0.99) ", ПЕРЕГРУЗ — отодвиньте микрофон" else "",
-            }) catch "проба сыграна",
-            .failed => std.fmt.bufPrint(buf, "проба не удалась: {s}", .{self.why}) catch "проба не удалась",
+                if (self.peak >= 0.99) lang.t(", ПЕРЕГРУЗ — отодвиньте микрофон") else "",
+            }) catch lang.t("проба сыграна"),
+            .failed => lang.print(buf, "проба не удалась: {s}", .{self.why}) catch lang.t("проба не удалась"),
         };
     }
 };
