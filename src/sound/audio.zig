@@ -56,6 +56,11 @@ pub const Feeder = struct {
     pad_sys: blend.Padded = .{},
     /// Известна ли разница стартов. До неё сводить нечего.
     pads_known: bool = false,
+    /// Сколько каждый источник отдал в сведение: отсчёты из очереди и
+    /// тишина, вставленная ради дрейфа. Тишина старта сюда не входит —
+    /// время устройства считается от его собственного первого куска (#97).
+    taken_mic: u64 = 0,
+    taken_sys: u64 = 0,
     /// Вторая дорожка — когда пишем врозь: своё смещение и свой счёт.
     written2: u64 = 0,
     offset2_ns: u64 = 0,
@@ -65,6 +70,12 @@ pub const Feeder = struct {
     /// Сколько отсчётов вставлено и выброшено ради дрейфа — для отчёта.
     drift_inserted: u64 = 0,
     drift_dropped: u64 = 0,
+    /// Сколько запись всего простояла на паузе (#98). Ставит рекордер на
+    /// возобновлении. Часы устройства на паузе идут, а пойманное за неё
+    /// выбрасывается (`discard`), поэтому из времени устройства пауза
+    /// вычитается — иначе правка дрейфа приняла бы её за отставание и
+    /// принялась бы вставлять тишину.
+    paused_ns: u64 = 0,
     /// Звук просили, но он не поднялся. Причина — словами, для человека.
     failure: ?anyerror = null,
     /// Системный звук просили, но он не поднялся. Отдельно от микрофона:
@@ -183,6 +194,26 @@ pub const Feeder = struct {
         return self.offset2_ns + written * std.time.ns_per_s / @max(self.settings.sample_rate, 1);
     }
 
+    /// Выбросить пойманное мимо файла. Зовётся из потока записи, пока
+    /// запись стоит на паузе (#98).
+    ///
+    /// Пока этого не было, захват на паузе продолжал класть звук в очередь,
+    /// а после возобновления всё это уходило в файл: дорожка считает время
+    /// по отсчётам, и звук после паузы отставал от картинки на всю её длину
+    /// (до четырёх секунд — больше очередь не вмещает, дальше терялось).
+    /// Отсчёт в отсчёт выбрасывать не нужно: остаток в пределах куска
+    /// подбирает правка дрейфа, которая знает длину паузы (`paused_ns`).
+    pub fn discard(self: *Feeder) void {
+        var bin: [4096]i16 = undefined;
+        if (self.track) |t| while (t.pop(&bin) != 0) {};
+        if (self.system_track) |t| while (t.pop(&bin) != 0) {};
+    }
+
+    /// Время устройства для правки дрейфа: без пауз записи.
+    fn driftElapsed(self: *const Feeder, t: *const track_mod.Track) u64 {
+        return t.deviceElapsedNs() -| self.paused_ns;
+    }
+
     /// Забрать накопленное и отдать в файл. Зовётся из потока записи.
     pub fn drain(self: *Feeder, enc: *encode.Writer) !void {
         // Два источника врозь — две дорожки; два вместе — сводим; один —
@@ -257,7 +288,7 @@ pub const Feeder = struct {
     /// пишем тишину, обогнали — выбрасываем из очереди. Понемногу за раз:
     /// правило шага — в `drift`, и оно проверено тестами на десяти минутах.
     fn correctDrift(self: *Feeder, t: *track_mod.Track, enc: *encode.Writer, which: encode.Writer.Which) !void {
-        const elapsed = t.deviceElapsedNs();
+        const elapsed = self.driftElapsed(t);
         if (elapsed == 0) return;
         const written = if (which == .first) self.written else self.written2;
         // Сравниваем с тем, что уже забрали ИЗ очереди, плюс то, что в ней
@@ -298,6 +329,11 @@ pub const Feeder = struct {
             self.offset_known = true;
         }
 
+        // У каждого источника свои часы, и правится каждый сам по себе,
+        // до сведения (#97): после него чужой дрейф уже не отделить.
+        self.correctSide(a, &self.pad_mic, &self.taken_mic);
+        self.correctSide(b, &self.pad_sys, &self.taken_sys);
+
         var mic_buf: [4096]i16 = undefined;
         var sys_buf: [4096]i16 = undefined;
         while (true) {
@@ -307,22 +343,51 @@ pub const Feeder = struct {
             );
             if (can == 0) break;
 
-            takeInto(a, &self.pad_mic, mic_buf[0..can]);
-            takeInto(b, &self.pad_sys, sys_buf[0..can]);
+            self.taken_mic += takeInto(a, &self.pad_mic, mic_buf[0..can]);
+            self.taken_sys += takeInto(b, &self.pad_sys, sys_buf[0..can]);
             const n = blend.mix(mic_buf[0..can], sys_buf[0..can], &self.buf);
             try enc.writeAudio(self.buf[0..n], self.timestampFor(self.written));
             self.written += n;
         }
     }
 
+    /// Поправить дрейф одного источника перед сведением (#97).
+    ///
+    /// Пока этого не было, правка дрейфа жила только там, где источник
+    /// пишется своей дорожкой. Сведение же берёт из обеих очередей поровну,
+    /// по меньшей: источник, чьи часы спешат, копил хвост в очереди, и его
+    /// звук отставал от картинки всё сильнее — 30 мс за десять минут при
+    /// разнице в 0,005 %, а дальше очередь переполнялась.
+    ///
+    /// Правило то же, что у `correctDrift`, только руки другие: тишина
+    /// встаёт перед очередью (`pad_left`), лишнее выбрасывается из очереди.
+    /// Считаем то, что источник отдал в сведение, плюс то, что ещё лежит.
+    fn correctSide(self: *Feeder, t: *track_mod.Track, pad: *blend.Padded, taken: *u64) void {
+        const elapsed = self.driftElapsed(t);
+        if (elapsed == 0) return;
+        const counted = taken.* + t.available();
+        const a = self.corrector.adjust(counted, self.settings.sample_rate, elapsed);
+        if (a.insert > 0) {
+            pad.pad_left += a.insert;
+            taken.* += a.insert;
+            self.drift_inserted += a.insert;
+        } else if (a.drop > 0) {
+            var bin: [64]i16 = undefined;
+            const n = t.pop(bin[0..@min(a.drop, bin.len)]);
+            self.drift_dropped += n;
+        }
+    }
+
     /// Взять ровно `out.len` отсчётов: сперва тишину спереди, потом очередь.
-    fn takeInto(t: *track_mod.Track, pad: *blend.Padded, out: []i16) void {
+    /// Возвращает, сколько из них пришлось на очередь, — для счёта дрейфа.
+    fn takeInto(t: *track_mod.Track, pad: *blend.Padded, out: []i16) usize {
         const parts = pad.split(out.len);
         @memset(out[0..parts.zeros], 0);
         const got = t.pop(out[parts.zeros..]);
         // Очередь обещала столько по `available`, но на всякий случай
         // добиваем нулями: недостача лучше мусора.
         if (got < parts.real) @memset(out[parts.zeros + got ..], 0);
+        return parts.real;
     }
 
     /// Остановить захват и дописать хвост.
@@ -481,4 +546,74 @@ test "вторая дорожка считает своё время от сво
     try std.testing.expectEqual(@as(u64, std.time.ns_per_s + 70 * std.time.ns_per_ms), f.timestampFor2(48_000));
     f.written2 = 24_000;
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), f.seconds2(), 0.0001);
+}
+
+/// Десять минут сведения двух источников, у микрофона часы уходят на `ppm`
+/// миллионных (плюс — спешат, отсчётов больше, чем прошло времени).
+/// Возвращает хвосты очередей в конце: они и есть отставание звука в файле.
+fn simulateBlendDrift(f: *Feeder, mic_t: *track_mod.Track, sys: *track_mod.Track, ppm: i64) struct { mic_left: usize, sys_left: usize } {
+    const chunk: usize = 960; // 20 мс при 48 кГц
+    const step_ns: u64 = 20 * std.time.ns_per_ms;
+    const start_ns: u64 = std.time.ns_per_s;
+    const zeros: [1024]i16 = @splat(0);
+    var mic_buf: [4096]i16 = undefined;
+    var sys_buf: [4096]i16 = undefined;
+    // Дробная часть отсчётов микрофона копится в миллионных долях.
+    var mic_frac: i64 = 0;
+
+    var step: u64 = 0;
+    while (step < 600 * 50) : (step += 1) {
+        const at = start_ns + step * step_ns;
+        sys.push(zeros[0..chunk], at);
+        sys.end_ns.store(at + step_ns, .release);
+
+        mic_frac += @as(i64, @intCast(chunk)) * ppm;
+        var n: usize = chunk;
+        if (mic_frac >= 1_000_000) {
+            n += 1;
+            mic_frac -= 1_000_000;
+        } else if (mic_frac <= -1_000_000) {
+            n -= 1;
+            mic_frac += 1_000_000;
+        }
+        mic_t.push(zeros[0..n], at);
+        mic_t.end_ns.store(at + step_ns, .release);
+
+        f.correctSide(mic_t, &f.pad_mic, &f.taken_mic);
+        f.correctSide(sys, &f.pad_sys, &f.taken_sys);
+        while (true) {
+            const can = @min(@min(f.pad_mic.ready(mic_t.available()), f.pad_sys.ready(sys.available())), mic_buf.len);
+            if (can == 0) break;
+            f.taken_mic += Feeder.takeInto(mic_t, &f.pad_mic, mic_buf[0..can]);
+            f.taken_sys += Feeder.takeInto(sys, &f.pad_sys, sys_buf[0..can]);
+        }
+    }
+    return .{ .mic_left = mic_t.available(), .sys_left = sys.available() };
+}
+
+test "#97: при сведении спешащий микрофон не копит хвост за десять минут" {
+    // 0,005 % за десять минут — 1440 лишних отсчётов, 30 мс. Без правки они
+    // все лежат в очереди микрофона: его звук в файле отстаёт на эти 30 мс.
+    var f = Feeder{};
+    var mic_t = track_mod.Track{};
+    var sys = track_mod.Track{};
+    const left = simulateBlendDrift(&f, &mic_t, &sys, 50);
+    // Допуск правки — 5 мс (240 отсчётов), плюс один кусок на подходе.
+    try std.testing.expect(left.mic_left < 480);
+    try std.testing.expect(left.sys_left < 480);
+    try std.testing.expect(f.drift_dropped > 900);
+    try std.testing.expectEqual(@as(u64, 0), f.drift_inserted);
+}
+
+test "#97: при сведении отстающий микрофон не тормозит колонки" {
+    // Зеркальный случай: микрофон даёт меньше отсчётов, сведение идёт по
+    // меньшей очереди, и хвост копят уже колонки. Чинится тишиной у микрофона.
+    var f = Feeder{};
+    var mic_t = track_mod.Track{};
+    var sys = track_mod.Track{};
+    const left = simulateBlendDrift(&f, &mic_t, &sys, -50);
+    try std.testing.expect(left.mic_left < 480);
+    try std.testing.expect(left.sys_left < 480);
+    try std.testing.expect(f.drift_inserted > 900);
+    try std.testing.expectEqual(@as(u64, 0), f.drift_dropped);
 }

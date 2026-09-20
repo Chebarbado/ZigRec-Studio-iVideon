@@ -178,6 +178,12 @@ pub const Progress = struct {
     time_went_back: u64 = 0,
     /// Звуковых отсчётов ушло в файл.
     audio_samples: u64 = 0,
+    /// Сколько отсчётов правка дрейфа вставила и выбросила (#98). На короткой
+    /// записи — около нуля; много — значит, время звука и время устройства
+    /// считаются по-разному (например, пауза записи попала в одно из них).
+    audio_drift_fixed: u64 = 0,
+    /// Сколько отсчётов не поместилось в очередь и потеряно (#98).
+    audio_lost: u64 = 0,
     /// Звук просили, но он не поднялся: текст причины лежит в `message`.
     sound_failed: bool = false,
     backend: capture.Backend = .auto,
@@ -217,6 +223,8 @@ pub const Recorder = struct {
     area_x: std.atomic.Value(i32) = .init(0),
     area_y: std.atomic.Value(i32) = .init(0),
     audio_samples: std.atomic.Value(u64) = .init(0),
+    audio_drift_fixed: std.atomic.Value(u64) = .init(0),
+    audio_lost: std.atomic.Value(u64) = .init(0),
     sound_failed: std.atomic.Value(bool) = .init(false),
     /// Шаблон аннотации, который просят положить в слой (#28): ноль —
     /// ничего, иначе номер шаблона плюс один. Кладёт окно, забирает поток.
@@ -234,6 +242,13 @@ pub const Recorder = struct {
 
     pub fn state(self: *Recorder) State {
         return @enumFromInt(self.state_raw.load(.acquire));
+    }
+
+    /// Счётчики звука — наружу, для окна и самопроверок.
+    fn publishSound(self: *Recorder, sound: *const audio.Feeder) void {
+        self.audio_samples.store(sound.written, .monotonic);
+        self.audio_drift_fixed.store(sound.drift_inserted + sound.drift_dropped, .monotonic);
+        self.audio_lost.store(sound.dropped(), .monotonic);
     }
 
     fn setState(self: *Recorder, s: State) void {
@@ -264,6 +279,8 @@ pub const Recorder = struct {
                 .height = self.area_h.load(.monotonic),
             },
             .audio_samples = self.audio_samples.load(.monotonic),
+            .audio_drift_fixed = self.audio_drift_fixed.load(.monotonic),
+            .audio_lost = self.audio_lost.load(.monotonic),
             .sound_failed = self.sound_failed.load(.monotonic),
         };
         const n = self.message_len.load(.acquire);
@@ -285,6 +302,8 @@ pub const Recorder = struct {
         self.dropped.store(0, .monotonic);
         self.time_went_back.store(0, .monotonic);
         self.audio_samples.store(0, .monotonic);
+        self.audio_drift_fixed.store(0, .monotonic);
+        self.audio_lost.store(0, .monotonic);
         self.sound_failed.store(false, .monotonic);
         self.message_len.store(0, .release);
         self.setState(.recording);
@@ -403,20 +422,35 @@ pub const Recorder = struct {
             const now = win32.nowNs();
             const want_pause = self.want_pause.load(.acquire);
             if (want_pause != clock.isPaused()) {
-                if (want_pause) clock.pause(now) else {
+                if (want_pause) {
+                    clock.pause(now);
+                    // Пойманное до паузы — в файл: оно относится к записи (#98).
+                    try sound.drain(&enc);
+                } else {
                     clock.@"resume"(now);
+                    // Правке дрейфа — длину пауз: часы устройства на паузе шли (#98).
+                    sound.discard();
+                    sound.paused_ns = clock.paused_total_ns;
                     // Кадр, снятый до паузы, после неё уже не годится (#95).
                     cap.flush();
                 }
                 self.setState(if (want_pause) .paused else .recording);
             }
             if (clock.isPaused()) {
+                // Захват звука на паузе идёт; пойманное за неё в файл идти не
+                // должно, иначе звук после паузы отстаёт на всю её длину (#98).
+                sound.discard();
                 win32.c.Sleep(30);
                 continue;
             }
 
             focused = cap.focus(current);
             const frame = (try cap.next(100)) orelse {
+                // Экран неподвижен, а звук идёт: пока он сливался только вместе
+                // с кадром, очередь (4 с) переполнялась, и рассказ поверх
+                // неподвижного слайда терялся (#98).
+                try sound.drain(&enc);
+                self.publishSound(&sound);
                 self.elapsed_ns.store(clock.elapsed(win32.nowNs()), .monotonic);
                 continue;
             };
@@ -497,7 +531,7 @@ pub const Recorder = struct {
             cap.release();
 
             try sound.drain(&enc);
-            self.audio_samples.store(sound.written, .monotonic);
+            self.publishSound(&sound);
 
             _ = self.frames.fetchAdd(1, .monotonic);
             self.elapsed_ns.store(clock.elapsed(win32.nowNs()), .monotonic);
@@ -509,7 +543,7 @@ pub const Recorder = struct {
         // Хвост звука: между последним кадром и остановкой ещё лежат отсчёты,
         // и без этого запись кончалась бы тишиной длиной в кадр.
         try sound.finish(&enc);
-        self.audio_samples.store(sound.written, .monotonic);
+        self.publishSound(&sound);
 
         const summary = try enc.finish();
         finished = true;

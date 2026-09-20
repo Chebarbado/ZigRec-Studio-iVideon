@@ -90,7 +90,9 @@ const usage =
     \\        самопроверка захвата окна: окно находится и съёмка едет за ним
     \\  zigrec pause-smoke ФАЙЛ.mp4
     \\        самопроверка паузы записи: на паузе кадры не идут, после неё идут,
-    \\        время кадров не уходит назад
+    \\        время кадров не уходит назад, пауза не попадает в звук
+    \\  zigrec still-smoke ФАЙЛ.mp4
+    \\        самопроверка звука поверх неподвижного экрана: звук не теряется
     \\  zigrec remote-smoke
     \\        самопроверка пульта: подписи влезают, пульт не в кадре
     \\  zigrec hotkey-smoke [СОЧЕТАНИЕ]
@@ -292,6 +294,8 @@ pub fn main(init: std.process.Init) !void {
         code = try windowSmoke(init.io, w);
     } else if (eq(cmd, "pause-smoke")) {
         code = try pauseSmoke(arena, w, if (args.len > 2) args[2] else ".check\\pause.mp4");
+    } else if (eq(cmd, "still-smoke")) {
+        code = try stillSmoke(arena, w, if (args.len > 2) args[2] else ".check\\still.mp4");
     } else if (eq(cmd, "remote-smoke")) {
         code = try remoteSmoke(w);
     } else if (eq(cmd, "hotkey-smoke")) {
@@ -3792,10 +3796,6 @@ fn processCpuSeconds() f64 {
     return @as(f64, @floatFromInt(k + u)) / 10_000_000.0;
 }
 
-/// Наша сторона сравнения с CamStudio и OBS (#30): пишем 1920x1080 столько-то
-/// секунд с такой-то частотой, меряем себя тем же, чем меряют чужих
-/// (`tools/bench_process.py`): время процессора, потери кадров, размер
-/// файла, резкость кадра. Строка таблицы — в файл рядом с записью.
 /// Самопроверка паузы записи (#95) — на настоящем `Recorder`, том же, что
 /// крутит окно.
 ///
@@ -3816,6 +3816,17 @@ fn pauseSmoke(allocator: std.mem.Allocator, w: anytype, out_path: []const u8) !u
     const long_pause_ms: u32 = 1000;
     // Сколько часам записи позволено сдвинуться за паузу: такт-другой цикла.
     const clock_slack_ns: u64 = 150 * std.time.ns_per_ms;
+    // Частота звуковой дорожки рекордера (`encode.AudioSettings` по умолчанию).
+    const pause_audio_rate: u64 = 48_000;
+    // На сколько звук вправе быть короче картинки: захват поднимается около
+    // четверти секунды. Пауза в проверке — секунда, с допуском не спутать.
+    const pause_audio_slack_ms: u64 = 400;
+    // Сколько отсчётов правка дрейфа вправе тронуть: 50 мс на две паузы.
+    // Выброс на паузе идёт не отсчёт в отсчёт — кусок, пойманный до паузы, но
+    // ещё не отданный устройством, уходит вместе с ней, — и остаток (замерено
+    // 9–21 мс) добирает она. Пауза, не вычтенная из времени устройства, даёт
+    // тысячи отсчётов: с допуском не спутать.
+    const pause_drift_slack: u64 = 2400;
     const c = zigrec.win32.c;
 
     try w.print("[pause] пишем {s}: отрезок, пауза {d} мс, отрезок, короткая пауза, отрезок\n", .{ out_path, long_pause_ms });
@@ -3824,7 +3835,9 @@ fn pauseSmoke(allocator: std.mem.Allocator, w: anytype, out_path: []const u8) !u
     defer stim.stop();
 
     var rec = zigrec.recorder.Recorder.init(allocator);
-    rec.start(out_path, .{ .area = .{ .x = 0, .y = 0, .width = 1280, .height = 720 } }, .{ .fps = 60 }) catch |err| {
+    // Со звуком колонок (#98): то, что поймано за паузу, в файл идти не должно.
+    // Микрофон не берём — на стенде его может не быть, а комнату писать незачем.
+    rec.start(out_path, .{ .area = .{ .x = 0, .y = 0, .width = 1280, .height = 720 } }, .{ .fps = 60, .system_sound = true }) catch |err| {
         try w.print("[pause] ПРОВАЛ: запись не началась: {s}\n", .{@errorName(err)});
         return 1;
     };
@@ -3911,11 +3924,93 @@ fn pauseSmoke(allocator: std.mem.Allocator, w: anytype, out_path: []const u8) !u
         try w.writeAll("[pause] ПРОВАЛ: время кадра ушло назад — кадр, снятый до паузы, попал в запись после неё\n");
         failed = true;
     }
+    // Звук (#98). Дорожка считает время по отсчётам, часы записи — за вычетом
+    // пауз; разойтись они могут только на разгон звука в начале. Секунда
+    // паузы, попавшая в дорожку, видна сразу.
+    if (final.audio_samples == 0) {
+        try w.writeAll("[pause] звука нет (колонки молчат или их нет) — звук на паузе не проверен\n");
+    } else {
+        const audio_ms = final.audio_samples * 1000 / pause_audio_rate;
+        const video_ms = final.elapsed_ns / std.time.ns_per_ms;
+        try w.print("[pause] звука {d} мс при {d} мс записи\n", .{ audio_ms, video_ms });
+        const apart = if (audio_ms > video_ms) audio_ms - video_ms else video_ms - audio_ms;
+        if (apart > pause_audio_slack_ms) {
+            try w.writeAll("[pause] ПРОВАЛ: звук и картинка разошлись по длине — пауза попала в звуковую дорожку или звук потерян\n");
+            failed = true;
+        }
+        // За пять секунд настоящему дрейфу набежать неоткуда. Если правка
+        // дрейфа работала — значит, пауза попала в её время устройства, и она
+        // «догоняла» то, что выброшено нарочно.
+        try w.print("[pause] правка дрейфа тронула {d} отсчётов, потеряно {d}\n", .{ final.audio_drift_fixed, final.audio_lost });
+        if (final.audio_drift_fixed > pause_drift_slack) {
+            try w.writeAll("[pause] ПРОВАЛ: правка дрейфа приняла паузу за отставание звука\n");
+            failed = true;
+        }
+        if (final.audio_lost != 0) {
+            try w.writeAll("[pause] ПРОВАЛ: звук терялся — очередь не успевали забирать\n");
+            failed = true;
+        }
+    }
     if (failed) return 1;
     try w.writeAll("[pause] ПАУЗА ЧИСТАЯ\n");
     return 0;
 }
 
+/// Самопроверка звука поверх неподвижного экрана (#98).
+///
+/// Рассказ поверх слайда: кадров нет, а звук идёт. Пока звук сливался в файл
+/// только вместе с кадром, очередь на четыре секунды переполнялась, и из
+/// тринадцати секунд записи в файле оставалось пять с половиной. Снимаем
+/// угол экрана без раздражителя шесть секунд — дольше очереди — и сверяем
+/// длину звука с часами записи. Если в углу что-то шевелится, проверка
+/// пройдёт, ничего не доказав, — поэтому число кадров печатается.
+fn stillSmoke(allocator: std.mem.Allocator, w: anytype, out_path: []const u8) !u8 {
+    // Дольше очереди звука (`track.capacity` — четыре секунды).
+    const record_ms: u32 = 6000;
+    const audio_rate: u64 = 48_000;
+    // Захват звука поднимается около четверти секунды.
+    const slack_ms: u64 = 400;
+    const c = zigrec.win32.c;
+
+    var rec = zigrec.recorder.Recorder.init(allocator);
+    rec.start(out_path, .{ .area = .{ .x = 0, .y = 0, .width = 64, .height = 64 } }, .{ .fps = 30, .system_sound = true, .cursor = false }) catch |err| {
+        try w.print("[still] ПРОВАЛ: запись не началась: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    c.Sleep(record_ms);
+    rec.stop();
+    const final = rec.snapshot();
+
+    try w.print("[still] рекордер: {s}\n", .{final.message_text()});
+    if (!std.mem.startsWith(u8, final.message_text(), "готово")) {
+        try w.writeAll("[still] ПРОВАЛ: запись не дошла до конца штатно\n");
+        return 1;
+    }
+    if (final.audio_samples == 0) {
+        try w.writeAll("[still] звука нет (колонки молчат или их нет) — проверять нечего\n");
+        return 0;
+    }
+    const audio_ms = final.audio_samples * 1000 / audio_rate;
+    const video_ms = final.elapsed_ns / std.time.ns_per_ms;
+    try w.print("[still] кадров {d}, звука {d} мс при {d} мс записи, потеряно отсчётов {d}\n", .{ final.frames, audio_ms, video_ms, final.audio_lost });
+    var failed = false;
+    if (final.audio_lost != 0) {
+        try w.writeAll("[still] ПРОВАЛ: звук терялся — на неподвижном экране его не забирали\n");
+        failed = true;
+    }
+    if (audio_ms + slack_ms < video_ms or audio_ms > video_ms + slack_ms) {
+        try w.writeAll("[still] ПРОВАЛ: длина звука разошлась с часами записи\n");
+        failed = true;
+    }
+    if (failed) return 1;
+    try w.writeAll("[still] ЗВУК НЕ ЗАВИСИТ ОТ КАДРОВ\n");
+    return 0;
+}
+
+/// Наша сторона сравнения с CamStudio и OBS (#30): пишем 1920x1080 столько-то
+/// секунд с такой-то частотой, меряем себя тем же, чем меряют чужих
+/// (`tools/bench_process.py`): время процессора, потери кадров, размер
+/// файла, резкость кадра. Строка таблицы — в файл рядом с записью.
 fn benchRun(io: std.Io, allocator: std.mem.Allocator, w: anytype, seconds: u32, fps: u32, out_path: []const u8, width: u32, height: u32) !u8 {
     var opt = RecordArgs{
         .seconds = seconds,
