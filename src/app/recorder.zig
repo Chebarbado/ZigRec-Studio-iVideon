@@ -168,6 +168,14 @@ pub const Progress = struct {
     frames: u64 = 0,
     elapsed_ns: u64 = 0,
     dropped: u64 = 0,
+    /// Сколько раз время кадра оказалось меньше, чем у предыдущего (#95).
+    /// Должен быть ноль. Писатель такую метку принимает молча — разность
+    /// времён у него насыщается в ноль и подменяется номинальной
+    /// длительностью, — так что без счётчика кадр «из прошлого» ушёл бы в
+    /// кодировщик незамеченным. Так было бы после паузы: кадр, снятый потоком
+    /// захвата в её начале, дождался бы возобновления, и его время за вычетом
+    /// паузы ушло бы назад. От этого `Capturer.flush`; счётчик — сторож.
+    time_went_back: u64 = 0,
     /// Звуковых отсчётов ушло в файл.
     audio_samples: u64 = 0,
     /// Звук просили, но он не поднялся: текст причины лежит в `message`.
@@ -201,6 +209,7 @@ pub const Recorder = struct {
     frames: std.atomic.Value(u64) = .init(0),
     elapsed_ns: std.atomic.Value(u64) = .init(0),
     dropped: std.atomic.Value(u64) = .init(0),
+    time_went_back: std.atomic.Value(u64) = .init(0),
     backend_raw: std.atomic.Value(u8) = .init(0),
     area_w: std.atomic.Value(u32) = .init(0),
     area_h: std.atomic.Value(u32) = .init(0),
@@ -246,6 +255,7 @@ pub const Recorder = struct {
             .frames = self.frames.load(.monotonic),
             .elapsed_ns = self.elapsed_ns.load(.monotonic),
             .dropped = self.dropped.load(.monotonic),
+            .time_went_back = self.time_went_back.load(.monotonic),
             .backend = @enumFromInt(self.backend_raw.load(.monotonic)),
             .area = .{
                 .x = self.area_x.load(.monotonic),
@@ -273,6 +283,7 @@ pub const Recorder = struct {
         self.frames.store(0, .monotonic);
         self.elapsed_ns.store(0, .monotonic);
         self.dropped.store(0, .monotonic);
+        self.time_went_back.store(0, .monotonic);
         self.audio_samples.store(0, .monotonic);
         self.sound_failed.store(false, .monotonic);
         self.message_len.store(0, .release);
@@ -382,6 +393,7 @@ pub const Recorder = struct {
         var layer = if (layer_fw) |*fw| (events.Writer.init(&fw.interface) catch null) else null;
         defer if (layer_fw) |*fw| fw.interface.flush() catch {};
         var tap = event_tap.Tap{};
+        var last_frame_time: u64 = 0;
 
         self.backend_raw.store(@intFromEnum(cap.backend()), .monotonic);
         self.area_w.store(area.width, .monotonic);
@@ -478,7 +490,10 @@ pub const Recorder = struct {
                 pixels_stride = out_stride;
             }
 
-            try enc.writeFrame(pixels, pixels_stride, clock.frameTime(frame.timestamp_ns));
+            const frame_time = clock.frameTime(frame.timestamp_ns);
+            if (frame_time < last_frame_time) _ = self.time_went_back.fetchAdd(1, .monotonic);
+            last_frame_time = frame_time;
+            try enc.writeFrame(pixels, pixels_stride, frame_time);
             cap.release();
 
             try sound.drain(&enc);

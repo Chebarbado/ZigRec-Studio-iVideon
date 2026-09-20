@@ -88,6 +88,9 @@ const usage =
     \\        самопроверка значков: все нарисованы, все разные, все в одной картинке
     \\  zigrec window-smoke
     \\        самопроверка захвата окна: окно находится и съёмка едет за ним
+    \\  zigrec pause-smoke ФАЙЛ.mp4
+    \\        самопроверка паузы записи: на паузе кадры не идут, после неё идут,
+    \\        время кадров не уходит назад
     \\  zigrec remote-smoke
     \\        самопроверка пульта: подписи влезают, пульт не в кадре
     \\  zigrec hotkey-smoke [СОЧЕТАНИЕ]
@@ -287,6 +290,8 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "window-smoke")) {
         code = try windowSmoke(init.io, w);
+    } else if (eq(cmd, "pause-smoke")) {
+        code = try pauseSmoke(arena, w, if (args.len > 2) args[2] else ".check\\pause.mp4");
     } else if (eq(cmd, "remote-smoke")) {
         code = try remoteSmoke(w);
     } else if (eq(cmd, "hotkey-smoke")) {
@@ -3791,6 +3796,126 @@ fn processCpuSeconds() f64 {
 /// секунд с такой-то частотой, меряем себя тем же, чем меряют чужих
 /// (`tools/bench_process.py`): время процессора, потери кадров, размер
 /// файла, резкость кадра. Строка таблицы — в файл рядом с записью.
+/// Самопроверка паузы записи (#95) — на настоящем `Recorder`, том же, что
+/// крутит окно.
+///
+/// Зачем отдельная: захват GDI снимает в своём потоке, и кадр, снятый в
+/// начале паузы, дожидается в нём возобновления. Его время за вычетом паузы
+/// меньше, чем у кадра до паузы, а писатель такую метку принимает молча —
+/// ни ошибки, ни падения, просто кадр «из прошлого» в кодировщике. Поймать
+/// это можно только счётчиком самого рекордера.
+///
+/// Пауз две. Длинную (секунда) закрывают сразу две защиты — сброс на
+/// возобновлении и предел возраста кадра. Короткую закрывает только сброс:
+/// кадр ещё «свежий» по возрасту, и без `Capturer.flush` время уходит назад.
+/// Короткая пауза меряется не временем, а состоянием: ждём, пока рекордер
+/// её заметит, и сразу возобновляем — иначе она могла бы проскочить между
+/// итерациями цикла записи, и проверка прошла бы, ничего не проверив.
+fn pauseSmoke(allocator: std.mem.Allocator, w: anytype, out_path: []const u8) !u8 {
+    const segment_ms: u32 = 1200;
+    const long_pause_ms: u32 = 1000;
+    // Сколько часам записи позволено сдвинуться за паузу: такт-другой цикла.
+    const clock_slack_ns: u64 = 150 * std.time.ns_per_ms;
+    const c = zigrec.win32.c;
+
+    try w.print("[pause] пишем {s}: отрезок, пауза {d} мс, отрезок, короткая пауза, отрезок\n", .{ out_path, long_pause_ms });
+    var stim = zigrec.stimulus.Stimulus{};
+    stim.start(.{}) catch |err| try w.print("[pause] раздражитель не поднялся: {s}\n", .{@errorName(err)});
+    defer stim.stop();
+
+    var rec = zigrec.recorder.Recorder.init(allocator);
+    rec.start(out_path, .{ .area = .{ .x = 0, .y = 0, .width = 1280, .height = 720 } }, .{ .fps = 60 }) catch |err| {
+        try w.print("[pause] ПРОВАЛ: запись не началась: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    var stopped = false;
+    defer if (!stopped) rec.stop();
+
+    // Отсчёт — от первого кадра: до него рекордер выбирает путь захвата.
+    var waited: u32 = 0;
+    while (rec.snapshot().frames == 0 and rec.isBusy() and waited < 8000) : (waited += 10) c.Sleep(10);
+    if (rec.snapshot().frames == 0) {
+        try w.print("[pause] ПРОВАЛ: за {d} мс ни одного кадра. {s}\n", .{ waited, rec.snapshot().message_text() });
+        return 1;
+    }
+    c.Sleep(segment_ms);
+
+    // Длинная пауза.
+    rec.pause();
+    waited = 0;
+    while (rec.state() != .paused and waited < 1000) : (waited += 5) c.Sleep(5);
+    if (rec.state() != .paused) {
+        try w.writeAll("[pause] ПРОВАЛ: рекордер не встал на паузу\n");
+        return 1;
+    }
+    const at_pause = rec.snapshot();
+    c.Sleep(long_pause_ms);
+    const in_pause = rec.snapshot();
+    rec.pause();
+    c.Sleep(segment_ms);
+    const after_long = rec.snapshot();
+
+    // Короткая пауза: по состоянию, а не по времени.
+    rec.pause();
+    waited = 0;
+    while (rec.state() != .paused and waited < 1000) : (waited += 1) c.Sleep(1);
+    const short_seen = rec.state() == .paused;
+    rec.pause();
+    c.Sleep(segment_ms);
+    const at_end = rec.snapshot();
+
+    rec.stop();
+    stopped = true;
+    const final = rec.snapshot();
+
+    const grew_in_pause = in_pause.frames - at_pause.frames;
+    const clock_in_pause = in_pause.elapsed_ns -| at_pause.elapsed_ns;
+    try w.print("[pause] кадров: до паузы {d}, за паузу +{d}, после неё +{d}, после короткой +{d}\n", .{
+        at_pause.frames,
+        grew_in_pause,
+        after_long.frames - in_pause.frames,
+        at_end.frames - after_long.frames,
+    });
+    try w.print("[pause] часы записи за паузу {d} мс сдвинулись на {d} мс; время кадра уходило назад {d} раз\n", .{
+        long_pause_ms,
+        clock_in_pause / std.time.ns_per_ms,
+        final.time_went_back,
+    });
+
+    try w.print("[pause] рекордер: {s}\n", .{final.message_text()});
+
+    var failed = false;
+    // Итог и сбой рекордер кладёт в одно поле словами: удачный начинается
+    // с «готово», всё остальное — не то, чего ждали.
+    if (!std.mem.startsWith(u8, final.message_text(), "готово")) {
+        try w.writeAll("[pause] ПРОВАЛ: запись не дошла до конца штатно\n");
+        failed = true;
+    }
+    if (grew_in_pause != 0) {
+        try w.writeAll("[pause] ПРОВАЛ: на паузе в файл шли кадры\n");
+        failed = true;
+    }
+    if (clock_in_pause > clock_slack_ns) {
+        try w.writeAll("[pause] ПРОВАЛ: часы записи шли на паузе — пауза попала бы в файл\n");
+        failed = true;
+    }
+    if (after_long.frames == in_pause.frames or at_end.frames == after_long.frames) {
+        try w.writeAll("[pause] ПРОВАЛ: после паузы запись не возобновилась\n");
+        failed = true;
+    }
+    if (!short_seen) {
+        try w.writeAll("[pause] ПРОВАЛ: короткую паузу рекордер не заметил — проверять было нечего\n");
+        failed = true;
+    }
+    if (final.time_went_back != 0) {
+        try w.writeAll("[pause] ПРОВАЛ: время кадра ушло назад — кадр, снятый до паузы, попал в запись после неё\n");
+        failed = true;
+    }
+    if (failed) return 1;
+    try w.writeAll("[pause] ПАУЗА ЧИСТАЯ\n");
+    return 0;
+}
+
 fn benchRun(io: std.Io, allocator: std.mem.Allocator, w: anytype, seconds: u32, fps: u32, out_path: []const u8, width: u32, height: u32) !u8 {
     var opt = RecordArgs{
         .seconds = seconds,
