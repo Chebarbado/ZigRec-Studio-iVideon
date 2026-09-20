@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const c = win32.c;
 const listen = @import("listen.zig");
+const lang = @import("../lang.zig");
 
 /// Больше адресов на машине не бывает в разумной жизни: физические,
 /// Wi-Fi, виртуальные и VPN — и на каждом по IPv4 и IPv6.
@@ -88,9 +89,9 @@ pub const max_choices = max_entries + 4;
 /// они уже есть постоянными строками, а дважды один адрес путает.
 pub fn choices(out: *[max_choices]Choice, found: []const Entry) []Choice {
     var n: usize = 0;
-    out[n] = .{ .address = "127.0.0.1", .note = "только эта машина", .kind = .loopback, .family = .ip4 };
+    out[n] = .{ .address = "127.0.0.1", .note = lang.t("только эта машина"), .kind = .loopback, .family = .ip4 };
     n += 1;
-    out[n] = .{ .address = "0.0.0.0", .note = "все интерфейсы этой машины", .kind = .any, .family = .ip4 };
+    out[n] = .{ .address = "0.0.0.0", .note = lang.t("все интерфейсы этой машины"), .kind = .any, .family = .ip4 };
     n += 1;
     for ([_]Family{ .ip4, .ip6 }) |family| {
         // Два прохода: сперва провод и Wi-Fi, потом остальное.
@@ -110,9 +111,9 @@ pub fn choices(out: *[max_choices]Choice, found: []const Entry) []Choice {
             n += 1;
         };
     }
-    out[n] = .{ .address = "::1", .note = "только эта машина, IPv6", .kind = .loopback, .family = .ip6 };
+    out[n] = .{ .address = "::1", .note = lang.t("только эта машина, IPv6"), .kind = .loopback, .family = .ip6 };
     n += 1;
-    out[n] = .{ .address = "::", .note = "все интерфейсы, IPv6", .kind = .any, .family = .ip6 };
+    out[n] = .{ .address = "::", .note = lang.t("все интерфейсы, IPv6"), .kind = .any, .family = .ip6 };
     n += 1;
     return out[0..n];
 }

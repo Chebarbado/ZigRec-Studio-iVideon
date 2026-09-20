@@ -16,6 +16,7 @@
 //! полноэкранная игра) — не ошибка, а обычный режим: дубликация пересоздаётся
 //! на месте.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const c = win32.c;
@@ -36,7 +37,7 @@ pub const Backend = enum {
 
     pub fn label(self: Backend) []const u8 {
         return switch (self) {
-            .auto => "авто",
+            .auto => lang.t("авто"),
             .dxgi => "DXGI",
             .gdi => "GDI",
         };

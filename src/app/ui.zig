@@ -123,7 +123,7 @@ pub const DropFit = struct {
 
 /// Померить подпись тем шрифтом, которым она рисуется.
 pub fn dropLabelFit() DropFit {
-    return textFit(drop_text, drop_zone.right - drop_zone.left - 16);
+    return textFit(lang.t(drop_text), drop_zone.right - drop_zone.left - 16);
 }
 
 /// Ширина надписи угла MCP: от лампочки до кнопки «пуск/стоп».
@@ -149,7 +149,8 @@ pub const settings_labels = [_]SettingsLabel{
 
 /// Померить подписи настроек тем шрифтом, которым они рисуются.
 pub fn settingsLabelsFit(out: *[settings_labels.len]DropFit) []DropFit {
-    for (settings_labels, 0..) |l, i| out[i] = textFit(l.text, l.width);
+    // Меряем на языке окон: у английской подписи своя длина (#100).
+    inline for (settings_labels, 0..) |l, i| out[i] = textFit(lang.t(l.text), l.width);
     return out[0..];
 }
 
@@ -591,7 +592,7 @@ fn startRecording() void {
     };
     app.counter += 1;
     showRemote();
-    setText(app.btn_record, "Стоп");
+    setText(app.btn_record, lang.t("Стоп"));
     _ = c.EnableWindow(app.btn_pause, 1);
     // Рамка нужна только для куска экрана: весь экран обводить нечего.
     // Для выбранного окна она тоже нужна — по ней видно, что пишется
@@ -608,8 +609,8 @@ fn stopRecording() void {
     _ = c.KillTimer(app.hwnd, timer_frame);
     frame_overlay.hide();
     app.rec.stop();
-    setText(app.btn_record, "Записать экран");
-    setText(app.btn_pause, "Пауза");
+    setText(app.btn_record, lang.t("Записать экран"));
+    setText(app.btn_pause, lang.t("Пауза"));
     _ = c.EnableWindow(app.btn_pause, 0);
     _ = c.EnableWindow(app.btn_open, 1);
     rememberRecording();
@@ -658,7 +659,7 @@ fn screenRefresh() u32 {
 /// Пустая строка — значит всё в порядке.
 fn fpsWarning(fps: u32, refresh_hz: u32, buf: []u8) []const u8 {
     if (refresh_hz == 0 or fps <= refresh_hz) return "";
-    return std.fmt.bufPrint(
+    return lang.print(
         buf,
         " · экран обновляется {d} раз(а) в секунду: разных кадров будет {d}, остальные повторы",
         .{ refresh_hz, refresh_hz },
@@ -677,21 +678,21 @@ fn updateStatus() void {
 
     const text = if (p.state == .idle) blk: {
         if (p.message_len > 0) {
-            break :blk std.fmt.bufPrint(&buf, "{s}\r\n{s} · источник: {s}", .{
+            break :blk lang.print(&buf, "{s}\r\n{s} · источник: {s}", .{
                 p.message_text(),
                 hotkey_note,
                 source_text,
-            }) catch "готов";
+            }) catch lang.t("готов");
         }
         var warn_buf: [160]u8 = undefined;
-        break :blk std.fmt.bufPrint(&buf, "готов · {s}, {s}\r\nисточник: {s}, {d} кадр/с{s}", .{
+        break :blk lang.print(&buf, "готов · {s}, {s}\r\nисточник: {s}, {d} кадр/с{s}", .{
             hotkey_note,
             areaKeyNote(),
             source_text,
             app.settings.fps,
             fpsWarning(app.settings.fps, app.refresh_hz, &warn_buf),
-        }) catch "готов";
-    } else std.fmt.bufPrint(&buf, "{s}  {d:0>2}:{d:0>2}\r\nкадров {d}, потерь {d}, путь {s}, кадр {d}x{d}", .{
+        }) catch lang.t("готов");
+    } else lang.print(&buf, "{s}  {d:0>2}:{d:0>2}\r\nкадров {d}, потерь {d}, путь {s}, кадр {d}x{d}", .{
         p.state.label(),
         @as(u32, @intFromFloat(secs)) / 60,
         @as(u32, @intFromFloat(secs)) % 60,
@@ -700,14 +701,14 @@ fn updateStatus() void {
         p.backend.label(),
         p.area.width,
         p.area.height,
-    }) catch "идёт запись";
+    }) catch lang.t("идёт запись");
 
     // Пока идёт проба или висит её итог — строка состояния про неё:
     // человек нажал кнопку и ждёт ответа именно там.
     var probe_buf: [160]u8 = undefined;
     const probe_text = app.probe.status(&probe_buf, win32.nowNs());
     setText(app.status, if (probe_text.len > 0) probe_text else text);
-    setText(app.btn_pause, if (p.state == .paused) "Продолжить" else "Пауза");
+    setText(app.btn_pause, if (p.state == .paused) lang.t("Продолжить") else lang.t("Пауза"));
     updateTrayTip(p, secs);
     // Пульт показывает то же, что и окно: одно состояние, два места.
     remote_win.update(
@@ -740,7 +741,7 @@ fn updateStatus() void {
 
     // Кнопка вернулась в исходное, если запись кончилась сама.
     if (p.state == .idle) {
-        setText(app.btn_record, "Записать экран");
+        setText(app.btn_record, lang.t("Записать экран"));
         _ = c.EnableWindow(app.btn_pause, 0);
     }
 }
@@ -852,7 +853,7 @@ fn registerHotkeys(hwnd: c.HWND) void {
     const plain_rec = c.RegisterHotKey(hwnd, hotkey_record, 0, c.VK_F9) != 0;
     const plain_pause = c.RegisterHotKey(hwnd, hotkey_pause, 0, c.VK_F10) != 0;
     if (plain_rec and plain_pause) {
-        hotkey_note = "F9 — запись, F10 — пауза";
+        hotkey_note = lang.t("F9 — запись, F10 — пауза");
         return;
     }
     if (plain_rec) _ = c.UnregisterHotKey(hwnd, hotkey_record);
@@ -861,10 +862,10 @@ fn registerHotkeys(hwnd: c.HWND) void {
     const alt_rec = c.RegisterHotKey(hwnd, hotkey_record, mod_ctrl_alt, c.VK_F9) != 0;
     const alt_pause = c.RegisterHotKey(hwnd, hotkey_pause, mod_ctrl_alt, c.VK_F10) != 0;
     if (alt_rec and alt_pause) {
-        hotkey_note = "F9 занята, работают Ctrl+Alt+F9 и Ctrl+Alt+F10";
+        hotkey_note = lang.t("F9 занята, работают Ctrl+Alt+F9 и Ctrl+Alt+F10");
         return;
     }
-    hotkey_note = "горячие клавиши заняты, работают только кнопки";
+    hotkey_note = lang.t("горячие клавиши заняты, работают только кнопки");
 }
 
 /// Как зарегистрировалось сочетание «обвёл область и пишешь».
@@ -892,20 +893,20 @@ fn registerAreaHotkey(hwnd: c.HWND) void {
     const text = app.prefs.areaKey();
     const keys = hotkey_mod.parse(text) catch |err| {
         var buf: [160]u8 = undefined;
-        sayAreaKey(std.fmt.bufPrint(&buf, "сочетание «{s}» не понято: {s}", .{
+        sayAreaKey(lang.print(&buf, "сочетание «{s}» не понято: {s}", .{
             text,
             hotkey_mod.explain(err),
-        }) catch "сочетание не понято");
+        }) catch lang.t("сочетание не понято"));
         return;
     };
 
     if (c.RegisterHotKey(hwnd, hotkey_area, keys.modifiers(), keys.key) == 0) {
         var buf: [160]u8 = undefined;
-        sayAreaKey(std.fmt.bufPrint(&buf, "{s} занято другой программой", .{text}) catch "сочетание занято");
+        sayAreaKey(lang.print(&buf, "{s} занято другой программой", .{text}) catch lang.t("сочетание занято"));
         return;
     }
     var buf: [160]u8 = undefined;
-    sayAreaKey(std.fmt.bufPrint(&buf, "{s} — обвести область и писать", .{text}) catch "");
+    sayAreaKey(lang.print(&buf, "{s} — обвести область и писать", .{text}) catch "");
 }
 
 /// Одно нажатие — обвести область и начать запись. Второе — остановить
@@ -946,17 +947,17 @@ fn askNameForLast() void {
     var ofn = std.mem.zeroes(c.OPENFILENAMEW);
     ofn.lStructSize = @sizeOf(c.OPENFILENAMEW);
     ofn.hwndOwner = app.hwnd;
-    ofn.lpstrFilter = wide("Видео MP4\x00*.mp4\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrFilter = lang.tw("Видео MP4\x00*.mp4\x00Все файлы\x00*.*\x00\x00");
     ofn.lpstrFile = &chosen;
     ofn.nMaxFile = chosen.len;
-    ofn.lpstrTitle = wide("Как назвать запись");
+    ofn.lpstrTitle = lang.tw("Как назвать запись");
     ofn.lpstrDefExt = wide("mp4");
     ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_PATHMUSTEXIST;
 
     if (c.GetSaveFileNameW(&ofn) == 0) {
         // Отказались — файл остаётся под своим именем. Записанное
         // не пропадает оттого, что человек передумал его называть.
-        setText(app.status, "запись сохранена под прежним именем");
+        setText(app.status, lang.t("запись сохранена под прежним именем"));
         return;
     }
 
@@ -965,7 +966,7 @@ fn askNameForLast() void {
     if (same) return;
 
     if (c.MoveFileExW(@ptrCast(&wide_path), @ptrCast(&chosen), c.MOVEFILE_REPLACE_EXISTING) == 0) {
-        setText(app.status, "переименовать не вышло: файл остался под прежним именем");
+        setText(app.status, lang.t("переименовать не вышло: файл остался под прежним именем"));
         return;
     }
 
@@ -989,9 +990,9 @@ fn askNameForLast() void {
     rememberRecording();
 
     var note: [320]u8 = undefined;
-    setText(app.status, std.fmt.bufPrint(&note, "сохранено: {s}", .{
+    setText(app.status, lang.print(&note, "сохранено: {s}", .{
         std.fs.path.basename(app.last_path[0..app.last_path_len]),
-    }) catch "сохранено");
+    }) catch lang.t("сохранено"));
 }
 
 /// Подсказка значка в трее: состояние видно, даже когда окно свёрнуто
@@ -1002,7 +1003,7 @@ fn updateTrayTip(p: recorder.Progress, secs: f64) void {
     const text = if (p.state == .idle)
         std.fmt.bufPrint(&text_buf, "Zig-Rec Studio — {s}", .{p.state.label()}) catch return
     else
-        std.fmt.bufPrint(&text_buf, "Zig-Rec Studio — {s} {d:0>2}:{d:0>2}, кадров {d}", .{
+        lang.print(&text_buf, "Zig-Rec Studio — {s} {d:0>2}:{d:0>2}, кадров {d}", .{
             p.state.label(),
             @as(u32, @intFromFloat(secs)) / 60,
             @as(u32, @intFromFloat(secs)) % 60,
@@ -1326,7 +1327,7 @@ fn drawDropZone(dc: c.HDC) void {
 
     var rect = box;
     var wide_buf: [128]u16 = undefined;
-    const n = std.unicode.utf8ToUtf16Le(&wide_buf, drop_text) catch return;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, lang.t(drop_text)) catch return;
     _ = c.DrawTextW(
         dc,
         @ptrCast(&wide_buf),
@@ -1497,7 +1498,7 @@ fn collectSettings() void {
         // называем словами, иначе человек не поймёт, почему не вышло.
         const why = if (hotkey_mod.parse(key_text)) |_| "" else |err| hotkey_mod.explain(err);
         var note: [256]u8 = undefined;
-        setText(app.status, std.fmt.bufPrint(&note, "сочетание не принято: {s}", .{why}) catch "сочетание не принято");
+        setText(app.status, lang.print(&note, "сочетание не принято: {s}", .{why}) catch lang.t("сочетание не принято"));
     }
 
     app.prefs.serve_at_start = c.SendMessageW(settings_win.serve_box, c.BM_GETCHECK, 0, 0) != 0;
@@ -1520,12 +1521,12 @@ fn collectSettings() void {
                 app.home = home_store[0..n];
             } else |_| {}
         } else {
-            setText(app.status, "способ хранения не сменился: папка программы недоступна");
+            setText(app.status, lang.t("способ хранения не сменился: папка программы недоступна"));
         }
     }
 
     if (!settings_mod.save(&app.prefs, app.home)) {
-        setText(app.status, "настройки не сохранились: папка недоступна");
+        setText(app.status, lang.t("настройки не сохранились: папка недоступна"));
         return;
     }
     // Новая папка может ещё не существовать — создаём, иначе первая же
@@ -1551,7 +1552,7 @@ fn browseForDir(hwnd: c.HWND) void {
     var info = std.mem.zeroes(c.BROWSEINFOW);
     info.hwndOwner = hwnd;
     info.pszDisplayName = &display;
-    info.lpszTitle = wide("Куда класть записи");
+    info.lpszTitle = lang.tw("Куда класть записи");
     info.ulFlags = c.BIF_RETURNONLYFSDIRS | c.BIF_NEWDIALOGSTYLE;
 
     const list = c.SHBrowseForFolderW(&info);
@@ -1617,7 +1618,7 @@ fn createSettings(owner: c.HWND) void {
     const hwnd = c.CreateWindowExW(
         c.WS_EX_DLGMODALFRAME,
         wide("ZigRecSettings"),
-        wide("Настройки"),
+        lang.tw("Настройки"),
         c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
@@ -1703,7 +1704,7 @@ fn createSettings(owner: c.HWND) void {
     _ = c.SendMessageW(settings_win.lang_ru_box, c.BM_SETCHECK, if (app.prefs.language == .ru) 1 else 0, 0);
     _ = c.SendMessageW(settings_win.lang_en_box, c.BM_SETCHECK, if (app.prefs.language == .en) 1 else 0, 0);
     var home_text: [640]u8 = undefined;
-    setText(settings_win.home_label, std.fmt.bufPrint(&home_text, "Своё лежит в: {s}", .{app.home}) catch app.home);
+    setText(settings_win.home_label, lang.print(&home_text, "Своё лежит в: {s}", .{app.home}) catch app.home);
 
     for ([_]c.HWND{
         settings_win.dir_box,
@@ -1732,27 +1733,27 @@ fn buildMenu(hwnd: c.HWND) void {
     if (bar == null) return;
 
     const file_menu = c.CreatePopupMenu();
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open_dir, wide("Папка с записями"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open_dir, lang.tw("Папка с записями"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(
         file_menu,
         c.MF_POPUP,
         @intFromPtr(recentMenu(&app.recent.recorded, id_recent_base)),
-        wide("Недавно записанные"),
+        lang.tw("Недавно записанные"),
     );
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_exit, wide("Выход"));
-    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(file_menu), wide("Файл"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_exit, lang.tw("Выход"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(file_menu), lang.tw("Файл"));
 
     const tools_menu = c.CreatePopupMenu();
-    _ = c.AppendMenuW(tools_menu, c.MF_STRING, id_menu_settings, wide("Настройки…"));
-    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(tools_menu), wide("Настройки"));
+    _ = c.AppendMenuW(tools_menu, c.MF_STRING, id_menu_settings, lang.tw("Настройки…"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(tools_menu), lang.tw("Настройки"));
 
     const help_menu = c.CreatePopupMenu();
-    _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_boost, wide("Чем ускорено…"));
+    _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_boost, lang.tw("Чем ускорено…"));
     _ = c.AppendMenuW(help_menu, c.MF_SEPARATOR, 0, null);
-    _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_about, wide("О программе"));
-    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(help_menu), wide("Справка"));
+    _ = c.AppendMenuW(help_menu, c.MF_STRING, id_menu_about, lang.tw("О программе"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(help_menu), lang.tw("Справка"));
 
     _ = c.SetMenu(hwnd, bar);
 }
@@ -1767,7 +1768,7 @@ fn recentMenu(list: *const recent_mod.List, base_id: c_int) c.HMENU {
     const menu = c.CreatePopupMenu();
     if (menu == null) return menu;
     if (list.count == 0) {
-        _ = c.AppendMenuW(menu, c.MF_STRING | c.MF_GRAYED, 0, wide("пока пусто"));
+        _ = c.AppendMenuW(menu, c.MF_STRING | c.MF_GRAYED, 0, lang.tw("пока пусто"));
         return menu;
     }
 
@@ -1778,7 +1779,7 @@ fn recentMenu(list: *const recent_mod.List, base_id: c_int) c.HMENU {
         var text: [400]u8 = undefined;
         const shown = std.fmt.bufPrint(&text, "{s}{s}", .{
             std.fs.path.basename(path),
-            if (here) "" else "  — нет на месте",
+            if (here) "" else lang.t("  — нет на месте"),
         }) catch std.fs.path.basename(path);
 
         var wide_buf: [512]u16 = undefined;
@@ -1811,7 +1812,7 @@ fn openRecent(index: usize) void {
     const path = app.recent.recorded.at(index);
     if (path.len == 0) return;
     if (!recent_mod.onDisk(path)) {
-        setText(app.status, "файла нет на месте");
+        setText(app.status, lang.t("файла нет на месте"));
         return;
     }
     openEditorWith(path);
@@ -1820,9 +1821,9 @@ fn openRecent(index: usize) void {
 /// Короткая справка про сервер MCP.
 fn showServerHelp(owner: c.HWND) void {
     var wide_buf: [1024]u16 = undefined;
-    const n = std.unicode.utf8ToUtf16Le(&wide_buf, corner.help_text) catch return;
+    const n = std.unicode.utf8ToUtf16Le(&wide_buf, lang.t(corner.help_text)) catch return;
     wide_buf[n] = 0;
-    _ = c.MessageBoxW(owner, @ptrCast(&wide_buf), wide("Сервер MCP"), c.MB_OK | c.MB_ICONINFORMATION);
+    _ = c.MessageBoxW(owner, @ptrCast(&wide_buf), lang.tw("Сервер MCP"), c.MB_OK | c.MB_ICONINFORMATION);
 }
 
 /// Меню по правой кнопке на значке в трее.
@@ -1926,7 +1927,7 @@ fn onDrop(drop: usize) void {
     }
 
     var note: [160]u8 = undefined;
-    setText(app.status, std.fmt.bufPrint(&note, "открываю в редакторе: файлов {d}", .{opened}) catch "открываю в редакторе");
+    setText(app.status, lang.print(&note, "открываю в редакторе: файлов {d}", .{opened}) catch lang.t("открываю в редакторе"));
 }
 
 /// Что снимаем прямо сейчас.
@@ -1944,10 +1945,10 @@ fn chosenSource() source.Source {
 /// серверу и подпись на пульте.
 fn sourceWords(buf: []u8) []const u8 {
     if (chosenWindowName().len > 0) {
-        return std.fmt.bufPrint(buf, "окно «{s}»", .{chosenWindowName()}) catch "окно";
+        return lang.print(buf, "окно «{s}»", .{chosenWindowName()}) catch lang.t("окно");
     }
     if (app.area) |a| return areaText(buf, a);
-    return "весь экран";
+    return lang.t("весь экран");
 }
 
 /// Прямоугольник того, что снимаем. `null` — весь экран, обводить нечего.
@@ -1973,7 +1974,7 @@ fn showWindowPicker(hwnd: c.HWND) void {
     var buf: [source.max_windows]source.WindowInfo = undefined;
     const list = source.listWindows(&buf);
     if (list.len == 0) {
-        setText(app.status, "подходящих окон не нашлось: слишком маленькие или без заголовка");
+        setText(app.status, lang.t("подходящих окон не нашлось: слишком маленькие или без заголовка"));
         return;
     }
 
@@ -1984,7 +1985,7 @@ fn showWindowPicker(hwnd: c.HWND) void {
     // Первая строка снимает выбор: раз окно выбрали, должен быть и путь
     // обратно, иначе «весь экран» приходится искать среди кнопок.
     var wide_none: [64]u16 = undefined;
-    if (std.unicode.utf8ToUtf16Le(&wide_none, "— не снимать окно, весь экран —")) |n| {
+    if (std.unicode.utf8ToUtf16Le(&wide_none, lang.t("— не снимать окно, весь экран —"))) |n| {
         wide_none[n] = 0;
         _ = c.AppendMenuW(menu, c.MF_STRING, id_window_base, @ptrCast(&wide_none));
         _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
@@ -1998,7 +1999,7 @@ fn showWindowPicker(hwnd: c.HWND) void {
             it.area.height,
             // Свёрнутое окно показываем и помечаем: выбрать его можно,
             // и при выборе оно развернётся — снимать свёрнутое нечего.
-            if (it.minimized) "  (свёрнуто)" else "",
+            if (it.minimized) lang.t("  (свёрнуто)") else "",
         }) catch it.name();
         var wide_buf: [512]u16 = undefined;
         const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch continue;
@@ -2137,33 +2138,33 @@ fn showBoost(hwnd: c.HWND) void {
 
     var text: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
-    w.print("Zig-Rec Studio {s}, собрана {s}\r\n", .{
+    lang.write(&w, "Zig-Rec Studio {s}, собрана {s}\r\n", .{
         version.VERSION,
         version.VERSION_DATE,
     }) catch {};
-    w.print("Разгон {s}. Включено {d} из {d}{s}.\r\n\r\n", .{
-        if (app.prefs.boost()) "включён" else "выключен",
+    lang.write(&w, "Разгон {s}. Включено {d} из {d}{s}.\r\n\r\n", .{
+        if (app.prefs.boost()) lang.t("включён") else lang.t("выключен"),
         counted.on,
         counted.total,
-        if (counted.failed > 0) ", из них не завелось: 1" else "",
+        if (counted.failed > 0) lang.t(", из них не завелось: 1") else "",
     }) catch {};
 
     for (list) |it| {
         w.print("• {s} — {s}\r\n", .{ it.name, it.state() }) catch {};
         w.print("   {s}\r\n", .{it.what}) catch {};
-        if (it.cost.len > 0) w.print("   цена: {s}\r\n", .{it.cost}) catch {};
-        w.print("   чем сделано: {s}\r\n\r\n", .{it.made_by}) catch {};
+        if (it.cost.len > 0) lang.write(&w, "   цена: {s}\r\n", .{it.cost}) catch {};
+        lang.write(&w, "   чем сделано: {s}\r\n\r\n", .{it.made_by}) catch {};
     }
 
     var wide_buf: [8192]u16 = undefined;
     const n = std.unicode.utf8ToUtf16Le(&wide_buf, w.buffered()) catch return;
     wide_buf[n] = 0;
-    _ = c.MessageBoxW(hwnd, @ptrCast(&wide_buf), wide("Чем ускорено"), c.MB_OK | c.MB_ICONINFORMATION);
+    _ = c.MessageBoxW(hwnd, @ptrCast(&wide_buf), lang.tw("Чем ускорено"), c.MB_OK | c.MB_ICONINFORMATION);
 }
 
 fn showAbout(hwnd: c.HWND) void {
     var buf: [1024]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf,
+    const text = lang.print(&buf,
         \\Zig-Rec Studio {s} ({s})
         \\
         \\Запись экрана в mp4, который открывается везде, и в GIF —
@@ -2184,7 +2185,7 @@ fn showAbout(hwnd: c.HWND) void {
     var wide_buf: [1024]u16 = undefined;
     const n = std.unicode.utf8ToUtf16Le(&wide_buf, text) catch return;
     wide_buf[n] = 0;
-    _ = c.MessageBoxW(hwnd, @ptrCast(&wide_buf), wide("О программе"), c.MB_OK | c.MB_ICONINFORMATION);
+    _ = c.MessageBoxW(hwnd, @ptrCast(&wide_buf), lang.tw("О программе"), c.MB_OK | c.MB_ICONINFORMATION);
 }
 
 /// Открыть редактор отдельной программой.
@@ -2252,7 +2253,7 @@ fn openEditorWith(file: []const u8) void {
         &pi,
     );
     if (ok == 0) {
-        setText(app.status, "редактор не открылся");
+        setText(app.status, lang.t("редактор не открылся"));
         return;
     }
     // Дескрипторы нам не нужны: редактор живёт сам по себе.
@@ -2335,13 +2336,13 @@ fn showListenPicker(hwnd: c.HWND) void {
 fn fillMicList() void {
     app.mic_count = devices.list(&app.mic_list).len;
     _ = c.SendMessageW(app.cb_mic, c.CB_RESETCONTENT, 0, 0);
-    addItem(app.cb_mic, devices.default_label);
+    addItem(app.cb_mic, lang.t(devices.default_label));
     for (app.mic_list[0..app.mic_count]) |*d| addItem(app.cb_mic, d.deviceName());
     // Запомненного нет среди включённых — выбираем «по умолчанию», но
     // настройку не трогаем: гарнитуру могли просто ещё не воткнуть.
     const chosen = devices.indexOf(app.mic_list[0..app.mic_count], app.prefs.micDevice());
     _ = c.SendMessageW(app.cb_mic, c.CB_SETCURSEL, if (chosen) |i| i + 1 else 0, 0);
-    if (chosen == null and app.prefs.micDevice().len > 0) setText(app.status, devices.missing_label);
+    if (chosen == null and app.prefs.micDevice().len > 0) setText(app.status, lang.t(devices.missing_label));
     app.microphone.useDevice(app.prefs.micDevice());
 }
 
@@ -2354,7 +2355,7 @@ fn onMicChosen() void {
         "";
     app.prefs.setMicDevice(id);
     app.microphone.useDevice(id);
-    if (!settings_mod.save(&app.prefs, app.home)) setText(app.status, "выбор микрофона не сохранился: папка недоступна");
+    if (!settings_mod.save(&app.prefs, app.home)) setText(app.status, lang.t("выбор микрофона не сохранился: папка недоступна"));
     // Индикатор слушает старый — перезапустить на новый.
     if (app.sound_on and app.microphone.isRunning()) {
         app.microphone.stop();
@@ -2366,12 +2367,12 @@ fn onMicChosen() void {
 fn startProbe(hwnd: c.HWND) void {
     if (app.probe.busy()) return;
     if (app.rec.isBusy()) {
-        setText(app.status, "во время записи проба недоступна");
+        setText(app.status, lang.t("во время записи проба недоступна"));
         return;
     }
     if (app.probe_track == null) {
         app.probe_track = app.allocator.create(sound_track.Track) catch {
-            setText(app.status, "не хватило памяти под пробу");
+            setText(app.status, lang.t("не хватило памяти под пробу"));
             return;
         };
         app.probe_track.?.* = .{};
@@ -2429,7 +2430,7 @@ fn onProbeTick(hwnd: c.HWND) void {
                 if (app.probe.state == .playing) {
                     app.probe_thread = std.Thread.spawn(.{}, probePlayer, .{hwnd}) catch null;
                     if (app.probe_thread == null) {
-                        app.probe.fail(now, "не удалось завести воспроизведение");
+                        app.probe.fail(now, lang.t("не удалось завести воспроизведение"));
                         restoreMeter(hwnd);
                     }
                 } else {
@@ -2698,7 +2699,7 @@ fn serveCall(call: *control.Call) void {
 /// заводить второй.
 fn areaText(buf: []u8, area: Rect) []const u8 {
     const tail = buf[buf.len / 2 ..];
-    return std.fmt.bufPrint(tail, "область {d}x{d}", .{ area.width, area.height }) catch "область";
+    return lang.print(tail, "область {d}x{d}", .{ area.width, area.height }) catch lang.t("область");
 }
 
 /// Осциллограф микрофона: настоящая форма сигнала, а не полоска уровня.
@@ -2724,7 +2725,7 @@ fn drawWave(hwnd: c.HWND, dc: c.HDC) void {
 
     if (!app.sound_on) {
         _ = c.SetTextColor(dc, 0x00808080);
-        drawTextIn(dc, box, "звук выключен");
+        drawTextIn(dc, box, lang.t("звук выключен"));
         return;
     }
 
@@ -2768,14 +2769,14 @@ fn drawWave(hwnd: c.HWND, dc: c.HDC) void {
     const level = app.microphone.ring.level();
     var text: [128]u8 = undefined;
     const note = if (level.isClipping())
-        "  ПЕРЕГРУЗ"
+        lang.t("  ПЕРЕГРУЗ")
     else if (level.isSilent())
-        "  тишина"
+        lang.t("  тишина")
     else
         "";
     // Число — настоящее: ползунок растягивает картинку, а не вход. Если бы
     // усиление попадало сюда, прибор врал бы: волна большая, запись тихая.
-    const line = std.fmt.bufPrint(&text, "{d:.0} дБ{s}", .{ level.dbfs(), note }) catch "";
+    const line = lang.print(&text, "{d:.0} дБ{s}", .{ level.dbfs(), note }) catch "";
     _ = c.SetTextColor(dc, if (level.isClipping()) @as(c.COLORREF, 0x004040F0) else @as(c.COLORREF, 0x0060D060));
     const label_rc = c.RECT{ .left = box.left + 6, .top = box.top + 4, .right = box.right - 6, .bottom = box.top + 22 };
     drawTextInRect(dc, label_rc, line);
@@ -2843,7 +2844,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             app.status = c.CreateWindowExW(
                 0,
                 wide("STATIC"),
-                wide("готов"),
+                lang.tw("готов"),
                 c.WS_CHILD | c.WS_VISIBLE,
                 14,
                 14,
@@ -2921,7 +2922,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
 
             _ = label(hwnd, "Качество", 206, 152, 90, 20);
             app.cb_preset = combo(hwnd, id_preset, 296, 148, 130, 200);
-            for ([_][]const u8{ "текст", "видео", "максимум" }) |item| addItem(app.cb_preset, item);
+            inline for ([_][]const u8{ "текст", "видео", "максимум" }) |item| addItem(app.cb_preset, lang.t(item));
             _ = c.SendMessageW(app.cb_preset, c.CB_SETCURSEL, 0, 0);
 
             app.btn_open = button(hwnd, "Открыть запись", id_open, 376, 190, 134, 30, 0);
@@ -3099,9 +3100,9 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                     if (app.rec.isBusy()) {
                         app.rec.noteTemplate(index);
                         var note: [96]u8 = undefined;
-                        setText(app.status, std.fmt.bufPrint(&note, "аннотация «{s}» — в слой записи", .{annotations.templates[index].text}) catch "аннотация в слой");
+                        setText(app.status, lang.print(&note, "аннотация «{s}» — в слой записи", .{annotations.templates[index].text}) catch lang.t("аннотация в слой"));
                     } else {
-                        setText(app.status, "шаблоны аннотаций (Ctrl+Alt+1..3) кладутся в слой только во время записи");
+                        setText(app.status, lang.t("шаблоны аннотаций (Ctrl+Alt+1..3) кладутся в слой только во время записи"));
                     }
                 },
                 else => {},
@@ -3305,7 +3306,7 @@ fn selectArea() ?Rect {
     const overlay = c.CreateWindowExW(
         c.WS_EX_TOPMOST | c.WS_EX_LAYERED | c.WS_EX_TOOLWINDOW,
         wide("ZigRecSelect"),
-        wide("Обведите область, Esc — отмена"),
+        lang.tw("Обведите область, Esc — отмена"),
         c.WS_POPUP,
         d.x,
         d.y,

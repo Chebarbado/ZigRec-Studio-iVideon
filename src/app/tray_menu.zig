@@ -9,6 +9,7 @@
 //! тестами. Ошибка здесь не роняет программу: она даёт человеку строку,
 //! которая ничего не делает, или прячет ту, которая нужна.
 const std = @import("std");
+const lang = @import("../lang.zig");
 
 /// Что можно выбрать в меню значка.
 pub const Item = enum {
@@ -31,13 +32,13 @@ pub const Item = enum {
 
     pub fn label(self: Item, paused: bool) []const u8 {
         return switch (self) {
-            .show => "Открыть",
-            .record_area => "Снять область",
-            .stop => "Остановить запись",
-            .pause => if (paused) "Продолжить" else "Пауза",
-            .open_last => "Открыть последнюю запись",
-            .settings => "Настройки…",
-            .exit => "Выйти",
+            .show => lang.t("Открыть"),
+            .record_area => lang.t("Снять область"),
+            .stop => lang.t("Остановить запись"),
+            .pause => if (paused) lang.t("Продолжить") else lang.t("Пауза"),
+            .open_last => lang.t("Открыть последнюю запись"),
+            .settings => lang.t("Настройки…"),
+            .exit => lang.t("Выйти"),
             .separator => "",
         };
     }
@@ -178,4 +179,12 @@ test "у каждой строки, кроме черты, есть подпис
         if (i == .separator) continue;
         try testing.expect(i.label(false).len > 0);
     }
+}
+
+test "на английском пауза тоже меняет подпись" {
+    lang.set(.en);
+    defer lang.set(.ru);
+    try testing.expectEqualStrings("Pause", Item.pause.label(false));
+    try testing.expectEqualStrings("Resume", Item.pause.label(true));
+    try testing.expectEqualStrings("Exit", Item.exit.label(false));
 }

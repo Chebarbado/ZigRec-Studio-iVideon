@@ -14,6 +14,7 @@
 //! в квадратных скобках, как это принято везде.
 const std = @import("std");
 const net = std.Io.net;
+const lang = @import("../lang.zig");
 
 /// Что слушать, если ничего не выбрано.
 pub const default_text = "127.0.0.1";
@@ -37,9 +38,9 @@ pub const Scope = enum {
 
     pub fn label(self: Scope) []const u8 {
         return switch (self) {
-            .loopback => "только эта машина",
-            .any => "видно из сети",
-            .specific => "один адрес этой машины",
+            .loopback => lang.t("только эта машина"),
+            .any => lang.t("видно из сети"),
+            .specific => lang.t("один адрес этой машины"),
         };
     }
 };
@@ -104,14 +105,14 @@ pub fn write(buf: []u8, text: []const u8, port: u16) []const u8 {
 /// Слова про адрес живут здесь, рядом с разбором, а не в окне: окно
 /// и стенд должны говорить одно и то же.
 pub fn rejected(buf: []u8, text: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "адрес «{s}» не понят — остался прежний", .{text}) catch "адрес не понят";
+    return lang.print(buf, "адрес «{s}» не понят — остался прежний", .{text}) catch lang.t("адрес не понят");
 }
 
 /// Что сказать, когда адрес принят. Про открытый наружу порт — прямо
 /// и сразу; про петлю говорить нечего, и возвращается пусто.
 pub fn warning(buf: []u8, text: []const u8) []const u8 {
     if (!opensToNetwork(text)) return "";
-    return std.fmt.bufPrint(buf, "внимание: {s} — порт будет виден из сети", .{text}) catch "порт будет виден из сети";
+    return lang.print(buf, "внимание: {s} — порт будет виден из сети", .{text}) catch lang.t("порт будет виден из сети");
 }
 
 // ---------------------------------------------------------------- тесты

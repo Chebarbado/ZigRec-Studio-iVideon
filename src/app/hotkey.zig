@@ -11,6 +11,7 @@
 //! разбор чистым; совпадение с настоящими значениями проверяется там,
 //! где эти числа встречаются с Windows.
 const std = @import("std");
+const lang = @import("../lang.zig");
 
 /// Значения `MOD_*` из `RegisterHotKey`.
 pub const mod_alt: u32 = 0x0001;
@@ -188,9 +189,9 @@ pub fn keyName(code: u8) []const u8 {
 /// Объяснение ошибки словами — для окна настроек.
 pub fn explain(err: Error) []const u8 {
     return switch (err) {
-        Error.NoKey => "не хватает самой клавиши: например, Win+Shift+Z",
-        Error.UnknownKey => "такой клавиши нет: годятся буквы, цифры, F1…F24 и Space, Esc, Home",
-        Error.NoModifier => "нужен хотя бы Win, Ctrl, Alt или Shift: иначе клавиша пропадёт во всех программах",
+        Error.NoKey => lang.t("не хватает самой клавиши: например, Win+Shift+Z"),
+        Error.UnknownKey => lang.t("такой клавиши нет: годятся буквы, цифры, F1…F24 и Space, Esc, Home"),
+        Error.NoModifier => lang.t("нужен хотя бы Win, Ctrl, Alt или Shift: иначе клавиша пропадёт во всех программах"),
     };
 }
 

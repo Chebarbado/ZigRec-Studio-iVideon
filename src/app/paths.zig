@@ -15,6 +15,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const c = win32.c;
+const lang = @import("../lang.zig");
 
 pub const Mode = enum {
     portable,
@@ -22,8 +23,8 @@ pub const Mode = enum {
 
     pub fn label(self: Mode) []const u8 {
         return switch (self) {
-            .portable => "Portable — рядом с программой",
-            .classic => "Classic — в профиле пользователя",
+            .portable => lang.t("Portable — рядом с программой"),
+            .classic => lang.t("Classic — в профиле пользователя"),
         };
     }
 };

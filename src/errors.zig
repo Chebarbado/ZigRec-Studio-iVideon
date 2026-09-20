@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win32 = @import("win32.zig");
+const lang = @import("lang.zig");
 const c = win32.c;
 
 /// Чем закончилась запись. Отсюда берётся код возврата командной строки.
@@ -38,78 +39,79 @@ pub const Outcome = enum {
     }
 };
 
-/// Объяснение ошибки по-русски. Возвращает предложение, а не имя ошибки.
+/// Объяснение ошибки словами, на языке окон (#100). Возвращает предложение,
+/// а не имя ошибки.
 pub fn explain(err: anyerror) []const u8 {
     return switch (err) {
-        error.AccessDenied =>
-        \\захват экрана запрещён системой: открыт экран блокировки, окно
-        \\с правами администратора или выход уже занят другой программой.
-        ,
-        error.NoDevice =>
-        \\не создаётся устройство Direct3D: нет видеоадаптера или драйвера.
-        ,
-        error.NoOutput =>
-        \\нет монитора с таким номером. Посмотреть список: zigrec monitors
-        ,
-        error.Lost =>
-        \\захват экрана потерян и не восстановился: сменилось разрешение
-        \\или другая программа заняла экран монопольно.
-        ,
-        error.Unsupported =>
-        \\запись работает только в Windows.
-        ,
-        error.WindowNotFound =>
-        \\окно с таким заголовком не найдено. Посмотреть список: zigrec windows
-        ,
-        error.WindowMinimized =>
-        \\окно свёрнуто, снимать нечего. Разверните его и повторите.
-        ,
-        error.StartupFailed =>
-        \\не поднимается Media Foundation: в системе нет кодировщика H.264.
-        ,
-        error.CreateFailed =>
-        \\не получается создать файл: путь недоступен или файл занят другой
-        \\программой. Закройте плеер, который его открыл, или выберите другое имя.
-        ,
-        error.FileBusy =>
-        \\файл занят другой программой: он открыт в плеере или в проводнике.
-        \\Закройте его или выберите другое имя.
-        ,
-        error.FormatRejected =>
-        \\кодировщик не принял размер кадра: стороны должны быть чётными
-        \\и не больше того, что умеет видеокарта.
-        ,
-        error.WriteFailed =>
-        \\сбой при записи кадра: закончилось место на диске или отвалился кодировщик.
-        ,
-        error.FinalizeFailed =>
-        \\файл не закрылся как надо и остался недоигранным.
-        ,
-        error.OutOfMemory =>
-        \\не хватило памяти под кадр.
-        ,
-        error.NoMicrophone =>
-        \\микрофон не найден: он отключён, не подключён или не выбран
-        \\устройством записи по умолчанию. Проверьте «Параметры звука — Ввод».
-        ,
-        error.MicAccessDenied =>
-        \\Windows не пускает к микрофону: доступ запрещён в настройках
-        \\приватности. «Параметры — Конфиденциальность — Микрофон».
-        ,
-        error.MicBadFormat =>
-        \\микрофон отдаёт формат, который мы не понимаем.
-        ,
-        error.NoSpeakers =>
-        \\устройства вывода нет: системный звук брать неоткуда. Проверьте
-        \\«Параметры звука — Вывод».
-        ,
-        error.AlreadyRecording =>
-        \\запись уже идёт.
-        ,
-        error.PathTooLong =>
-        \\слишком длинный путь к файлу.
-        ,
-        else => "неожиданный сбой",
+        error.AccessDenied => lang.t(
+            \\захват экрана запрещён системой: открыт экран блокировки, окно
+            \\с правами администратора или выход уже занят другой программой.
+        ),
+        error.NoDevice => lang.t(
+            \\не создаётся устройство Direct3D: нет видеоадаптера или драйвера.
+        ),
+        error.NoOutput => lang.t(
+            \\нет монитора с таким номером. Посмотреть список: zigrec monitors
+        ),
+        error.Lost => lang.t(
+            \\захват экрана потерян и не восстановился: сменилось разрешение
+            \\или другая программа заняла экран монопольно.
+        ),
+        error.Unsupported => lang.t(
+            \\запись работает только в Windows.
+        ),
+        error.WindowNotFound => lang.t(
+            \\окно с таким заголовком не найдено. Посмотреть список: zigrec windows
+        ),
+        error.WindowMinimized => lang.t(
+            \\окно свёрнуто, снимать нечего. Разверните его и повторите.
+        ),
+        error.StartupFailed => lang.t(
+            \\не поднимается Media Foundation: в системе нет кодировщика H.264.
+        ),
+        error.CreateFailed => lang.t(
+            \\не получается создать файл: путь недоступен или файл занят другой
+            \\программой. Закройте плеер, который его открыл, или выберите другое имя.
+        ),
+        error.FileBusy => lang.t(
+            \\файл занят другой программой: он открыт в плеере или в проводнике.
+            \\Закройте его или выберите другое имя.
+        ),
+        error.FormatRejected => lang.t(
+            \\кодировщик не принял размер кадра: стороны должны быть чётными
+            \\и не больше того, что умеет видеокарта.
+        ),
+        error.WriteFailed => lang.t(
+            \\сбой при записи кадра: закончилось место на диске или отвалился кодировщик.
+        ),
+        error.FinalizeFailed => lang.t(
+            \\файл не закрылся как надо и остался недоигранным.
+        ),
+        error.OutOfMemory => lang.t(
+            \\не хватило памяти под кадр.
+        ),
+        error.NoMicrophone => lang.t(
+            \\микрофон не найден: он отключён, не подключён или не выбран
+            \\устройством записи по умолчанию. Проверьте «Параметры звука — Ввод».
+        ),
+        error.MicAccessDenied => lang.t(
+            \\Windows не пускает к микрофону: доступ запрещён в настройках
+            \\приватности. «Параметры — Конфиденциальность — Микрофон».
+        ),
+        error.MicBadFormat => lang.t(
+            \\микрофон отдаёт формат, который мы не понимаем.
+        ),
+        error.NoSpeakers => lang.t(
+            \\устройства вывода нет: системный звук брать неоткуда. Проверьте
+            \\«Параметры звука — Вывод».
+        ),
+        error.AlreadyRecording => lang.t(
+            \\запись уже идёт.
+        ),
+        error.PathTooLong => lang.t(
+            \\слишком длинный путь к файлу.
+        ),
+        else => lang.t("неожиданный сбой"),
     };
 }
 
@@ -117,21 +119,21 @@ pub fn explain(err: anyerror) []const u8 {
 /// строка состояния, панель осциллографа, подсказка в трее.
 pub fn short(err: anyerror) []const u8 {
     return switch (err) {
-        error.NoMicrophone => "микрофон не найден или отключён",
-        error.MicAccessDenied => "доступ к микрофону запрещён в настройках",
-        error.MicBadFormat => "непонятный формат микрофона",
-        error.NoSpeakers => "нет устройства вывода: системный звук брать неоткуда",
-        error.AccessDenied => "захват экрана запрещён системой",
-        error.NoDevice => "нет устройства Direct3D",
-        error.NoOutput => "нет такого монитора",
-        error.Lost => "захват потерян",
-        error.FileBusy => "файл занят другой программой",
-        error.CreateFailed => "файл не создаётся",
-        error.StartupFailed => "нет кодировщика H.264",
-        error.WriteFailed => "сбой записи кадра",
-        error.FinalizeFailed => "файл не закрылся как надо",
-        error.Unsupported => "только для Windows",
-        else => "сбой",
+        error.NoMicrophone => lang.t("микрофон не найден или отключён"),
+        error.MicAccessDenied => lang.t("доступ к микрофону запрещён в настройках"),
+        error.MicBadFormat => lang.t("непонятный формат микрофона"),
+        error.NoSpeakers => lang.t("нет устройства вывода: системный звук брать неоткуда"),
+        error.AccessDenied => lang.t("захват экрана запрещён системой"),
+        error.NoDevice => lang.t("нет устройства Direct3D"),
+        error.NoOutput => lang.t("нет такого монитора"),
+        error.Lost => lang.t("захват потерян"),
+        error.FileBusy => lang.t("файл занят другой программой"),
+        error.CreateFailed => lang.t("файл не создаётся"),
+        error.StartupFailed => lang.t("нет кодировщика H.264"),
+        error.WriteFailed => lang.t("сбой записи кадра"),
+        error.FinalizeFailed => lang.t("файл не закрылся как надо"),
+        error.Unsupported => lang.t("только для Windows"),
+        else => lang.t("сбой"),
     };
 }
 
@@ -242,4 +244,27 @@ test "короткое объяснение помещается в строку
 test "короткое и полное объяснение — про одно и то же" {
     // Оба должны существовать и различаться длиной: длинное объясняет, короткое называет.
     try std.testing.expect(short(error.NoMicrophone).len < explain(error.NoMicrophone).len);
+}
+
+test "на английском короткое объяснение тоже помещается в строку" {
+    // Место под короткое объяснение одно на оба языка (#100).
+    lang.set(.en);
+    defer lang.set(.ru);
+    for ([_]anyerror{
+        error.NoMicrophone,
+        error.MicAccessDenied,
+        error.NoSpeakers,
+        error.AccessDenied,
+        error.FileBusy,
+        error.FinalizeFailed,
+        error.SomethingOdd,
+    }) |e| {
+        const text = short(e);
+        try std.testing.expect(text.len > 0);
+        try std.testing.expect(try std.unicode.utf8CountCodepoints(text) <= 44);
+        try std.testing.expect(std.mem.indexOfScalar(u8, text, '\n') == null);
+        // И объяснение остаётся предложением, а не именем ошибки.
+        try std.testing.expect(std.mem.indexOf(u8, explain(e), @errorName(e)) == null);
+    }
+    try std.testing.expect(!std.mem.eql(u8, short(error.FileBusy), "файл занят другой программой"));
 }

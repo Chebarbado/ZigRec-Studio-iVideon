@@ -17,6 +17,7 @@ const builtin = @import("builtin");
 const win32 = @import("../win32.zig");
 const c = win32.c;
 const remote = @import("remote.zig");
+const lang = @import("../lang.zig");
 
 /// Что нажали на пульте. Уходит окну записи сообщением `wm_remote`.
 pub const Press = enum(usize) {
@@ -84,7 +85,7 @@ pub fn show(to: c.HWND, screen: remote.Rect, area: remote.Rect, whole_screen: bo
     hwnd = c.CreateWindowExW(
         c.WS_EX_TOPMOST | c.WS_EX_TOOLWINDOW | c.WS_EX_NOACTIVATE,
         std.unicode.utf8ToUtf16LeStringLiteral(class_name),
-        std.unicode.utf8ToUtf16LeStringLiteral("Пульт"),
+        lang.tw("Пульт"),
         c.WS_POPUP | c.WS_BORDER,
         spot.at.x,
         spot.at.y,
@@ -214,18 +215,18 @@ fn paint(dc: c.HDC, w: i32, h: i32) void {
 
     if (shown.in_frame) {
         const note = remote.noteAt();
-        text(dc, note.x, note.y, remote.in_frame_note, 0x0060A0F0);
+        text(dc, note.x, note.y, remote.inFrameNote(), 0x0060A0F0);
     } else if (shown.level >= 0) {
         // Полоска уровня: видно, что звук идёт, не вслушиваясь.
         const cap = remote.levelCaption();
-        text(dc, cap.x, cap.y, "звук", 0x00808080);
+        text(dc, cap.x, cap.y, lang.t("звук"), 0x00808080);
         const bar = remote.levelBar();
         const lit: i32 = @intFromFloat(@min(shown.level, 1.0) * @as(f32, @floatFromInt(bar.w)));
         fill(dc, winRect(bar), 0x00202020);
         if (lit > 0) fill(dc, winRect(.{ .x = bar.x, .y = bar.y, .w = lit, .h = bar.h }), 0x0040C040);
     }
 
-    button(dc, remote.stopButton(), .stop, remote.stop_label);
+    button(dc, remote.stopButton(), .stop, remote.stopLabel());
     button(dc, remote.pauseButton(), remote.pauseIcon(shown.state), remote.pauseLabel(shown.state));
 }
 
@@ -266,12 +267,12 @@ pub fn measureLabels(out: *[label_count]Fit) []const Fit {
     defer _ = c.SelectObject(dc, old_font);
 
     const items = [label_count]struct { label: []const u8, room: i32 }{
-        .{ .label = remote.stop_label, .room = remote.labelRoom(remote.stopButton()) },
+        .{ .label = remote.stopLabel(), .room = remote.labelRoom(remote.stopButton()) },
         .{ .label = remote.pauseLabel(.recording), .room = remote.labelRoom(remote.pauseButton()) },
         // Подпись меняется на ходу: мерить надо обе, а не ту, что видна сейчас.
         .{ .label = remote.pauseLabel(.paused), .room = remote.labelRoom(remote.pauseButton()) },
         // Строка о кадре рисуется без обрезки и молча уедет за край пульта.
-        .{ .label = remote.in_frame_note, .room = remote.noteAt().w },
+        .{ .label = remote.inFrameNote(), .room = remote.noteAt().w },
     };
 
     for (items, 0..) |it, i| {

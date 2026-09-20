@@ -12,6 +12,7 @@
 const std = @import("std");
 const control = @import("control.zig");
 const listen = @import("listen.zig");
+const lang = @import("../lang.zig");
 
 /// Цвет точки. Записан как BGR: так его ждёт Windows.
 pub const Color = struct {
@@ -69,9 +70,9 @@ pub fn look(buf: []u8, f: Facts) Look {
             // Число просьб показываем, только когда они были: ноль
             // не сообщает ничего, а место занимает.
             const text = if (f.served > 0)
-                std.fmt.bufPrint(buf, "MCP {s} · {d}", .{ where, f.served }) catch "MCP слушает"
+                std.fmt.bufPrint(buf, "MCP {s} · {d}", .{ where, f.served }) catch lang.t("MCP слушает")
             else
-                std.fmt.bufPrint(buf, "MCP {s}", .{where}) catch "MCP слушает";
+                std.fmt.bufPrint(buf, "MCP {s}", .{where}) catch lang.t("MCP слушает");
             break :blk .{
                 .dot = if (out_to_net) Color.exposed else Color.listening,
                 .text = text,
@@ -82,16 +83,16 @@ pub fn look(buf: []u8, f: Facts) Look {
         .failed => .{
             .dot = Color.failed,
             .text = if (f.why.len > 0)
-                std.fmt.bufPrint(buf, "MCP не завёлся: {s}", .{f.why}) catch "MCP не завёлся"
+                lang.print(buf, "MCP не завёлся: {s}", .{f.why}) catch lang.t("MCP не завёлся")
             else
-                "MCP не завёлся",
+                lang.t("MCP не завёлся"),
             .button = "▶",
         },
         .off => .{
             .dot = Color.off,
             // Пока поднимается — говорим об этом: «выключен» в этот момент
             // было бы неправдой.
-            .text = if (f.running) "MCP поднимается" else "MCP off",
+            .text = if (f.running) lang.t("MCP поднимается") else "MCP off",
             .button = if (f.running) "■" else "▶",
         },
     };

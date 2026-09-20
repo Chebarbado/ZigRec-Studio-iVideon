@@ -13,6 +13,7 @@
 //!
 //! Здесь только счёт: где встать и что написать. Само окно — в `ui.zig`.
 const std = @import("std");
+const lang = @import("../lang.zig");
 
 /// Размер пульта. Маленький нарочно: он стоит поверх работы, и всё лишнее
 /// на нём — это то, что закрывает собой чужое окно.
@@ -151,7 +152,7 @@ pub fn timeText(buf: []u8, elapsed_ns: u64) []const u8 {
 /// Потери называем всегда, даже когда их нет: «потерь 0» успокаивает,
 /// а молчание оставляет вопрос.
 pub fn healthText(buf: []u8, frames: u64, dropped: u64) []const u8 {
-    return std.fmt.bufPrint(buf, "кадров {d}, потерь {d}", .{ frames, dropped }) catch "";
+    return lang.print(buf, "кадров {d}, потерь {d}", .{ frames, dropped }) catch "";
 }
 
 /// Подписи кнопки паузы — обе короткие нарочно. Кнопка растягивается под
@@ -160,8 +161,8 @@ pub fn healthText(buf: []u8, frames: u64, dropped: u64) []const u8 {
 /// то же самое шестью буквами.
 pub fn pauseLabel(state: State) []const u8 {
     return switch (state) {
-        .recording => "Пауза",
-        .paused => "Дальше",
+        .recording => lang.t("Пауза"),
+        .paused => lang.t("Дальше"),
     };
 }
 
@@ -185,6 +186,12 @@ pub fn pauseIcon(state: State) Icon {
 /// Подпись кнопки остановки. Названа здесь, а не в окне: по ней считается
 /// ширина кнопки, и разойтись этим двум местам нельзя.
 pub const stop_label = "Стоп";
+
+/// Та же подпись на языке окон (#100). Ширина кнопки считается по ней:
+/// на другом языке в подписи другое число букв.
+pub fn stopLabel() []const u8 {
+    return lang.t(stop_label);
+}
 
 /// Значок на кнопке: сторона квадрата и отступ до подписи.
 pub const icon_w: i32 = 12;
@@ -218,7 +225,7 @@ const button_h: i32 = 32;
 
 /// Кнопка «Стоп».
 pub fn stopButton() Rect {
-    const w = minWidthFor(stop_label);
+    const w = minWidthFor(stopLabel());
     return .{ .x = pauseButton().x - 8 - w, .y = buttons_y, .w = w, .h = button_h };
 }
 
@@ -270,6 +277,11 @@ pub fn noteAt() Rect {
 /// Одной строкой, а не двумя: двум строкам здесь уже не хватает высоты,
 /// и нижняя залезла бы на кнопки.
 pub const in_frame_note = "пульт в кадре — Esc убрать";
+
+/// Та же строка на языке окон (#100).
+pub fn inFrameNote() []const u8 {
+    return lang.t(in_frame_note);
+}
 
 // ---------------------------------------------------------------- тесты
 
@@ -399,4 +411,21 @@ test "значок и подпись на кнопке не налезают д�
 test "кнопки помещаются в пульт по высоте и ширине" {
     try testing.expect(stopButton().x >= 12);
     try testing.expect(pauseButton().bottom() <= height - 8);
+}
+
+test "на английском кнопки пульта тоже помещаются и не наезжают" {
+    // Ширина кнопок считается от подписей, а подписи зависят от языка (#100):
+    // проверка только на русском пропустила бы длинную английскую подпись.
+    lang.set(.en);
+    defer lang.set(.ru);
+    try testing.expectEqualStrings("Stop", stopLabel());
+    try testing.expect(!std.mem.eql(u8, pauseLabel(.recording), pauseLabel(.paused)));
+    const stop = stopButton();
+    const pause = pauseButton();
+    try testing.expect(!stop.overlaps(pause));
+    try testing.expect(stop.x >= 12);
+    try testing.expect(pause.right() <= width);
+    try testing.expect(pause.w >= minWidthFor(pauseLabel(.paused)));
+    try testing.expect(pause.w >= minWidthFor(pauseLabel(.recording)));
+    try testing.expect(!levelBar().overlaps(stop));
 }

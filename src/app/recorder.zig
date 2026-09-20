@@ -22,6 +22,7 @@ const source = @import("../capture/source.zig");
 const mp4 = @import("../file/mp4.zig");
 const audio = @import("../sound/audio.zig");
 const errors = @import("../errors.zig");
+const lang = @import("../lang.zig");
 
 pub const Rect = capture_types.Rect;
 
@@ -33,10 +34,10 @@ pub const State = enum {
 
     pub fn label(self: State) []const u8 {
         return switch (self) {
-            .idle => "готов",
-            .recording => "идёт запись",
-            .paused => "пауза",
-            .stopping => "останавливаюсь",
+            .idle => lang.t("готов"),
+            .recording => lang.t("идёт запись"),
+            .paused => lang.t("пауза"),
+            .stopping => lang.t("останавливаюсь"),
         };
     }
 };
@@ -338,7 +339,7 @@ pub const Recorder = struct {
     fn run(self: *Recorder, src: source.Source, settings: Settings) void {
         self.loop(src, settings) catch |err| {
             var buf: [128]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "запись прервана: {s}", .{@errorName(err)}) catch "запись прервана";
+            const text = lang.print(&buf, "запись прервана: {s}", .{@errorName(err)}) catch lang.t("запись прервана");
             self.setMessage(text);
         };
         self.setState(.idle);
@@ -554,19 +555,19 @@ pub const Recorder = struct {
 
         var sound_buf: [128]u8 = undefined;
         const sound_text: []const u8 = if (sound.failure) |err|
-            std.fmt.bufPrint(&sound_buf, ", БЕЗ ЗВУКА: {s}", .{errors.short(err)}) catch ", без звука"
+            lang.print(&sound_buf, ", БЕЗ ЗВУКА: {s}", .{errors.short(err)}) catch lang.t(", без звука")
         else if (sound.active())
-            std.fmt.bufPrint(&sound_buf, ", звук {d:.1} с", .{sound.seconds()}) catch ", со звуком"
+            lang.print(&sound_buf, ", звук {d:.1} с", .{sound.seconds()}) catch lang.t(", со звуком")
         else
             "";
 
         var buf: [256]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "готово: {d} кадров, {d:.1} с{s}, файл {s}", .{
+        const text = lang.print(&buf, "готово: {d} кадров, {d:.1} с{s}, файл {s}", .{
             summary.frames,
             @as(f64, @floatFromInt(summary.duration_ns)) / @as(f64, std.time.ns_per_s),
             sound_text,
             std.fs.path.basename(path),
-        }) catch "готово";
+        }) catch lang.t("готово");
         self.setMessage(text);
     }
 };
@@ -636,4 +637,14 @@ test "имя файла по шаблону" {
 test "состояния подписаны по-русски" {
     try std.testing.expectEqualStrings("идёт запись", State.recording.label());
     try std.testing.expectEqualStrings("пауза", State.paused.label());
+}
+
+test "подписи состояния переводятся вместе с языком окон" {
+    // Русская подпись — ключ и значение по умолчанию; английская берётся
+    // из таблицы (#100).
+    try std.testing.expectEqualStrings("готов", State.idle.label());
+    lang.set(.en);
+    defer lang.set(.ru);
+    try std.testing.expectEqualStrings("ready", State.idle.label());
+    try std.testing.expectEqualStrings("recording", State.recording.label());
 }
