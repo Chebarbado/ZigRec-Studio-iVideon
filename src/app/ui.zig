@@ -781,11 +781,74 @@ pub const Layout = struct {
     /// следом. На окне, которое обновляется по таймеру, это видно как
     /// мигание — и заметить это можно только глазами и только в движении.
     clips_children: bool = false,
+    /// Сколько подписей не влезло в свой орган управления (#100).
+    ///
+    /// Орган управления может стоять на месте, а подпись в нём — быть
+    /// обрезанной: положение этого не покажет. С одним языком подписи
+    /// подгонялись глазами; со вторым языком глаз на всё не хватит — первый
+    /// же перевод «Snap together» оказался на пятнадцать точек шире кнопки.
+    cramped: usize = 0,
+    /// Худшая из невлезших: сколько ей надо, сколько есть, и сам текст.
+    cramped_need: i32 = 0,
+    cramped_have: i32 = 0,
+    cramped_text: [96]u8 = @splat(0),
+    cramped_text_len: usize = 0,
 
     pub fn ok(self: Layout) bool {
-        return self.outside == 0 and self.clips_children;
+        return self.outside == 0 and self.clips_children and self.cramped == 0;
+    }
+
+    pub fn crampedText(self: *const Layout) []const u8 {
+        return self.cramped_text[0..self.cramped_text_len];
     }
 };
+
+/// Поля вокруг подписи, в точках. У простой кнопки — рамка с двух сторон;
+/// у галочки и переключателя слева квадратик; кнопку, которую рисуем сами,
+/// считаем с квадратным значком во всю её высоту.
+const caption_pad_button: i32 = 8;
+const caption_pad_check: i32 = 20;
+
+/// Сколько точек нужно подписи органа управления и сколько у него есть.
+/// Пусто — мерить нечего: не кнопка и не надпись, подписи нет или она в
+/// несколько строк (такие переносятся сами).
+fn captionFit(child: c.HWND, style: isize, width: i32, height: i32, text_out: *[96]u8, text_len: *usize) ?DropFit {
+    var class_buf: [32]u16 = undefined;
+    const class_n: usize = @intCast(@max(c.GetClassNameW(child, @ptrCast(&class_buf), class_buf.len), 0));
+    const is_button = std.mem.eql(u16, class_buf[0..class_n], wide("Button"));
+    const is_static = std.mem.eql(u16, class_buf[0..class_n], wide("Static"));
+    if (!is_button and !is_static) return null;
+
+    var text_buf: [128]u16 = undefined;
+    const n: usize = @intCast(@max(c.GetWindowTextW(child, @ptrCast(&text_buf), text_buf.len), 0));
+    if (n == 0) return null;
+    if (std.mem.indexOfScalar(u16, text_buf[0..n], '\n') != null) return null;
+    // Надпись выше одной строки переносит слова сама.
+    if (is_static and height > 26) return null;
+
+    const dc = c.GetDC(child);
+    if (dc == null) return null;
+    defer _ = c.ReleaseDC(child, dc);
+    const font_raw = c.SendMessageW(child, c.WM_GETFONT, 0, 0);
+    const font: c.HGDIOBJ = if (font_raw != 0) @ptrFromInt(@as(usize, @intCast(font_raw))) else c.GetStockObject(c.DEFAULT_GUI_FONT);
+    const old_font = c.SelectObject(dc, font);
+    defer _ = c.SelectObject(dc, old_font);
+    var size: c.SIZE = std.mem.zeroes(c.SIZE);
+    _ = c.GetTextExtentPoint32W(dc, @ptrCast(&text_buf), @intCast(n), &size);
+
+    const kind = style & 0xF;
+    const pad: i32 = if (is_static)
+        0
+    else if (kind == c.BS_OWNERDRAW)
+        height + caption_pad_button
+    else if (kind == c.BS_AUTOCHECKBOX or kind == c.BS_CHECKBOX or kind == c.BS_AUTORADIOBUTTON or kind == c.BS_RADIOBUTTON)
+        caption_pad_check
+    else
+        caption_pad_button;
+
+    text_len.* = std.unicode.utf16LeToUtf8(text_out, text_buf[0..@min(n, 30)]) catch 0;
+    return .{ .need = size.cx + pad, .have = width };
+}
 
 /// Пройти по всем видимым органам управления и сверить с рабочей частью окна.
 pub fn measureLayout(hwnd: c.HWND) Layout {
@@ -813,6 +876,19 @@ pub fn measureLayout(hwnd: c.HWND) Layout {
         _ = c.ScreenToClient(hwnd, &bottom_right);
 
         out.controls += 1;
+        var cap_text: [96]u8 = undefined;
+        var cap_len: usize = 0;
+        if (captionFit(child, style, r.right - r.left, r.bottom - r.top, &cap_text, &cap_len)) |fit| {
+            if (fit.need > fit.have) {
+                out.cramped += 1;
+                if (fit.need - fit.have > out.cramped_need - out.cramped_have) {
+                    out.cramped_need = fit.need;
+                    out.cramped_have = fit.have;
+                    out.cramped_text = cap_text;
+                    out.cramped_text_len = cap_len;
+                }
+            }
+        }
         const over_b = bottom_right.y - client.bottom;
         const over_r = bottom_right.x - client.right;
         if (over_b > 0 or over_r > 0 or top_left.x < 0 or top_left.y < 0) {

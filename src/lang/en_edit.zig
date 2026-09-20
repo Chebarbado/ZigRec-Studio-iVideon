@@ -309,7 +309,7 @@ pub const pairs = [_]Pair{
     // src/sound/devices.zig
     .{ "микрофон без имени", "unnamed microphone" },
     .{ "по умолчанию (как в Windows)", "default (as in Windows)" },
-    .{ "запомненный микрофон не найден — берётся тот, что по умолчанию", "the remembered microphone was not found — using the default one" },
+    .{ "запомненный микрофон не найден — берётся тот, что по умолчанию", "remembered microphone not found — using the default one" },
     // src/sound/play.zig
     .{ "нет устройства вывода", "no output device" },
     .{ "устройство вывода отдаёт формат, который мы не понимаем", "the output device uses a format we do not understand" },
@@ -331,4 +331,10 @@ pub const pairs = [_]Pair{
     .{ "тишина", "silence" },
     .{ "{s}{d}.{d} дБ", "{s}{d}.{d} dB" },
     .{ "0.0 дБ", "0.0 dB" },
+    // имена дорожек и меток по умолчанию — на языке окон в момент создания
+    .{ "Видео {d}", "Video {d}" },
+    .{ "Звук {d}", "Audio {d}" },
+    .{ "Дорожка", "Track" },
+    .{ "дорожка", "track" },
+    .{ "метка {d}", "mark {d}" },
 };

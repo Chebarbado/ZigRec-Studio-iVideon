@@ -146,6 +146,33 @@ test "по умолчанию русский, и он — ноль" {
     try std.testing.expectEqualStrings("en", Language.en.code());
 }
 
+test "строка отдаётся на текущем языке" {
+    defer set(.ru);
+    set(.ru);
+    try std.testing.expectEqualStrings("Пауза", t("Пауза"));
+    try std.testing.expectEqualStrings("Пауза", tr("Пауза"));
+    set(.en);
+    try std.testing.expectEqualStrings("Pause", t("Пауза"));
+    try std.testing.expectEqualStrings("Pause", tr("Пауза"));
+    // Строка, которой в таблице нет, через `tr` остаётся как была.
+    try std.testing.expectEqualStrings("такой строки нет", tr("такой строки нет"));
+    try std.testing.expect(!known("такой строки нет"));
+    try std.testing.expect(known("Пауза"));
+    try std.testing.expect(known("F9"));
+}
+
+test "язык из ключа сильнее языка из настроек" {
+    defer {
+        forced.store(false, .release);
+        set(.ru);
+    }
+    adopt(.en);
+    try std.testing.expectEqual(Language.en, get());
+    force(.ru);
+    adopt(.en);
+    try std.testing.expectEqual(Language.ru, get());
+}
+
 test "строка без русских букв перевода не требует" {
     set(.en);
     defer set(.ru);

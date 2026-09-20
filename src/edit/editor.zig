@@ -1880,10 +1880,12 @@ fn addEmptyTrack(kind: timeline.TrackKind) void {
     for (ed.project.trackList()) |t| {
         if (t.kind == kind) same += 1;
     }
-    const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{
-        if (kind == .video) "Видео" else "Звук",
-        same + 1,
-    }) catch "Дорожка";
+    // Имя даётся на языке окон в момент создания и дальше живёт как данные
+    // проекта: его ни с чем не сравнивают, человек волен переименовать (#100).
+    const name = (if (kind == .video)
+        lang.print(&name_buf, "Видео {d}", .{same + 1})
+    else
+        lang.print(&name_buf, "Звук {d}", .{same + 1})) catch lang.t("Дорожка");
 
     _ = ed.project.addTrack(kind, name) catch |err| return complain(err);
 
@@ -3530,9 +3532,9 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
         const kind: timeline.TrackKind = if (track.kind == .video) .video else .audio;
         var name_buf: [48]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "{s} {d}", .{
-            kind.label(),
+            lang.tr(kind.label()),
             ed.project.track_count + 1,
-        }) catch "дорожка";
+        }) catch lang.t("дорожка");
 
         const index = ed.project.addTrack(kind, name) catch |err| return complain(err);
         const len = if (track.duration_ns > 0) track.duration_ns else info.duration_ns;

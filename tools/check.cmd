@@ -156,12 +156,26 @@ if errorlevel 1 (
   echo [check] ПРОВАЛ: в окно поместилось не всё
   exit /b 1
 )
+rem Второй язык (#100): у английских подписей своя длина, и влезать они
+rem обязаны так же, как русские. Непереведённое ловит компилятор, а вот
+rem обрезанное — только замер.
+echo [check] самопроверка окна на английском
+"zig-out\bin\zigrec.exe" ui-smoke --lang en
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: на английском в окно поместилось не всё
+  exit /b 1
+)
 
 rem Пульт съёмки: ширину кнопок мы считаем прикидкой по буквам, а подпись
 rem рисует настоящий шрифт. Разойдутся — подпись обрежется молча, и на
 rem пульте окажется кнопка «⏸ Пауз». Здесь меряет сама Windows.
 echo [check] самопроверка пульта съёмки
 "zig-out\bin\zigrec.exe" remote-smoke
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: на пульте не всё читается
+  exit /b 1
+)
+"zig-out\bin\zigrec.exe" remote-smoke --lang en
 if errorlevel 1 (
   echo [check] ПРОВАЛ: на пульте не всё читается
   exit /b 1

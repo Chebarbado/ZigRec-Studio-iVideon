@@ -1726,13 +1726,23 @@ fn checkWindow(w: anytype, name: []const u8, got: anyerror!zigrec.ui.Layout) !bo
         });
         return true;
     }
+    if (layout.cramped > 0) {
+        try w.print("[ui] ПРОВАЛ: в окне «{s}» подписей не влезло: {d}; худшая «{s}» — надо {d}, есть {d} точек\n", .{
+            name,
+            layout.cramped,
+            layout.crampedText(),
+            layout.cramped_need,
+            layout.cramped_have,
+        });
+        return true;
+    }
     if (!layout.clips_children) {
         // Без этого признака фон окна ложится поверх кнопок, и они
         // перерисовываются следом: на обновлении по таймеру это мигание.
         try w.print("[ui] ПРОВАЛ: окно «{s}» рисует под своими кнопками — они будут мигать\n", .{name});
         return true;
     }
-    try w.print("[ui] {s}: всё поместилось, под кнопками не рисуем\n", .{name});
+    try w.print("[ui] {s}: всё поместилось, подписи влезают, под кнопками не рисуем\n", .{name});
     return false;
 }
 
@@ -3856,6 +3866,9 @@ fn pauseSmoke(allocator: std.mem.Allocator, w: anytype, out_path: []const u8) !u
     // тысячи отсчётов: с допуском не спутать.
     const pause_drift_slack: u64 = 2400;
     const c = zigrec.win32.c;
+    // Самопроверка читает итог рекордера по-русски («готово…»), поэтому язык
+    // здесь всегда русский, что бы ни стояло в ключе `--lang` (#100).
+    zigrec.lang.force(.ru);
 
     try w.print("[pause] пишем {s}: отрезок, пауза {d} мс, отрезок, короткая пауза, отрезок\n", .{ out_path, long_pause_ms });
     var stim = zigrec.stimulus.Stimulus{};
@@ -3999,6 +4012,9 @@ fn stillSmoke(allocator: std.mem.Allocator, w: anytype, out_path: []const u8) !u
     // Захват звука поднимается около четверти секунды.
     const slack_ms: u64 = 400;
     const c = zigrec.win32.c;
+    // Самопроверка читает итог рекордера по-русски («готово…»), поэтому язык
+    // здесь всегда русский, что бы ни стояло в ключе `--lang` (#100).
+    zigrec.lang.force(.ru);
 
     var rec = zigrec.recorder.Recorder.init(allocator);
     rec.start(out_path, .{ .area = .{ .x = 0, .y = 0, .width = 64, .height = 64 } }, .{ .fps = 30, .system_sound = true, .cursor = false }) catch |err| {
