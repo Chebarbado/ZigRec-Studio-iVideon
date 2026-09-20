@@ -1224,6 +1224,15 @@ fn drop(p: *Project) void {
     std.testing.allocator.destroy(p);
 }
 
+test "вид дорожки переведён" {
+    // `label()` остаётся русским: из него складывается имя новой дорожки,
+    // а имя уходит в файл проекта. Окно переводит его через `lang.tr`,
+    // а тот о пропаже молчит — сторож здесь (#100).
+    const lang = @import("../lang.zig");
+    try std.testing.expect(lang.known(TrackKind.video.label()));
+    try std.testing.expect(lang.known(TrackKind.audio.label()));
+}
+
 test "клип помнит, откуда взят, и правка не трогает исходник" {
     const p = try sample();
     defer drop(p);

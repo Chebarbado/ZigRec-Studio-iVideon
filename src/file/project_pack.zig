@@ -22,6 +22,7 @@
 //! разметки уже есть, проверен и читается глазами. Архив добавляет к нему
 //! оболочку, а не заменяет его.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const zip = @import("zip.zig");
 const project_file = @import("project_file.zig");
 const timeline = @import("../edit/timeline.zig");
@@ -54,8 +55,8 @@ pub const Bundle = enum {
 
     pub fn label(self: Bundle) []const u8 {
         return switch (self) {
-            .markup_only => "только разметка",
-            .with_media => "вместе с исходниками",
+            .markup_only => lang.t("только разметка"),
+            .with_media => lang.t("вместе с исходниками"),
         };
     }
 };

@@ -16,6 +16,7 @@
 //! Здесь только счёт: где метка, какого цвета, как они упорядочены.
 //! Рисование — в окне.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const icons_mod = @import("icons.zig");
 
 /// Значки наружу: они общие для метки, дорожки и клипа.
@@ -53,14 +54,14 @@ pub const Colour = enum(u8) {
 
     pub fn label(self: Colour) []const u8 {
         return switch (self) {
-            .yellow => "жёлтая",
-            .red => "красная",
-            .orange => "оранжевая",
-            .green => "зелёная",
-            .cyan => "голубая",
-            .blue => "синяя",
-            .violet => "сиреневая",
-            .grey => "серая",
+            .yellow => lang.t("жёлтая"),
+            .red => lang.t("красная"),
+            .orange => lang.t("оранжевая"),
+            .green => lang.t("зелёная"),
+            .cyan => lang.t("голубая"),
+            .blue => lang.t("синяя"),
+            .violet => lang.t("сиреневая"),
+            .grey => lang.t("серая"),
         };
     }
 

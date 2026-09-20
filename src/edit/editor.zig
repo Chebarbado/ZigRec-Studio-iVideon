@@ -519,11 +519,11 @@ fn drawPreview(dc: c.HDC, width: i32) void {
     );
     if (!painted) {
         const hint = if (ed.frames.trouble != null)
-            "кадр не читается"
+            lang.t("кадр не читается")
         else if (clipUnderPlayhead() != null)
-            "кадр готовится…"
+            lang.t("кадр готовится…")
         else
-            "здесь будет кадр: поставьте указатель на клип";
+            lang.t("здесь будет кадр: поставьте указатель на клип");
         drawCentered(dc, width, top, bottom, hint, 0x00808080);
     }
 }
@@ -568,7 +568,7 @@ fn drawCentered(dc: c.HDC, width: i32, top: i32, bottom: i32, text_line: []const
 /// ровно то, что человеку нужно знать первым.
 fn drawEmptyHint(dc: c.HDC, width: i32, height: i32) void {
     if (ed.project.track_count > 0) return;
-    const hint = "Откройте файл или добавьте дорожку кнопкой сверху";
+    const hint = lang.t("Откройте файл или добавьте дорожку кнопкой сверху");
     // Считаем ширину строки, чтобы поставить её посередине, а не «примерно».
     var wide_buf: [128]u16 = undefined;
     const n = std.unicode.utf8ToUtf16Le(&wide_buf, hint) catch return;
@@ -786,17 +786,20 @@ fn drawTracks(dc: c.HDC, width: i32, height: i32) void {
         // не помещаются: под ними ещё ползунок, и число налезало бы на слово.
         var kind_buf: [96]u8 = undefined;
         var db_buf: [32]u8 = undefined;
+        // Вид дорожки переводится здесь, а не в `label()`: из него же
+        // складывается имя новой дорожки, а имя уходит в файл проекта (#100).
+        const kind_word = lang.tr(track.kind.label());
         const kind_text = if (track.kind == .audio)
             std.fmt.bufPrint(&kind_buf, "{s}{s} · {s}", .{
-                track.kind.label(),
-                if (track.muted) " · выключена" else "",
+                kind_word,
+                if (track.muted) lang.t(" · выключена") else "",
                 timeline.Volume.text(&db_buf, track.gain_db10),
-            }) catch track.kind.label()
+            }) catch kind_word
         else
             std.fmt.bufPrint(&kind_buf, "{s}{s}", .{
-                track.kind.label(),
-                if (track.muted) " · выключена" else "",
-            }) catch track.kind.label();
+                kind_word,
+                if (track.muted) lang.t(" · выключена") else "",
+            }) catch kind_word;
         drawText(dc, 10, top + 26, kind_text, if (track.muted) col_muted else 0x00808080);
 
         if (track.kind == .audio) {
@@ -971,7 +974,7 @@ fn drawClips(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, wid
         // слово читается хуже, чем его отсутствие.
         if (right - left > 60) {
             const src = ed.project.sourceList();
-            const name = if (clip.source < src.len) src[clip.source].name() else "клип";
+            const name = if (clip.source < src.len) src[clip.source].name() else lang.t("клип");
             var len_buf: [32]u8 = undefined;
             const len_text = view_mod.lengthLabel(&len_buf, clip.len_ns);
 
@@ -1111,7 +1114,7 @@ fn clipUnderPlayhead() ?FoundClip {
 /// Пустить или остановить воспроизведение.
 fn togglePlay() void {
     if (ed.project.durationNs() == 0) {
-        ed.say("играть нечего: на дорожках пусто");
+        ed.say(lang.t("играть нечего: на дорожках пусто"));
         refresh();
         return;
     }
@@ -1121,16 +1124,16 @@ fn togglePlay() void {
         if (ed.playhead_ns >= ed.project.durationNs()) ed.playhead_ns = 0;
         ed.last_tick_ns = win32.nowNs();
         _ = c.SetTimer(ed.hwnd, timer_play, 33, null);
-        ui.setText(ed.btn_play, "⏸ Пауза");
+        ui.setText(ed.btn_play, lang.t("⏸ Пауза"));
         // Сперва звук: он читает исходники и говорит своё, а «играю» —
         // последнее слово.
         startAudio();
-        if (ed.audio_play.isRunning()) ed.say("играю");
+        if (ed.audio_play.isRunning()) ed.say(lang.t("играю"));
     } else {
         _ = c.KillTimer(ed.hwnd, timer_play);
         stopAudio();
-        ui.setText(ed.btn_play, "▶ Играть");
-        ed.say("пауза");
+        ui.setText(ed.btn_play, lang.t("▶ Играть"));
+        ed.say(lang.t("пауза"));
     }
     showFrame();
     refresh();
@@ -1142,7 +1145,7 @@ fn togglePlay() void {
 /// лежит в памяти, пока исходники не изменятся.
 fn loadAudio() void {
     if (ed.audio_loaded) return;
-    ed.say("читаю звук исходников…");
+    ed.say(lang.t("читаю звук исходников…"));
     _ = c.UpdateWindow(ed.hwnd);
     for (ed.project.sourceList(), 0..) |src, i| {
         if (i >= ed.audio_srcs.len) break;
@@ -1185,7 +1188,7 @@ fn startAudio() void {
     const from = mixdown.nsToSamples(ed.playhead_ns, mic_rate);
     ed.audio_play.start(mic_rate, from, total, feedMix, null) catch |err| {
         var buf: [200]u8 = undefined;
-        ed.say(std.fmt.bufPrint(&buf, "играю без звука: {s}", .{play.explain(err)}) catch "играю без звука");
+        ed.say(lang.print(&buf, "играю без звука: {s}", .{play.explain(err)}) catch lang.t("играю без звука"));
     };
 }
 
@@ -1311,12 +1314,12 @@ fn sayAnnotation(index: usize) void {
     var buf: [200]u8 = undefined;
     var t0: [32]u8 = undefined;
     var t1: [32]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "{s} «{s}» с {s} по {s}; тяните мышью, правая кнопка — меню, Delete — убрать", .{
+    ed.say(lang.print(&buf, "{s} «{s}» с {s} по {s}; тяните мышью, правая кнопка — меню, Delete — убрать", .{
         a.kind.label(),
         a.title(),
         view_mod.lengthLabel(&t0, a.at_ns),
         view_mod.lengthLabel(&t1, a.endsAt()),
-    }) catch "аннотация");
+    }) catch lang.t("аннотация"));
 }
 
 /// Правая кнопка по кадру: меню — добавить или править аннотацию.
@@ -1328,16 +1331,16 @@ fn onFrameRightDown(x: i32, y: i32) void {
     const menu = c.CreatePopupMenu();
     if (menu == null) return;
     defer _ = c.DestroyMenu(menu);
-    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 0, ui.wide("Текст здесь…"));
-    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 1, ui.wide("Стрелка отсюда"));
-    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 2, ui.wide("Выноска здесь…"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 0, lang.tw("Текст здесь…"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 1, lang.tw("Стрелка отсюда"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 2, lang.tw("Выноска здесь…"));
     if (hit != null) {
         _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
-        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 3, ui.wide("Изменить текст…"));
-        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 4, ui.wide("Держать дольше (+1 с)"));
-        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 5, ui.wide("Держать меньше (−1 с)"));
-        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 6, ui.wide("Начать отсюда (с указателя)"));
-        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 7, ui.wide("Убрать"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 3, lang.tw("Изменить текст…"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 4, lang.tw("Держать дольше (+1 с)"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 5, lang.tw("Держать меньше (−1 с)"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 6, lang.tw("Начать отсюда (с указателя)"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_ann_menu + 7, lang.tw("Убрать"));
     }
     var at: c.POINT = undefined;
     _ = c.GetCursorPos(&at);
@@ -1375,7 +1378,7 @@ fn addAnnotationAt(kind: annot_mod.Kind, m: annot_paint.Point) void {
         .colour = if (kind == .arrow) .red else .yellow,
     };
     const index = ed.project.addAnnotation(made) catch {
-        ed.say("аннотаций больше не помещается: уберите ненужные");
+        ed.say(lang.t("аннотаций больше не помещается: уберите ненужные"));
         refresh();
         return;
     };
@@ -1398,7 +1401,7 @@ fn removeSelectedAnnotation() void {
     const index = ed.sel_ann orelse return;
     ed.project.removeAnnotation(index) catch return;
     ed.sel_ann = null;
-    ed.say("аннотация убрана");
+    ed.say(lang.t("аннотация убрана"));
     refresh();
 }
 
@@ -1419,7 +1422,7 @@ fn startAnnotationEdit(index: usize) void {
     ui.setText(box, a.title());
     _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
     _ = c.SetFocus(box);
-    ed.say("текст аннотации, затем Enter; Esc — оставить как было");
+    ed.say(lang.t("текст аннотации, затем Enter; Esc — оставить как было"));
     refresh();
 }
 
@@ -1446,7 +1449,7 @@ fn importLayerAnnotations(source: u16, at_ns: u64) void {
     }
     if (added > 0) {
         var buf: [96]u8 = undefined;
-        ed.say(std.fmt.bufPrint(&buf, "из слоя записи взято аннотаций: {d}", .{added}) catch "аннотации из слоя");
+        ed.say(lang.print(&buf, "из слоя записи взято аннотаций: {d}", .{added}) catch lang.t("аннотации из слоя"));
     }
 }
 
@@ -1550,7 +1553,7 @@ fn toggleCursorLayer() void {
     ed.cursor_layer_on = !ed.cursor_layer_on;
     saveMarksPanel();
     buildMenu(ed.hwnd);
-    ed.say(if (ed.cursor_layer_on) "курсор из слоя событий показывается поверх кадра" else "курсор из слоя скрыт");
+    ed.say(if (ed.cursor_layer_on) lang.t("курсор из слоя событий показывается поверх кадра") else lang.t("курсор из слоя скрыт"));
     refresh();
 }
 
@@ -1608,26 +1611,26 @@ fn snapToKey(when_ns: u64) u64 {
 fn stepToKey(forward: bool) void {
     if (ed.playing) togglePlay();
     const found = keysUnder(ed.playhead_ns) orelse {
-        ed.say("под указателем нет видео с ключевыми кадрами");
+        ed.say(lang.t("под указателем нет видео с ключевыми кадрами"));
         refresh();
         return;
     };
     const inside = found.clip.in_ns + (ed.playhead_ns -| found.clip.at_ns);
     const key = keyframes.step(found.keys, inside, forward) orelse {
-        ed.say(if (forward) "дальше ключевых кадров нет" else "раньше ключевых кадров нет");
+        ed.say(if (forward) lang.t("дальше ключевых кадров нет") else lang.t("раньше ключевых кадров нет"));
         refresh();
         return;
     };
     if (key < found.clip.in_ns or key > found.clip.in_ns + found.clip.len_ns) {
-        ed.say("следующий ключевой кадр — за краем клипа");
+        ed.say(lang.t("следующий ключевой кадр — за краем клипа"));
         refresh();
         return;
     }
     ed.playhead_ns = found.clip.at_ns + (key - found.clip.in_ns);
     var buf: [64]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "ключевой кадр · {d:.2} с в файле", .{
+    ed.say(lang.print(&buf, "ключевой кадр · {d:.2} с в файле", .{
         @as(f64, @floatFromInt(key)) / @as(f64, std.time.ns_per_s),
-    }) catch "ключевой кадр");
+    }) catch lang.t("ключевой кадр"));
     showFrame();
     refreshStage();
 }
@@ -1679,8 +1682,8 @@ fn onPlayTick() void {
         ed.playing = false;
         _ = c.KillTimer(ed.hwnd, timer_play);
         stopAudio();
-        ui.setText(ed.btn_play, "▶ Играть");
-        ed.say("конец");
+        ui.setText(ed.btn_play, lang.t("▶ Играть"));
+        ed.say(lang.t("конец"));
     }
     showFrame();
     // Во время игры меняются только кадр и указатель. Перерисовывать ради
@@ -1704,7 +1707,7 @@ fn refresh() void {
     // Одна кнопка вместо двух: развязать можно только связанное, связать —
     // только развязанное, и держать рядом две кнопки, из которых одна
     // всегда бесполезна, значит занимать место ничем.
-    ui.setText(ed.btn_link, if (selectedLink() != 0) "⛓ Развязать" else "🔗 Связать");
+    ui.setText(ed.btn_link, if (selectedLink() != 0) lang.t("⛓ Развязать") else lang.t("🔗 Связать"));
 }
 
 /// Номер связки у выбранного клипа. Ноль — клип сам по себе или не выбран.
@@ -1720,33 +1723,33 @@ fn selectedLink() u16 {
 fn toggleLink() void {
     if (selectedLink() != 0) {
         ed.project.unlink(ed.sel_track, ed.sel_clip) catch |err| return complain(err);
-        ed.say("связка снята: теперь звук и картинка двигаются порознь");
+        ed.say(lang.t("связка снята: теперь звук и картинка двигаются порознь"));
         refresh();
         return;
     }
     const n = ed.project.linkUnder(ed.playhead_ns) catch |err| {
         if (err == timeline.Error.NothingThere) {
-            ed.say("связывать нечего: под указателем должно быть хотя бы два клипа");
+            ed.say(lang.t("связывать нечего: под указателем должно быть хотя бы два клипа"));
             refresh();
             return;
         }
         return complain(err);
     };
     var buf: [128]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "связано клипов: {d} — теперь они ходят вместе", .{n}) catch "связано");
+    ed.say(lang.print(&buf, "связано клипов: {d} — теперь они ходят вместе", .{n}) catch lang.t("связано"));
     refresh();
 }
 
 /// Сказать, что не вышло, словами — а не проглотить ошибку.
 fn complain(err: anyerror) void {
     ed.say(switch (err) {
-        timeline.Error.TooShort => "слишком короткий кусок: резать или обрезать тут нечего",
-        timeline.Error.NothingThere => "в этой точке ничего нет",
-        timeline.Error.NoSuchThing => "так нельзя: видео и звук живут на своих дорожках",
-        timeline.Error.TooManyClips => "на дорожке больше не помещается клипов",
-        timeline.Error.TooManyTracks => "больше дорожек не помещается",
-        timeline.Error.TooManySources => "больше открытых файлов не помещается",
-        else => "не получилось",
+        timeline.Error.TooShort => lang.t("слишком короткий кусок: резать или обрезать тут нечего"),
+        timeline.Error.NothingThere => lang.t("в этой точке ничего нет"),
+        timeline.Error.NoSuchThing => lang.t("так нельзя: видео и звук живут на своих дорожках"),
+        timeline.Error.TooManyClips => lang.t("на дорожке больше не помещается клипов"),
+        timeline.Error.TooManyTracks => lang.t("больше дорожек не помещается"),
+        timeline.Error.TooManySources => lang.t("больше открытых файлов не помещается"),
+        else => lang.t("не получилось"),
     });
     refresh();
 }
@@ -1763,7 +1766,7 @@ fn openFile() void {
     ofn.lpstrFile = &path;
     ofn.nMaxFile = path.len;
     // Список форматов: сначала «всё, что мы открываем», потом по отдельности.
-    ofn.lpstrFilter = ui.wide(
+    ofn.lpstrFilter = lang.tw(
         "Проекты, видео и звук\x00*.zrs;*.mp4;*.mov;*.avi;*.mp3;*.wav;*.ogg;*.flac;*.mid;*.midi\x00" ++
             "Проект Zig-Rec\x00*.zrs\x00" ++
             "Видео\x00*.mp4;*.mov;*.avi\x00" ++
@@ -1814,7 +1817,7 @@ fn loadProject(path: []const u8) void {
     defer threaded.deinit();
 
     const data = std.Io.Dir.cwd().readFileAlloc(threaded.io(), path, ed.allocator, .limited(1 << 22)) catch {
-        ed.say("файл проекта не читается");
+        ed.say(lang.t("файл проекта не читается"));
         refresh();
         return;
     };
@@ -1851,16 +1854,16 @@ fn loadProject(path: []const u8) void {
 
     var buf: [320]u8 = undefined;
     ed.say(if (missing > 0)
-        std.fmt.bufPrint(&buf, "{s}: дорожек {d}, но {d} исходник(ов) не нашлось на месте", .{
+        lang.print(&buf, "{s}: дорожек {d}, но {d} исходник(ов) не нашлось на месте", .{
             std.fs.path.basename(path),
             ed.project.track_count,
             missing,
-        }) catch "проект открыт"
+        }) catch lang.t("проект открыт")
     else
-        std.fmt.bufPrint(&buf, "{s}: проект открыт, дорожек {d}", .{
+        lang.print(&buf, "{s}: проект открыт, дорожек {d}", .{
             std.fs.path.basename(path),
             ed.project.track_count,
-        }) catch "проект открыт");
+        }) catch lang.t("проект открыт"));
     refresh();
 }
 
@@ -1885,7 +1888,7 @@ fn addEmptyTrack(kind: timeline.TrackKind) void {
     _ = ed.project.addTrack(kind, name) catch |err| return complain(err);
 
     var buf: [128]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "добавлена дорожка «{s}»", .{name}) catch "дорожка добавлена");
+    ed.say(lang.print(&buf, "добавлена дорожка «{s}»", .{name}) catch lang.t("дорожка добавлена"));
     refresh();
 }
 
@@ -1929,7 +1932,7 @@ fn saveProjectBundle() void {
 
 fn askAndSave(bundle: pack.Bundle) void {
     if (ed.project.track_count == 0) {
-        ed.say("сохранять нечего: в проекте нет дорожек");
+        ed.say(lang.t("сохранять нечего: в проекте нет дорожек"));
         refresh();
         return;
     }
@@ -1951,18 +1954,18 @@ fn askAndSave(bundle: pack.Bundle) void {
     ofn.hwndOwner = ed.hwnd;
     ofn.lpstrFile = &path;
     ofn.nMaxFile = path.len;
-    ofn.lpstrFilter = ui.wide("Проект Zig-Rec\x00*.zigrec\x00Прежний формат\x00*.zrs\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrFilter = lang.tw("Проект Zig-Rec\x00*.zigrec\x00Прежний формат\x00*.zrs\x00Все файлы\x00*.*\x00\x00");
     ofn.lpstrDefExt = ui.wide("zigrec");
     ofn.lpstrTitle = if (bundle == .with_media)
-        ui.wide("Собрать всё в один файл")
+        lang.tw("Собрать всё в один файл")
     else
-        ui.wide("Сохранить проект как");
+        lang.tw("Сохранить проект как");
     ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_NOCHANGEDIR;
     if (c.GetSaveFileNameW(&ofn) == 0) return;
 
     var utf8: [1024]u8 = undefined;
     const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&path, 0)) catch {
-        ed.say("путь не переводится: сохраните в другое место");
+        ed.say(lang.t("путь не переводится: сохраните в другое место"));
         refresh();
         return;
     };
@@ -2003,7 +2006,7 @@ fn startRecordTo(track_index: usize) void {
 
     if (mic_ring == null) {
         mic_ring = ed.allocator.create(sound_track.Track) catch {
-            ed.say("не хватило памяти под запись с микрофона");
+            ed.say(lang.t("не хватило памяти под запись с микрофона"));
             refresh();
             return;
         };
@@ -2018,7 +2021,7 @@ fn startRecordTo(track_index: usize) void {
     mic_capture.track = mic_ring;
     mic_capture.track_rate = mic_rate;
     mic_capture.start() catch {
-        ed.say("микрофон не поднялся: проверьте, что он есть и разрешён");
+        ed.say(lang.t("микрофон не поднялся: проверьте, что он есть и разрешён"));
         refresh();
         return;
     };
@@ -2029,7 +2032,7 @@ fn startRecordTo(track_index: usize) void {
     _ = c.SetTimer(ed.hwnd, timer_mic, 50, null);
     if (!ed.playing) togglePlay();
     ed.playhead_ns = anchor;
-    ed.say("идёт запись дубля поверх видео; нажмите микрофон ещё раз, чтобы остановить");
+    ed.say(lang.t("идёт запись дубля поверх видео; нажмите микрофон ещё раз, чтобы остановить"));
     refresh();
 }
 
@@ -2044,7 +2047,7 @@ fn drainMic() void {
         ed.rec_samples.appendSlice(ed.allocator, chunk[0..got]) catch {
             // Память кончилась посреди записи: останавливаемся, но то,
             // что уже записано, не выбрасываем.
-            ed.say("памяти под запись не хватило: останавливаю");
+            ed.say(lang.t("памяти под запись не хватило: останавливаю"));
             stopRecordTo();
             return;
         };
@@ -2058,11 +2061,11 @@ fn onMicTick() void {
     const elapsed = win32.nowNs() -| ed.rec_started_ns;
     const level = if (mic_ring != null) mic_capture.ring.level() else mic.Level{};
     var say: [160]u8 = undefined;
-    const line_text = std.fmt.bufPrint(&say, "запись с микрофона: {d:.1} с, уровень {d:.0} дБ{s}", .{
+    const line_text = lang.print(&say, "запись с микрофона: {d:.1} с, уровень {d:.0} дБ{s}", .{
         @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s),
         level.dbfs(),
-        if (level.isClipping()) " — ПЕРЕГРУЗ" else "",
-    }) catch "запись с микрофона";
+        if (level.isClipping()) lang.t(" — ПЕРЕГРУЗ") else "",
+    }) catch lang.t("запись с микрофона");
     ed.say(line_text);
     refresh();
 }
@@ -2079,31 +2082,31 @@ fn stopRecordTo() void {
     mic_capture.track = null;
 
     if (mic_capture.failure) |_| {
-        ed.say("микрофон не отдал звук: запись не получилась");
+        ed.say(lang.t("микрофон не отдал звук: запись не получилась"));
         refresh();
         return;
     }
     if (ed.rec_samples.items.len == 0) {
-        ed.say("с микрофона ничего не пришло: запись пустая");
+        ed.say(lang.t("с микрофона ничего не пришло: запись пустая"));
         refresh();
         return;
     }
 
     var path_buf: [1024]u8 = undefined;
     const where = micFileName(&path_buf) orelse {
-        ed.say("некуда положить запись: не нашлась папка для файлов");
+        ed.say(lang.t("некуда положить запись: не нашлась папка для файлов"));
         refresh();
         return;
     };
 
     writeMicWav(where) catch |err| {
-        sayError("запись с микрофона не сохранилась", err);
+        sayError(lang.t("запись с микрофона не сохранилась"), err);
         return;
     };
 
     const len_ns = @as(u64, ed.rec_samples.items.len) * std.time.ns_per_s / mic_rate;
     const source = ed.project.addSource(where, len_ns) catch {
-        ed.say("исходников в проекте больше не помещается");
+        ed.say(lang.t("исходников в проекте больше не помещается"));
         refresh();
         return;
     };
@@ -2111,7 +2114,7 @@ fn stopRecordTo() void {
     // Поверх чужого звука дубль не кладём: занято — на дорожку «дубли».
     const target = takes_mod.trackForTake(ed.project, track_index, ed.rec_at_ns, len_ns) catch track_index;
     ed.project.place(target, source, ed.rec_at_ns, len_ns) catch {
-        ed.say("клипов на дорожке больше не помещается");
+        ed.say(lang.t("клипов на дорожке больше не помещается"));
         refresh();
         return;
     };
@@ -2121,11 +2124,11 @@ fn stopRecordTo() void {
     // Новый дубль — выбран в списке, если список открыт: его сразу видно.
     ed.sel_take = null;
     var say: [256]u8 = undefined;
-    const line_text = std.fmt.bufPrint(&say, "записан дубль {d:.1} с на дорожку «{s}»: {s}", .{
+    const line_text = lang.print(&say, "записан дубль {d:.1} с на дорожку «{s}»: {s}", .{
         @as(f64, @floatFromInt(len_ns)) / @as(f64, std.time.ns_per_s),
         ed.project.tracks[target].title(),
         std.fs.path.basename(where),
-    }) catch "запись легла на дорожку";
+    }) catch lang.t("запись легла на дорожку");
     ed.say(line_text);
     refresh();
 }
@@ -2227,7 +2230,7 @@ fn showIconMenu(at: c.POINT, now: timeline.Marks.Icons.Icon) ?timeline.Marks.Ico
     // Первая строка снимает значок: раз его поставили, должен быть
     // и путь обратно.
     var wide_none: [64]u16 = undefined;
-    if (std.unicode.utf8ToUtf16Le(&wide_none, "— без значка —")) |n| {
+    if (std.unicode.utf8ToUtf16Le(&wide_none, lang.t("— без значка —"))) |n| {
         wide_none[n] = 0;
         _ = c.AppendMenuW(menu, c.MF_STRING, id_icon_menu, @ptrCast(&wide_none));
         _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
@@ -2454,26 +2457,26 @@ fn sayMark(index: usize) void {
     var how_long: [32]u8 = undefined;
     var say: [200]u8 = undefined;
     const line_text = if (m.isSpan())
-        std.fmt.bufPrint(&say, "метка «{s}» ({s}): {s} — {s}, длиной {s}", .{
+        lang.print(&say, "метка «{s}» ({s}): {s} — {s}, длиной {s}", .{
             m.title(),
             m.colour.label(),
             view_mod.lengthLabel(&when, m.at_ns),
             view_mod.lengthLabel(&till, m.endsAt()),
             view_mod.lengthLabel(&how_long, m.len_ns),
-        }) catch "метка"
+        }) catch lang.t("метка")
     else
-        std.fmt.bufPrint(&say, "метка «{s}» ({s}) на {s}", .{
+        lang.print(&say, "метка «{s}» ({s}) на {s}", .{
             m.title(),
             m.colour.label(),
             view_mod.lengthLabel(&when, m.at_ns),
-        }) catch "метка";
+        }) catch lang.t("метка");
     ed.say(line_text);
 }
 
 /// Поставить метку там, где стоит указатель.
 fn addMarkAtPlayhead() void {
     const where = ed.project.addMark(ed.playhead_ns, takeMarkColour(), "") catch {
-        ed.say("меток больше не помещается: уберите ненужные");
+        ed.say(lang.t("меток больше не помещается: уберите ненужные"));
         refresh();
         return;
     };
@@ -2498,7 +2501,7 @@ fn stepToMark(forward: bool) void {
     // По обеим границам: у диапазона конец — такое же место, куда прыгают,
     // как и начало. Иначе до конца куска приходится доезжать мышью.
     const at = ed.project.marks.stepTime(ed.playhead_ns, forward) orelse {
-        ed.say(if (forward) "дальше меток нет" else "раньше меток нет");
+        ed.say(if (forward) lang.t("дальше меток нет") else lang.t("раньше меток нет"));
         refresh();
         return;
     };
@@ -2536,7 +2539,7 @@ fn startMarkRename(index: usize) void {
     ui.setText(box, m.title());
     _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
     _ = c.SetFocus(box);
-    ed.say("новое имя метки, затем Enter; Esc — оставить как было");
+    ed.say(lang.t("новое имя метки, затем Enter; Esc — оставить как было"));
     refresh();
 }
 
@@ -2568,13 +2571,13 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
     // хочет его дотянуть, и называть время числом ему незачем.
     const m = ed.project.marks.items[index];
     if (m.isSpan()) {
-        _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 102, ui.wide("Сделать точкой"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 102, lang.tw("Сделать точкой"));
     } else if (ed.playhead_ns > m.at_ns + timeline.Marks.min_span_ns) {
-        _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 102, ui.wide("Растянуть до указателя"));
+        _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 102, lang.tw("Растянуть до указателя"));
     }
-    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 103, ui.wide("Значок…"));
-    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 100, ui.wide("Переименовать…"));
-    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 101, ui.wide("Убрать метку"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 103, lang.tw("Значок…"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 100, lang.tw("Переименовать…"));
+    _ = c.AppendMenuW(menu, c.MF_STRING, id_mark_menu + 101, lang.tw("Убрать метку"));
 
     _ = c.SetForegroundWindow(ed.hwnd);
     const chosen = c.TrackPopupMenu(
@@ -2591,7 +2594,7 @@ fn showMarkMenu(index: usize, at: c.POINT) void {
     if (chosen == id_mark_menu + 101) {
         ed.project.removeMark(index) catch return;
         ed.sel_mark = null;
-        ed.say("метка убрана");
+        ed.say(lang.t("метка убрана"));
         refresh();
         return;
     }
@@ -2651,12 +2654,12 @@ fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
         .bottom = top + view_mod.marks_head_h,
     }, 0x00F0F0F0);
     drawText(dc, left + view_mod.marks_col_time, top + 4, "t", 0x00707070);
-    drawText(dc, left + view_mod.marks_col_name, top + 4, "метка", 0x00707070);
-    drawText(dc, left + view_mod.marks_col_note, top + 4, "комментарий", 0x00707070);
+    drawText(dc, left + view_mod.marks_col_name, top + 4, lang.t("метка"), 0x00707070);
+    drawText(dc, left + view_mod.marks_col_note, top + 4, lang.t("комментарий"), 0x00707070);
     line(dc, left, top + view_mod.marks_head_h - 1, window_w, top + view_mod.marks_head_h - 1, col_lane_line, 1);
 
     if (ed.project.marks.count == 0) {
-        drawText(dc, left + 8, top + view_mod.marks_head_h + 8, "меток нет: правая кнопка по линейке", 0x00909090);
+        drawText(dc, left + 8, top + view_mod.marks_head_h + 8, lang.t("меток нет: правая кнопка по линейке"), 0x00909090);
         return;
     }
 
@@ -2721,14 +2724,14 @@ fn drawMarksPanel(dc: c.HDC, window_w: i32, height: i32) void {
 fn drawTakesPanel(dc: c.HDC, left: i32, top: i32, bottom: i32, window_w: i32, panel_w: i32) void {
     solid(dc, .{ .left = left, .top = top, .right = window_w, .bottom = top + view_mod.marks_head_h }, 0x00F0F0F0);
     drawText(dc, left + view_mod.takes_col_time, top + 4, "t", 0x00707070);
-    drawText(dc, left + view_mod.takes_col_len, top + 4, "длина", 0x00707070);
-    drawText(dc, left + view_mod.takes_col_note, top + 4, "заметка", 0x00707070);
+    drawText(dc, left + view_mod.takes_col_len, top + 4, lang.t("длина"), 0x00707070);
+    drawText(dc, left + view_mod.takes_col_note, top + 4, lang.t("заметка"), 0x00707070);
     line(dc, left, top + view_mod.marks_head_h - 1, window_w, top + view_mod.marks_head_h - 1, col_lane_line, 1);
 
     var out: [takes_mod.max_takes]takes_mod.Take = undefined;
     const list = takes_mod.list(ed.project, &out);
     if (list.len == 0) {
-        drawText(dc, left + 8, top + view_mod.marks_head_h + 8, "дублей нет: микрофон на звуковой дорожке пишет дубль", 0x00909090);
+        drawText(dc, left + 8, top + view_mod.marks_head_h + 8, lang.t("дублей нет: микрофон на звуковой дорожке пишет дубль"), 0x00909090);
         return;
     }
 
@@ -2768,10 +2771,10 @@ fn onTakesPanelDown(at: PanelPoint) void {
     showFrame();
     var buf: [160]u8 = undefined;
     var len_buf: [32]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "дубль {d} · {s}; пробел — прослушать с видео, Delete — убрать", .{
+    ed.say(lang.print(&buf, "дубль {d} · {s}; пробел — прослушать с видео, Delete — убрать", .{
         row + 1,
         view_mod.lengthLabel(&len_buf, t.len_ns),
-    }) catch "дубль выбран");
+    }) catch lang.t("дубль выбран"));
     refresh();
 }
 
@@ -2781,7 +2784,7 @@ fn onTakesPanelDouble(at: PanelPoint) void {
     const list = takes_mod.list(ed.project, &out);
     const row = view_mod.marksRowAt(at.y, list.len) orelse return;
     if (view_mod.takesColumnAt(at.x) != .note) {
-        ed.say("дубль двигают как клип на дорожке; здесь правится заметка");
+        ed.say(lang.t("дубль двигают как клип на дорожке; здесь правится заметка"));
         refresh();
         return;
     }
@@ -2808,7 +2811,7 @@ fn onTakesPanelDouble(at: PanelPoint) void {
     ui.setText(box, takes_mod.noteOf(ed.project, list[row]));
     _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
     _ = c.SetFocus(box);
-    ed.say("заметка к дублю, затем Enter; Esc — оставить как было");
+    ed.say(lang.t("заметка к дублю, затем Enter; Esc — оставить как было"));
     refresh();
 }
 
@@ -2824,7 +2827,7 @@ fn toggleTakesPanel() void {
     }
     ed.panel_takes = true;
     buildMenu(ed.hwnd);
-    ed.say("панель дублей открыта");
+    ed.say(lang.t("панель дублей открыта"));
     refresh();
 }
 
@@ -2854,6 +2857,12 @@ pub const ColumnFit = struct {
 /// Заголовки панели дублей — тем же замером, что у меток (#26).
 pub const takes_columns = [_][]const u8{ "t", "длина", "заметка" };
 
+test "подписи столбцов панелей переведены" {
+    // Таблицы идут через `lang.tr`, а он о пропаже молчит: сторож — здесь.
+    for (marks_columns) |label| try std.testing.expect(lang.known(label));
+    for (takes_columns) |label| try std.testing.expect(lang.known(label));
+}
+
 pub fn takesColumnFits(out: *[takes_columns.len]ColumnFit) []const ColumnFit {
     const room = [_]i32{
         view_mod.takes_col_len - view_mod.takes_col_time,
@@ -2862,14 +2871,16 @@ pub fn takesColumnFits(out: *[takes_columns.len]ColumnFit) []const ColumnFit {
     };
     const dc = c.CreateCompatibleDC(null);
     if (dc == null) {
-        for (takes_columns, 0..) |label, i| out[i] = .{ .label = label, .have = room[i] };
+        for (takes_columns, 0..) |label, i| out[i] = .{ .label = lang.tr(label), .have = room[i] };
         return out[0..takes_columns.len];
     }
     defer _ = c.DeleteDC(dc);
     const font = c.GetStockObject(c.DEFAULT_GUI_FONT);
     const old_font = c.SelectObject(dc, font);
     defer _ = c.SelectObject(dc, old_font);
-    for (takes_columns, 0..) |label, i| {
+    for (takes_columns, 0..) |ru_label, i| {
+        // Меряем то, что будет нарисовано: на английском подпись другая (#100).
+        const label = lang.tr(ru_label);
         var wide: [64]u16 = undefined;
         const n = std.unicode.utf8ToUtf16Le(&wide, label) catch 0;
         var size: c.SIZE = std.mem.zeroes(c.SIZE);
@@ -2887,7 +2898,7 @@ pub fn marksColumnFits(out: *[marks_columns.len]ColumnFit) []const ColumnFit {
     };
     const dc = c.CreateCompatibleDC(null);
     if (dc == null) {
-        for (marks_columns, 0..) |label, i| out[i] = .{ .label = label, .have = room[i] };
+        for (marks_columns, 0..) |label, i| out[i] = .{ .label = lang.tr(label), .have = room[i] };
         return out[0..marks_columns.len];
     }
     defer _ = c.DeleteDC(dc);
@@ -2895,7 +2906,9 @@ pub fn marksColumnFits(out: *[marks_columns.len]ColumnFit) []const ColumnFit {
     const old_font = c.SelectObject(dc, font);
     defer _ = c.SelectObject(dc, old_font);
 
-    for (marks_columns, 0..) |label, i| {
+    for (marks_columns, 0..) |ru_label, i| {
+        // Меряем то, что будет нарисовано: на английском подпись другая (#100).
+        const label = lang.tr(ru_label);
         var wide: [64]u16 = undefined;
         const n = std.unicode.utf8ToUtf16Le(&wide, label) catch 0;
         var size: c.SIZE = std.mem.zeroes(c.SIZE);
@@ -2944,7 +2957,7 @@ fn toggleMarksPanel() void {
     if (ed.marks_open and ed.panel_takes) {
         ed.panel_takes = false;
         buildMenu(ed.hwnd);
-        ed.say("панель меток открыта");
+        ed.say(lang.t("панель меток открыта"));
         refresh();
         return;
     }
@@ -2952,7 +2965,7 @@ fn toggleMarksPanel() void {
     if (want and view_mod.marksPanelWidth(rect.right, true, marks_w) == 0) {
         // Наполовину заехавшая панель хуже, чем её отсутствие: об этом
         // надо сказать словами, а не показать обрезанный список.
-        ed.say("окно слишком узкое для панели меток: расширьте его");
+        ed.say(lang.t("окно слишком узкое для панели меток: расширьте его"));
         refresh();
         return;
     }
@@ -2960,7 +2973,7 @@ fn toggleMarksPanel() void {
     saveMarksPanel();
     // Галочка в меню должна сойтись с тем, что на экране.
     buildMenu(ed.hwnd);
-    ed.say(if (ed.marks_open) "панель меток открыта; её левый край можно тянуть" else "панель меток закрыта");
+    ed.say(if (ed.marks_open) lang.t("панель меток открыта; её левый край можно тянуть") else lang.t("панель меток закрыта"));
     refresh();
 }
 
@@ -2998,7 +3011,7 @@ fn onMarksPanelDouble(at: PanelPoint) void {
         // Время правят не текстом, а перетаскиванием метки: набирать
         // «0:07.34» руками — это не правка, а упражнение.
         .time => {
-            ed.say("время метки меняется перетаскиванием флажка на линейке");
+            ed.say(lang.t("время метки меняется перетаскиванием флажка на линейке"));
             refresh();
         },
         .name => startMarksPanelEdit(row, false),
@@ -3044,9 +3057,9 @@ fn startMarksPanelEdit(row: usize, is_note: bool) void {
     _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
     _ = c.SetFocus(box);
     ed.say(if (is_note)
-        "что с этим местом делать, затем Enter; Esc — оставить как было"
+        lang.t("что с этим местом делать, затем Enter; Esc — оставить как было")
     else
-        "новое имя метки, затем Enter; Esc — оставить как было");
+        lang.t("новое имя метки, затем Enter; Esc — оставить как было"));
     refresh();
 }
 
@@ -3083,7 +3096,7 @@ fn saveMarksPanel() void {
 /// с ключевых кадров одного файла, иначе — с перекодированием.
 fn exportToMp4() void {
     if (export_mod.videoTrack(ed.project) == null) {
-        ed.say("экспортировать нечего: на видеодорожках пусто");
+        ed.say(lang.t("экспортировать нечего: на видеодорожках пусто"));
         refresh();
         return;
     }
@@ -3096,14 +3109,14 @@ fn exportToMp4() void {
     ofn.hwndOwner = ed.hwnd;
     ofn.lpstrFile = &path;
     ofn.nMaxFile = path.len;
-    ofn.lpstrFilter = ui.wide("Видео MP4\x00*.mp4\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrFilter = lang.tw("Видео MP4\x00*.mp4\x00Все файлы\x00*.*\x00\x00");
     ofn.lpstrDefExt = ui.wide("mp4");
-    ofn.lpstrTitle = ui.wide("Экспорт в mp4");
+    ofn.lpstrTitle = lang.tw("Экспорт в mp4");
     ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_NOCHANGEDIR;
     if (c.GetSaveFileNameW(&ofn) == 0) return;
     var utf8: [1024]u8 = undefined;
     const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&path, 0)) catch {
-        ed.say("путь не переводится: экспортируйте в другое место");
+        ed.say(lang.t("путь не переводится: экспортируйте в другое место"));
         refresh();
         return;
     };
@@ -3117,28 +3130,28 @@ fn exportTo(where: []const u8) void {
     for (&keys, 0..) |*k, i| k.* = ed.keys[i];
     const decided = export_mod.planWith(ed.project, &keys, &ed.layers, ed.cursor_layer_on);
     var note: [200]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&note, "экспорт {s}{s}: {d} клип(ов)… окно подождёт", .{
+    ed.say(lang.print(&note, "экспорт {s}{s}: {d} клип(ов)… окно подождёт", .{
         decided.mode.label(),
-        if (decided.burns_cursor) ", курсор из слоя впечатывается" else "",
+        if (decided.burns_cursor) lang.t(", курсор из слоя впечатывается") else "",
         decided.clips,
-    }) catch "экспорт…");
+    }) catch lang.t("экспорт…"));
     _ = c.UpdateWindow(ed.hwnd);
 
     const n = ed.project.sourceList().len;
     const summary = export_mod.runWith(ed.allocator, ed.project, &keys, ed.audio_mix[0..n], &ed.layers, ed.cursor_layer_on, where) catch |err| {
         var buf: [300]u8 = undefined;
-        ed.say(std.fmt.bufPrint(&buf, "экспорт не удался: {s}", .{@errorName(err)}) catch "экспорт не удался");
+        ed.say(lang.print(&buf, "экспорт не удался: {s}", .{@errorName(err)}) catch lang.t("экспорт не удался"));
         refresh();
         return;
     };
     var buf: [320]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "экспорт готов {s}: {d} кадров, {d:.1} с, звук {d:.1} с — {s}", .{
+    ed.say(lang.print(&buf, "экспорт готов {s}: {d} кадров, {d:.1} с, звук {d:.1} с — {s}", .{
         summary.mode.label(),
         summary.frames,
         @as(f64, @floatFromInt(summary.duration_ns)) / @as(f64, std.time.ns_per_s),
         @as(f64, @floatFromInt(summary.audio_samples)) / 48_000.0,
         std.fs.path.basename(where),
-    }) catch "экспорт готов");
+    }) catch lang.t("экспорт готов"));
     refresh();
 }
 
@@ -3151,7 +3164,7 @@ fn exportTo(where: []const u8) void {
 fn mixdownToWav() void {
     const audio_tracks = countAudioTracks();
     if (audio_tracks == 0) {
-        ed.say("сводить нечего: звуковых дорожек в проекте нет");
+        ed.say(lang.t("сводить нечего: звуковых дорожек в проекте нет"));
         refresh();
         return;
     }
@@ -3165,15 +3178,15 @@ fn mixdownToWav() void {
     ofn.hwndOwner = ed.hwnd;
     ofn.lpstrFile = &path;
     ofn.nMaxFile = path.len;
-    ofn.lpstrFilter = ui.wide("Звук WAV\x00*.wav\x00Все файлы\x00*.*\x00\x00");
+    ofn.lpstrFilter = lang.tw("Звук WAV\x00*.wav\x00Все файлы\x00*.*\x00\x00");
     ofn.lpstrDefExt = ui.wide("wav");
-    ofn.lpstrTitle = ui.wide("Свести звук в WAV");
+    ofn.lpstrTitle = lang.tw("Свести звук в WAV");
     ofn.Flags = c.OFN_OVERWRITEPROMPT | c.OFN_NOCHANGEDIR;
     if (c.GetSaveFileNameW(&ofn) == 0) return;
 
     var utf8: [1024]u8 = undefined;
     const len = std.unicode.utf16LeToUtf8(&utf8, std.mem.sliceTo(&path, 0)) catch {
-        ed.say("путь не переводится: сведите в другое место");
+        ed.say(lang.t("путь не переводится: сведите в другое место"));
         refresh();
         return;
     };
@@ -3219,12 +3232,12 @@ fn writeMixTo(where: []const u8) void {
 
     const total = mixdown.totalSamples(ed.project, rate);
     if (total == 0) {
-        ed.say("сводить нечего: на звуковых дорожках пусто");
+        ed.say(lang.t("сводить нечего: на звуковых дорожках пусто"));
         refresh();
         return;
     }
     const out = ed.allocator.alloc(i16, total) catch {
-        ed.say("не хватило памяти на сведение: проект слишком длинный");
+        ed.say(lang.t("не хватило памяти на сведение: проект слишком длинный"));
         refresh();
         return;
     };
@@ -3238,13 +3251,13 @@ fn writeMixTo(where: []const u8) void {
 
     var buf: [1 << 16]u8 = undefined;
     var file = std.Io.Dir.cwd().createFile(io, where, .{}) catch |err| {
-        sayError("не записать смесь", err);
+        sayError(lang.t("не записать смесь"), err);
         return;
     };
     defer file.close(io);
     var fw = file.writer(io, &buf);
     zigwav.write(&fw.interface, rate, 1, out) catch |err| {
-        sayError("не записать смесь", err);
+        sayError(lang.t("не записать смесь"), err);
         return;
     };
     fw.interface.flush() catch {};
@@ -3252,15 +3265,15 @@ fn writeMixTo(where: []const u8) void {
     var say: [256]u8 = undefined;
     var without: [64]u8 = undefined;
     const note = if (silent_sources > 0)
-        std.fmt.bufPrint(&without, "; без звука осталось исходников: {d}", .{silent_sources}) catch ""
+        lang.print(&without, "; без звука осталось исходников: {d}", .{silent_sources}) catch ""
     else
         "";
-    const line_text = std.fmt.bufPrint(&say, "звук сведён: {s}, {d:.1} с, дорожек {d}{s}", .{
+    const line_text = lang.print(&say, "звук сведён: {s}, {d:.1} с, дорожек {d}{s}", .{
         std.fs.path.basename(where),
         @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(rate)),
         countAudioTracks(),
         note,
-    }) catch "звук сведён";
+    }) catch lang.t("звук сведён");
     ed.say(line_text);
     refresh();
 }
@@ -3275,7 +3288,7 @@ fn sayError(what: []const u8, err: anyerror) void {
 /// Записать проект по этому пути.
 fn writeProjectTo(where: []const u8, bundle: pack.Bundle) void {
     if (ed.project.track_count == 0) {
-        ed.say("сохранять нечего: в проекте нет дорожек");
+        ed.say(lang.t("сохранять нечего: в проекте нет дорожек"));
         refresh();
         return;
     }
@@ -3283,7 +3296,7 @@ fn writeProjectTo(where: []const u8, bundle: pack.Bundle) void {
 
     var path: [1024]u16 = @splat(0);
     const n = std.unicode.utf8ToUtf16Le(&path, where) catch {
-        ed.say("путь не переводится: сохраните в другое место");
+        ed.say(lang.t("путь не переводится: сохраните в другое место"));
         refresh();
         return;
     };
@@ -3292,7 +3305,7 @@ fn writeProjectTo(where: []const u8, bundle: pack.Bundle) void {
     var text: [64 * 1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
     project_file.write(ed.project, &w, std.fs.path.dirname(where) orelse "") catch {
-        ed.say("проект не помещается в файл: слишком много клипов");
+        ed.say(lang.t("проект не помещается в файл: слишком много клипов"));
         refresh();
         return;
     };
@@ -3307,7 +3320,7 @@ fn writeProjectTo(where: []const u8, bundle: pack.Bundle) void {
         null,
     );
     if (handle == c.INVALID_HANDLE_VALUE) {
-        ed.say("файл не создаётся: путь недоступен или файл занят");
+        ed.say(lang.t("файл не создаётся: путь недоступен или файл занят"));
         refresh();
         return;
     }
@@ -3321,9 +3334,9 @@ fn writeProjectTo(where: []const u8, bundle: pack.Bundle) void {
         ed.bundle = .markup_only;
         rememberProjectPath(where);
         var buf: [320]u8 = undefined;
-        ed.say(std.fmt.bufPrint(&buf, "сохранено: {s}", .{std.fs.path.basename(where)}) catch "сохранено");
+        ed.say(lang.print(&buf, "сохранено: {s}", .{std.fs.path.basename(where)}) catch lang.t("сохранено"));
     } else {
-        ed.say("файл записался не целиком: проверьте место на диске");
+        ed.say(lang.t("файл записался не целиком: проверьте место на диске"));
     }
     refresh();
 }
@@ -3359,14 +3372,14 @@ fn writePackTo(where: []const u8, bundle: pack.Bundle) void {
 
     const bytes = pack.write(ed.allocator, ed.project, @import("../version.zig").VERSION, inside.items) catch |err| {
         var buf: [200]u8 = undefined;
-        ed.say(std.fmt.bufPrint(&buf, "архив не собрался: {s}", .{@errorName(err)}) catch "архив не собрался");
+        ed.say(lang.print(&buf, "архив не собрался: {s}", .{@errorName(err)}) catch lang.t("архив не собрался"));
         refresh();
         return;
     };
     defer ed.allocator.free(bytes);
 
     std.Io.Dir.cwd().writeFile(io, .{ .sub_path = where, .data = bytes }) catch {
-        ed.say("файл не создаётся: путь недоступен или файл занят");
+        ed.say(lang.t("файл не создаётся: путь недоступен или файл занят"));
         refresh();
         return;
     };
@@ -3375,12 +3388,12 @@ fn writePackTo(where: []const u8, bundle: pack.Bundle) void {
     rememberProjectPath(where);
 
     var buf: [400]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "сохранено: {s} — {s}, {d} КБ{s}", .{
+    ed.say(lang.print(&buf, "сохранено: {s} — {s}, {d} КБ{s}", .{
         std.fs.path.basename(where),
         bundle.label(),
         (bytes.len + 1023) / 1024,
-        if (skipped > 0) " (часть исходников не нашлась)" else "",
-    }) catch "сохранено");
+        if (skipped > 0) lang.t(" (часть исходников не нашлась)") else "",
+    }) catch lang.t("сохранено"));
     refresh();
 }
 
@@ -3392,7 +3405,7 @@ fn loadPack(path: []const u8) void {
 
     const opened = pack.readMarkup(ed.allocator, io, path, ed.project) catch |err| {
         var buf: [200]u8 = undefined;
-        ed.say(std.fmt.bufPrint(&buf, "архив не открылся: {s}", .{@errorName(err)}) catch "архив не открылся");
+        ed.say(lang.print(&buf, "архив не открылся: {s}", .{@errorName(err)}) catch lang.t("архив не открылся"));
         refresh();
         return;
     };
@@ -3435,19 +3448,19 @@ fn afterProjectLoaded(made_by: []const u8, inside: usize, unpacked: bool) void {
     dropAudio();
 
     var buf: [400]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "открыт проект: дорожек {d}{s}{s}{s}", .{
+    ed.say(lang.print(&buf, "открыт проект: дорожек {d}{s}{s}{s}", .{
         ed.project.track_count,
-        if (made_by.len > 0) " · сделан версией " else "",
+        if (made_by.len > 0) lang.t(" · сделан версией ") else "",
         if (made_by.len > 0) made_by else "",
         if (unpacked)
-            " · исходники взяты из архива"
+            lang.t(" · исходники взяты из архива")
         else if (inside > 0)
-            " · исходники в архиве есть, но не распаковались"
+            lang.t(" · исходники в архиве есть, но не распаковались")
         else if (missing > 0)
-            " · часть исходников не на месте"
+            lang.t(" · часть исходников не на месте")
         else
             "",
-    }) catch "проект открыт");
+    }) catch lang.t("проект открыт"));
 
     fitToProject();
     showFrame();
@@ -3459,13 +3472,13 @@ fn setEditorTitle() void {
     var title_buf: [640]u8 = undefined;
     const version = @import("../version.zig").VERSION;
     const title = if (ed.project_path_len > 0)
-        std.fmt.bufPrint(&title_buf, "{s} — Zig-Rec Studio, редактор v{s}", .{
+        lang.print(&title_buf, "{s} — Zig-Rec Studio, редактор v{s}", .{
             std.fs.path.basename(projectPath()),
             version,
-        }) catch "Zig-Rec Studio — редактор"
+        }) catch lang.t("Zig-Rec Studio — редактор")
     else
-        std.fmt.bufPrint(&title_buf, "Zig-Rec Studio — редактор v{s}", .{version}) catch
-            "Zig-Rec Studio — редактор";
+        lang.print(&title_buf, "Zig-Rec Studio — редактор v{s}", .{version}) catch
+            lang.t("Zig-Rec Studio — редактор");
 
     var wide_buf: [640]u16 = undefined;
     const n = std.unicode.utf8ToUtf16Le(&wide_buf, title) catch return;
@@ -3488,7 +3501,7 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
         ed.say(std.fmt.bufPrint(&buf, "{s}: {s}", .{
             std.fs.path.basename(path),
             media.explain(err),
-        }) catch "файл не открылся");
+        }) catch lang.t("файл не открылся"));
         refresh();
         return;
     };
@@ -3529,13 +3542,13 @@ fn addFileAt(path: []const u8, at_ns: u64) void {
     }
 
     var buf: [320]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "{s}: {s}, дорожек {d}, {d:.2} с{s}", .{
+    ed.say(lang.print(&buf, "{s}: {s}, дорожек {d}, {d:.2} с{s}", .{
         std.fs.path.basename(path),
         info.format.label(),
         added,
         info.seconds(),
-        if (link != 0) " — связаны, Alt тянет врозь" else "",
-    }) catch "файл открыт");
+        if (link != 0) lang.t(" — связаны, Alt тянет врозь") else "",
+    }) catch lang.t("файл открыт"));
 
     rememberViewed(path);
 
@@ -3561,7 +3574,7 @@ fn fitToProject() void {
 
 fn splitAtPlayhead() void {
     if (!ed.has_selection) {
-        ed.say("сначала выберите клип: резать надо что-то определённое");
+        ed.say(lang.t("сначала выберите клип: резать надо что-то определённое"));
         refresh();
         return;
     }
@@ -3571,13 +3584,13 @@ fn splitAtPlayhead() void {
     else
         ed.project.split(ed.sel_track, ed.playhead_ns);
     cut catch |err| return complain(err);
-    ed.say(if (alone) "разрезан один клип" else "разрезано вместе со связкой");
+    ed.say(if (alone) lang.t("разрезан один клип") else lang.t("разрезано вместе со связкой"));
     refresh();
 }
 
 fn deleteSelected() void {
     if (!ed.has_selection) {
-        ed.say("сначала выберите клип");
+        ed.say(lang.t("сначала выберите клип"));
         refresh();
         return;
     }
@@ -3589,14 +3602,14 @@ fn deleteSelected() void {
         ed.project.removeClip(ed.sel_track, ed.sel_clip);
     gone catch |err| return complain(err);
     ed.has_selection = false;
-    ed.say(if (linked) "связка убрана целиком" else "клип убран");
+    ed.say(if (linked) lang.t("связка убрана целиком") else lang.t("клип убран"));
     refresh();
 }
 
 /// Вырезать от указателя до конца выбранного клипа и сдвинуть остальное.
 fn rippleFromPlayhead() void {
     if (!ed.has_selection) {
-        ed.say("сначала выберите клип: вырезать надо из чего-то");
+        ed.say(lang.t("сначала выберите клип: вырезать надо из чего-то"));
         refresh();
         return;
     }
@@ -3604,43 +3617,43 @@ fn rippleFromPlayhead() void {
     if (ed.sel_clip >= track.count) return;
     const clip = track.clips[ed.sel_clip];
     if (!clip.covers(ed.playhead_ns)) {
-        ed.say("указатель не внутри выбранного клипа");
+        ed.say(lang.t("указатель не внутри выбранного клипа"));
         refresh();
         return;
     }
     ed.project.ripple(ed.sel_track, ed.playhead_ns, clip.endsAt()) catch |err| return complain(err);
     ed.has_selection = false;
-    ed.say("участок вырезан, остальное подтянуто");
+    ed.say(lang.t("участок вырезан, остальное подтянуто"));
     refresh();
 }
 
 fn compactSelected() void {
     if (!ed.has_selection) {
-        ed.say("сначала выберите дорожку, ткнув в её клип");
+        ed.say(lang.t("сначала выберите дорожку, ткнув в её клип"));
         refresh();
         return;
     }
     ed.project.compact(ed.sel_track) catch |err| return complain(err);
-    ed.say("клипы собраны встык");
+    ed.say(lang.t("клипы собраны встык"));
     refresh();
 }
 
 fn undoStep() void {
     if (!ed.project.undo()) {
-        ed.say("отменять нечего");
+        ed.say(lang.t("отменять нечего"));
     } else {
         ed.has_selection = false;
-        ed.say("отменено");
+        ed.say(lang.t("отменено"));
     }
     refresh();
 }
 
 fn redoStep() void {
     if (!ed.project.redo()) {
-        ed.say("возвращать нечего");
+        ed.say(lang.t("возвращать нечего"));
     } else {
         ed.has_selection = false;
-        ed.say("возвращено");
+        ed.say(lang.t("возвращено"));
     }
     refresh();
 }
@@ -3685,7 +3698,7 @@ fn onDown(x: i32, y: i32) void {
             // При сильном приближении точка ползунка — десятки экранов:
             // говорим, чем ехать точнее.
             if (view_mod.thumbTooCoarse(span, visibleNs(rect.right), totalNs())) {
-                ed.say("ползунок грубый при таком приближении: тяните таймлайн средней кнопкой, листайте PageUp/PageDown");
+                ed.say(lang.t("ползунок грубый при таком приближении: тяните таймлайн средней кнопкой, листайте PageUp/PageDown"));
             }
         } else {
             // Щёлкнули мимо — листаем на страницу в ту сторону.
@@ -3784,9 +3797,9 @@ fn onDown(x: i32, y: i32) void {
             const on = ed.project.tracks[hit.track].curve_on;
             ed.project.setCurveOn(hit.track, !on) catch {};
             ed.say(if (!on)
-                "кривая громкости включена: щёлкните по линии, чтобы поставить точку"
+                lang.t("кривая громкости включена: щёлкните по линии, чтобы поставить точку")
             else
-                "кривая громкости выключена; нарисованное осталось на месте");
+                lang.t("кривая громкости выключена; нарисованное осталось на месте"));
         },
         .curve_point => {
             ed.cur_track = hit.track;
@@ -3803,7 +3816,7 @@ fn onDown(x: i32, y: i32) void {
             const top = ed.view.laneTop(hit.track);
             const db = view_mod.curveDbAt(top, toLane(y));
             ed.curve_point = ed.project.addCurvePoint(hit.track, hit.when_ns, db) catch {
-                ed.say("точек на кривой больше не помещается");
+                ed.say(lang.t("точек на кривой больше не помещается"));
                 refresh();
                 return;
             };
@@ -3822,7 +3835,7 @@ fn setGainFromX(track_index: usize, x: i32) void {
 
     var buf: [32]u8 = undefined;
     var say: [96]u8 = undefined;
-    const line_text = std.fmt.bufPrint(&say, "громкость дорожки: {s}", .{
+    const line_text = lang.print(&say, "громкость дорожки: {s}", .{
         timeline.Volume.text(&buf, want),
     }) catch return;
     ed.say(line_text);
@@ -3844,7 +3857,7 @@ fn moveCurvePoint(x: i32, y: i32) void {
 
     var buf: [32]u8 = undefined;
     var say: [96]u8 = undefined;
-    const line_text = std.fmt.bufPrint(&say, "точка кривой: {s}", .{
+    const line_text = lang.print(&say, "точка кривой: {s}", .{
         timeline.Volume.text(&buf, db),
     }) catch return;
     ed.say(line_text);
@@ -4040,7 +4053,7 @@ fn onRightDown(x: i32, y: i32) void {
         // Правая кнопка по пустой линейке ставит метку там, куда ткнули:
         // это самое частое действие, и оно должно быть в одно движение.
         const where = ed.project.addMark(hit.when_ns, takeMarkColour(), "") catch {
-            ed.say("меток больше не помещается: уберите ненужные");
+            ed.say(lang.t("меток больше не помещается: уберите ненужные"));
             refresh();
             return;
         };
@@ -4059,7 +4072,7 @@ fn onRightDown(x: i32, y: i32) void {
         _ = c.GetCursorPos(&where);
         const picked = showIconMenu(where, ed.project.tracks[hit.track].icon) orelse return;
         ed.project.setTrackIcon(hit.track, picked) catch return;
-        ed.say(if (picked == .none) "значок дорожки убран" else picked.label());
+        ed.say(if (picked == .none) lang.t("значок дорожки убран") else picked.label());
         refresh();
         return;
     }
@@ -4069,7 +4082,7 @@ fn onRightDown(x: i32, y: i32) void {
         const now = ed.project.tracks[hit.track].clips[hit.clip].icon;
         const picked = showIconMenu(where, now) orelse return;
         ed.project.setClipIcon(hit.track, hit.clip, picked) catch return;
-        ed.say(if (picked == .none) "значок клипа убран" else picked.label());
+        ed.say(if (picked == .none) lang.t("значок клипа убран") else picked.label());
         refresh();
         return;
     }
@@ -4077,7 +4090,7 @@ fn onRightDown(x: i32, y: i32) void {
     if (hit.target != .curve_point) return;
 
     ed.project.removeCurvePoint(hit.track, hit.point) catch return;
-    ed.say("точка кривой убрана");
+    ed.say(lang.t("точка кривой убрана"));
     refresh();
 }
 
@@ -4087,8 +4100,8 @@ fn onUp() void {
         if (ed.drag_started) {
             const alone = ed.drag_apart;
             ed.say(switch (ed.drag) {
-                .clip => if (alone) "клип переставлен отдельно от связки" else "клип переставлен",
-                .trim_left, .trim_right => if (alone) "клип обрезан отдельно от связки" else "клип обрезан",
+                .clip => if (alone) lang.t("клип переставлен отдельно от связки") else lang.t("клип переставлен"),
+                .trim_left, .trim_right => if (alone) lang.t("клип обрезан отдельно от связки") else lang.t("клип обрезан"),
                 else => "",
             });
         }
@@ -4145,7 +4158,7 @@ fn onDrop(drop: usize) void {
 
     if (added > 1) {
         var buf: [128]u8 = undefined;
-        ed.say(std.fmt.bufPrint(&buf, "добавлено файлов: {d}", .{added}) catch "файлы добавлены");
+        ed.say(lang.print(&buf, "добавлено файлов: {d}", .{added}) catch lang.t("файлы добавлены"));
         refresh();
     }
 }
@@ -4197,7 +4210,7 @@ fn fullFrame() ?Shot {
     const sources = ed.project.sourceList();
     if (clip.source >= sources.len) return null;
 
-    ed.say("снимаю в полном размере…");
+    ed.say(lang.t("снимаю в полном размере…"));
     refresh();
 
     var p = player_mod.Player.open(ed.allocator, sources[clip.source].fullPath()) catch return null;
@@ -4226,7 +4239,7 @@ fn saveFrame() void {
     // Поэтому файл открывается заново, на один кадр. Это дольше, и об этом
     // сказано в строке состояния.
     const frame = fullFrame() orelse {
-        ed.say("снимать нечего: поставьте указатель на клип");
+        ed.say(lang.t("снимать нечего: поставьте указатель на клип"));
         refresh();
         return;
     };
@@ -4234,7 +4247,7 @@ fn saveFrame() void {
     const p = &frame;
 
     const dir = ui.defaultDir(ed.allocator) catch {
-        ed.say("не нашлась папка записей — снимок не сохранён");
+        ed.say(lang.t("не нашлась папка записей — снимок не сохранён"));
         refresh();
         return;
     };
@@ -4250,7 +4263,7 @@ fn saveFrame() void {
 
     var path_buf: [1024]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ dir, name }) catch {
-        ed.say("слишком длинный путь — снимок не сохранён");
+        ed.say(lang.t("слишком длинный путь — снимок не сохранён"));
         refresh();
         return;
     };
@@ -4259,23 +4272,23 @@ fn saveFrame() void {
     // ширине кадра. Это делает `copyRows`, и на этом же стоит рисование.
     const bytes = png.fromBgra(ed.allocator, p.pixels, p.width, p.height, @as(usize, p.width) * 4) catch |err| {
         var buf: [128]u8 = undefined;
-        ed.say(std.fmt.bufPrint(&buf, "снимок не собрался: {s}", .{@errorName(err)}) catch "снимок не собрался");
+        ed.say(lang.print(&buf, "снимок не собрался: {s}", .{@errorName(err)}) catch lang.t("снимок не собрался"));
         refresh();
         return;
     };
     defer ed.allocator.free(bytes);
 
     if (!writeWholeFile(path, bytes)) {
-        ed.say("снимок не записался: нет доступа к папке записей");
+        ed.say(lang.t("снимок не записался: нет доступа к папке записей"));
         refresh();
         return;
     }
 
     var buf: [320]u8 = undefined;
-    ed.say(std.fmt.bufPrint(&buf, "снимок сохранён: {s} ({d} КБ)", .{
+    ed.say(lang.print(&buf, "снимок сохранён: {s} ({d} КБ)", .{
         name,
         (bytes.len + 1023) / 1024,
-    }) catch "снимок сохранён");
+    }) catch lang.t("снимок сохранён"));
     refresh();
 }
 
@@ -4332,7 +4345,7 @@ fn onDoubleClick(x: i32, y: i32) void {
 fn startRename(track_index: usize) void {
     if (ed.name_box != null) return;
     if (track_index >= ed.project.track_count) {
-        ed.say("нечего переименовывать: сначала добавьте дорожку");
+        ed.say(lang.t("нечего переименовывать: сначала добавьте дорожку"));
         refresh();
         return;
     }
@@ -4356,7 +4369,7 @@ fn startRename(track_index: usize) void {
     _ = c.SendMessageW(box, c.EM_SETSEL, 0, -1);
     _ = c.SetFocus(box);
 
-    ed.say("новое имя, затем Enter; Esc — оставить как было");
+    ed.say(lang.t("новое имя, затем Enter; Esc — оставить как было"));
     refresh();
 }
 
@@ -4423,18 +4436,18 @@ fn finishRename(accept: bool) void {
     if (accept and of_take) {
         // Пустая заметка — тоже заметка: её стирают.
         ed.project.setSourceNote(ed.name_take_source, typed) catch {
-            ed.say("заметка не принята");
+            ed.say(lang.t("заметка не принята"));
             refresh();
             return;
         };
-        ed.say(if (typed.len > 0) "заметка к дублю записана" else "заметка стёрта");
+        ed.say(if (typed.len > 0) lang.t("заметка к дублю записана") else lang.t("заметка стёрта"));
         refresh();
         return;
     }
     if (accept and typed.len > 0) {
         if (ed.name_of_mark and ed.name_is_note) {
             ed.project.setMarkComment(ed.name_mark, typed) catch {
-                ed.say("комментарий не принят");
+                ed.say(lang.t("комментарий не принят"));
                 refresh();
                 return;
             };
@@ -4444,7 +4457,7 @@ fn finishRename(accept: bool) void {
         }
         if (ed.name_of_mark) {
             ed.project.renameMark(ed.name_mark, typed) catch {
-                ed.say("имя не принято");
+                ed.say(lang.t("имя не принято"));
                 refresh();
                 return;
             };
@@ -4453,13 +4466,13 @@ fn finishRename(accept: bool) void {
             return;
         }
         ed.project.renameTrack(ed.name_track, typed) catch {
-            ed.say("имя не принято");
+            ed.say(lang.t("имя не принято"));
             refresh();
             return;
         };
-        ed.say("дорожка переименована");
+        ed.say(lang.t("дорожка переименована"));
     } else {
-        ed.say("имя оставлено прежним");
+        ed.say(lang.t("имя оставлено прежним"));
     }
     refresh();
 }
@@ -4570,7 +4583,7 @@ fn recentMenu(list: *const recent_mod.List, base_id: c_int) c.HMENU {
     const menu = c.CreatePopupMenu();
     if (menu == null) return menu;
     if (list.count == 0) {
-        _ = c.AppendMenuW(menu, c.MF_STRING | c.MF_GRAYED, 0, ui.wide("пока пусто"));
+        _ = c.AppendMenuW(menu, c.MF_STRING | c.MF_GRAYED, 0, lang.tw("пока пусто"));
         return menu;
     }
 
@@ -4581,7 +4594,7 @@ fn recentMenu(list: *const recent_mod.List, base_id: c_int) c.HMENU {
         var text: [400]u8 = undefined;
         const shown = std.fmt.bufPrint(&text, "{s}{s}", .{
             std.fs.path.basename(path),
-            if (here) "" else "  — нет на месте",
+            if (here) "" else lang.t("  — нет на месте"),
         }) catch std.fs.path.basename(path);
 
         var wide_buf: [512]u16 = undefined;
@@ -4600,29 +4613,29 @@ fn buildMenu(hwnd: c.HWND) void {
     if (bar == null) return;
 
     const file_menu = c.CreatePopupMenu();
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open, ui.wide("Открыть…\tCtrl+O"));
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save, ui.wide("Сохранить проект\tCtrl+S"));
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_as, ui.wide("Сохранить как…\tCtrl+Shift+S"));
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_bundle, ui.wide("Собрать всё в один файл…"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_open, lang.tw("Открыть…\tCtrl+O"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save, lang.tw("Сохранить проект\tCtrl+S"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_as, lang.tw("Сохранить как…\tCtrl+Shift+S"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_save_bundle, lang.tw("Собрать всё в один файл…"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_mixdown, ui.wide("Свести звук в WAV…"));
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_export, ui.wide("Экспорт в mp4…\tCtrl+E"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_mixdown, lang.tw("Свести звук в WAV…"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_export, lang.tw("Экспорт в mp4…\tCtrl+E"));
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
     _ = c.AppendMenuW(
         file_menu,
         c.MF_POPUP,
         @intFromPtr(recentMenu(&ed.recent.recorded, id_recent_rec)),
-        ui.wide("Недавно записанные"),
+        lang.tw("Недавно записанные"),
     );
     _ = c.AppendMenuW(
         file_menu,
         c.MF_POPUP,
         @intFromPtr(recentMenu(&ed.recent.viewed, id_recent_view)),
-        ui.wide("Недавно просмотренные"),
+        lang.tw("Недавно просмотренные"),
     );
     _ = c.AppendMenuW(file_menu, c.MF_SEPARATOR, 0, null);
-    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_close, ui.wide("Закрыть"));
-    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(file_menu), ui.wide("Файл"));
+    _ = c.AppendMenuW(file_menu, c.MF_STRING, id_menu_close, lang.tw("Закрыть"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(file_menu), lang.tw("Файл"));
 
     // «Вид» — про то, что показано в окне, а не про то, что сделано
     // с проектом. Класть панель меток в «Файл» значило бы смешать одно
@@ -4632,21 +4645,21 @@ fn buildMenu(hwnd: c.HWND) void {
         view_menu,
         if (ed.marks_open and !ed.panel_takes) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
         id_menu_marks,
-        ui.wide("Окно меток\tCtrl+M"),
+        lang.tw("Окно меток\tCtrl+M"),
     );
     _ = c.AppendMenuW(
         view_menu,
         if (ed.marks_open and ed.panel_takes) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
         id_menu_takes,
-        ui.wide("Окно дублей\tCtrl+D"),
+        lang.tw("Окно дублей\tCtrl+D"),
     );
     _ = c.AppendMenuW(
         view_menu,
         if (ed.cursor_layer_on) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
         id_menu_cursor_layer,
-        ui.wide("Курсор из слоя событий"),
+        lang.tw("Курсор из слоя событий"),
     );
-    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(view_menu), ui.wide("Вид"));
+    _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(view_menu), lang.tw("Вид"));
 
     const old = c.GetMenu(hwnd);
     _ = c.SetMenu(hwnd, bar);
@@ -4659,7 +4672,7 @@ fn openFromRecent(list: *const recent_mod.List, index: usize) void {
     const path = list.at(index);
     if (path.len == 0) return;
     if (!recent_mod.onDisk(path)) {
-        ed.say("файла нет на месте");
+        ed.say(lang.t("файла нет на месте"));
         refresh();
         return;
     }
@@ -4710,7 +4723,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
             loadRecent();
             buildMenu(hwnd);
 
-            ed.say("откройте файл, перетащите его сюда мышью или добавьте дорожку");
+            ed.say(lang.t("откройте файл, перетащите его сюда мышью или добавьте дорожку"));
             refresh();
             return 0;
         },
@@ -5019,9 +5032,9 @@ fn runInner(allocator: std.mem.Allocator, path: ?[]const u8, report: ?*ui.Layout
     if (c.RegisterClassExW(&wc) == 0) return error.WindowFailed;
 
     var title_buf: [128]u8 = undefined;
-    const title = std.fmt.bufPrint(&title_buf, "Zig-Rec Studio — редактор v{s}", .{
+    const title = lang.print(&title_buf, "Zig-Rec Studio — редактор v{s}", .{
         @import("../version.zig").VERSION,
-    }) catch "Zig-Rec Studio — редактор";
+    }) catch lang.t("Zig-Rec Studio — редактор");
     var title_w: [128]u16 = undefined;
     const tn = try std.unicode.utf8ToUtf16Le(&title_w, title);
     title_w[tn] = 0;
@@ -5054,7 +5067,7 @@ fn runInner(allocator: std.mem.Allocator, path: ?[]const u8, report: ?*ui.Layout
 
     // Декодер поднимаем после окна: ему есть куда стучаться только теперь.
     ed.frames.start(frameArrived, null) catch {
-        ed.say("декодер не завёлся: кадры показываться не будут");
+        ed.say(lang.t("декодер не завёлся: кадры показываться не будут"));
     };
 
     _ = c.ShowWindow(hwnd, c.SW_SHOW);

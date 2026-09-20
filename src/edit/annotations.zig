@@ -7,6 +7,7 @@
 //! кадр в экспорте разного размера, а аннотация должна стоять там же.
 //! Правила здесь — без окна, с тестами.
 const std = @import("std");
+const lang = @import("../lang.zig");
 const marks = @import("marks.zig");
 
 pub const max_annotations = 32;
@@ -34,9 +35,9 @@ pub const Kind = enum {
 
     pub fn label(self: Kind) []const u8 {
         return switch (self) {
-            .text => "текст",
-            .arrow => "стрелка",
-            .callout => "выноска",
+            .text => lang.t("текст"),
+            .arrow => lang.t("стрелка"),
+            .callout => lang.t("выноска"),
         };
     }
 };
