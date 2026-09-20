@@ -428,6 +428,16 @@ pub const Capturer = struct {
         }
     }
 
+    /// Снятое до этого момента не отдавать (#95). Зовут после паузы записи:
+    /// у GDI кадр из потока захвата пережил бы паузу со старой меткой времени.
+    /// DXGI кадров впрок не держит — ему сбрасывать нечего.
+    pub fn flush(self: *Capturer) void {
+        switch (self.which) {
+            .dxgi => {},
+            .gdi => |*g| g.flush(),
+        }
+    }
+
     pub fn next(self: *Capturer, timeout_ms: u32) Error!?Frame {
         switch (self.which) {
             .gdi => |*g| return g.next(timeout_ms),

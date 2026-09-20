@@ -391,7 +391,11 @@ pub const Recorder = struct {
             const now = win32.nowNs();
             const want_pause = self.want_pause.load(.acquire);
             if (want_pause != clock.isPaused()) {
-                if (want_pause) clock.pause(now) else clock.@"resume"(now);
+                if (want_pause) clock.pause(now) else {
+                    clock.@"resume"(now);
+                    // Кадр, снятый до паузы, после неё уже не годится (#95).
+                    cap.flush();
+                }
                 self.setState(if (want_pause) .paused else .recording);
             }
             if (clock.isPaused()) {
