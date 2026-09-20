@@ -52,6 +52,10 @@ pub const rec_dot = @import("capture/rec_dot.zig");
 pub const recorder = @import("app/recorder.zig");
 pub const source = @import("capture/source.zig");
 pub const gdi = @import("capture/gdi.zig");
+// Плагин-источник: живая камера Ivideon (тикет #74).
+pub const ivideon = @import("net/ivideon.zig");
+pub const camera = @import("capture/camera.zig");
+pub const camera_view = @import("app/camera_view.zig");
 pub const encode = @import("file/encode.zig");
 pub const mp4 = @import("file/mp4.zig");
 pub const audio = @import("sound/audio.zig");

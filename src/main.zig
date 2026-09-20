@@ -219,6 +219,9 @@ pub fn main(init: std.process.Init) !void {
             try w.print("окно не открылось: {s}\n", .{@errorName(err)});
             code = 1;
         };
+    } else if (eq(cmd, "camera") or eq(cmd, "камера")) {
+        try w.flush();
+        code = try zigrec.camera_view.runArgs(init.io, arena, args[2..]);
     } else if (benches and eq(cmd, "animate")) {
         const secs = argInt(args, 2, 10);
         const width = argInt(args, 3, 640);
