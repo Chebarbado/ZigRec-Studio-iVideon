@@ -67,6 +67,7 @@ const id_menu_close = 303;
 const id_menu_mixdown = 306;
 const id_menu_export = 319;
 const id_menu_cursor_layer = 320;
+const id_menu_keyframes = 321;
 const id_menu_marks = 310;
 const id_menu_takes = 318;
 /// Номера строк в списках недавних. Два ряда подряд, по одному на список.
@@ -252,6 +253,9 @@ const Editor = struct {
     layers: [timeline.max_sources]?events_mod.Events = @splat(null),
     /// Показывать курсор из слоя поверх кадра.
     cursor_layer_on: bool = true,
+    /// Показывать ключевые кадры (I-кадры, ≈1 из 25) метками на видеодорожке.
+    /// Включено по умолчанию.
+    show_keyframes: bool = true,
 
     /// Дорожка, с которой работают: её переименовывает F2.
     cur_track: usize = 0,
@@ -950,7 +954,7 @@ fn drawClips(dc: c.HDC, track: timeline.Track, track_index: usize, top: i32, wid
         const rect = c.RECT{ .left = left, .top = top + 4, .right = right, .bottom = top + view_mod.lane_h - 4 };
         solid(dc, rect, if (track.muted) col_muted else body);
         if (track.kind == .video and !track.muted) {
-            drawKeyTicks(dc, clip, rect);
+            if (ed.show_keyframes) drawKeyTicks(dc, clip, rect);
             if (ed.cursor_layer_on) drawClickTicks(dc, clip, rect);
         }
 
@@ -1554,6 +1558,13 @@ fn toggleCursorLayer() void {
     saveMarksPanel();
     buildMenu(ed.hwnd);
     ed.say(if (ed.cursor_layer_on) lang.t("курсор из слоя событий показывается поверх кадра") else lang.t("курсор из слоя скрыт"));
+    refresh();
+}
+
+fn toggleKeyframes() void {
+    ed.show_keyframes = !ed.show_keyframes;
+    buildMenu(ed.hwnd);
+    ed.say(if (ed.show_keyframes) lang.t("ключевые кадры показываются на дорожке") else lang.t("ключевые кадры скрыты"));
     refresh();
 }
 
@@ -4661,6 +4672,12 @@ fn buildMenu(hwnd: c.HWND) void {
         id_menu_cursor_layer,
         lang.tw("Курсор из слоя событий"),
     );
+    _ = c.AppendMenuW(
+        view_menu,
+        if (ed.show_keyframes) c.MF_STRING | c.MF_CHECKED else c.MF_STRING,
+        id_menu_keyframes,
+        lang.tw("Ключевые кадры на дорожке"),
+    );
     _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(view_menu), lang.tw("Вид"));
 
     const old = c.GetMenu(hwnd);
@@ -4753,6 +4770,7 @@ fn wndProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wina
                 id_menu_marks => toggleMarksPanel(),
                 id_menu_takes => toggleTakesPanel(),
                 id_menu_cursor_layer => toggleCursorLayer(),
+                id_menu_keyframes => toggleKeyframes(),
                 id_menu_close => _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0),
                 id_recent_rec...id_recent_rec + recent_mod.max_items - 1 => {
                     openFromRecent(&ed.recent.recorded, @intCast((wp & 0xFFFF) - id_recent_rec));

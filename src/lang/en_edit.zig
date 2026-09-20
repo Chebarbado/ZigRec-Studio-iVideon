@@ -337,4 +337,7 @@ pub const pairs = [_]Pair{
     .{ "Дорожка", "Track" },
     .{ "дорожка", "track" },
     .{ "метка {d}", "mark {d}" },
+    .{ "Ключевые кадры на дорожке", "Keyframes on the track" },
+    .{ "ключевые кадры показываются на дорожке", "keyframes are shown on the track" },
+    .{ "ключевые кадры скрыты", "keyframes are hidden" },
 };
