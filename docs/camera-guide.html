@@ -1,0 +1,181 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Гайд: программа для камеры — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="How to build an Ivideon camera app: cloud login and the direct-connection research.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="on" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main">
+<span class="pill"><span class="ru">Гайд</span><span class="en">Guide</span></span>
+<h1><span class="ru">Как написать программу для камеры Ivideon</span><span class="en">How to build an Ivideon camera app</span></h1>
+<div class="banner"><span class="ru">Два пути: (1) через облако по логину и паролю — рабочий, проверенный; (2) прямое подключение к камере — исследование не закончено. Работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">Two paths: (1) via the cloud with a login and password — working and verified; (2) a direct connection to the camera — research still open. Use it only with your own account and your own camera.</span></div>
+
+<h2><span class="ru">1. Через облако (login:pass) — рабочий путь</span><span class="en">1. Via the cloud (login:pass) — the working path</span></h2>
+<div class="ru"><p>Живое видео идёт через облако Ivideon. Шесть шагов:</p></div>
+<div class="en"><p>Live video goes through the Ivideon cloud. Six steps:</p></div>
+
+<h3><span class="ru">Шаг 1 — вход</span><span class="en">Step 1 — sign in</span></h3>
+<div class="ru"><p>OAuth2 password-grant, публичный клиент <code>android-client</code> с пустым секретом. <code>api.ivideon.com</code> редиректит на живой хост авторизации <code>openapi-alpha-eu01.ivideon.com</code>.</p></div>
+<div class="en"><p>OAuth2 password grant, public client <code>android-client</code> with an empty secret. <code>api.ivideon.com</code> redirects to the live auth host <code>openapi-alpha-eu01.ivideon.com</code>.</p></div>
+<pre>POST https://openapi-alpha-eu01.ivideon.com/auth/oauth/token?client_id=android-client
+Authorization: Basic YW5kcm9pZC1jbGllbnQ6      # base64("android-client:")
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&username=EMAIL&password=PASS
+&client_type=android&client_version=3.7.1
+&device_instance_id=UUID&device_type=...&device_name=...&trusted_device=true</pre>
+
+<h3><span class="ru">Шаг 2 — двухфакторная авторизация (если включена)</span><span class="en">Step 2 — two-factor auth (if enabled)</span></h3>
+<div class="ru"><p>Ответ приходит <b>200</b> с <code>proceed_with_2fa</code>, <code>challenge_token</code>, <code>api5_host</code> и списком методов (SMS/email). Выбираем метод — сервер шлёт код — отправляем код:</p></div>
+<div class="en"><p>The response is <b>200</b> with <code>proceed_with_2fa</code>, <code>challenge_token</code>, <code>api5_host</code> and a list of methods (SMS/email). Select a method — the server sends a code — submit it:</p></div>
+<pre>POST https://{api5_host}/two_factor_methods/{id}?op=SELECT   {"challenge_token": "..."}
+POST https://{api5_host}/two_factor_methods/{id}/code?op=SUBMIT   {"challenge_token": "...", "code": "123456"}   → token</pre>
+
+<h3><span class="ru">Шаг 3 — токен</span><span class="en">Step 3 — the token</span></h3>
+<div class="ru"><p>В ответе: <code>access_token</code>, <code>refresh_token</code>, <b><code>hmac_secret</code></b> (ключ подписи стримов) и <b><code>api_host</code></b> (база для всех дальнейших запросов).</p></div>
+<div class="en"><p>The response has <code>access_token</code>, <code>refresh_token</code>, <b><code>hmac_secret</code></b> (the stream-signing key) and <b><code>api_host</code></b> (the base for every later request).</p></div>
+
+<h3><span class="ru">Шаг 4 — список камер</span><span class="en">Step 4 — the camera list</span></h3>
+<pre>POST https://{api_host}/servers?op=FIND&access_token=TOKEN
+{"projection": { ... }, "include_all": true}
+→ {"success": true, "result": {"items": [ { "id": "100-...:0", "name": "...", "online": true, ... } ]}}</pre>
+<div class="ru"><p>id камеры — вида <code>&lt;сервер&gt;:&lt;индекс&gt;</code>.</p></div>
+<div class="en"><p>The camera id looks like <code>&lt;server&gt;:&lt;index&gt;</code>.</p></div>
+
+<h3><span class="ru">Шаг 5 — подписанный URL потока</span><span class="en">Step 5 — the signed stream URL</span></h3>
+<div class="ru"><p>К URL добавляются <code>access_token</code> и <code>cseq</code>, затем считается <code>cs</code>:</p></div>
+<div class="en"><p>Add <code>access_token</code> and <code>cseq</code> to the URL, then compute <code>cs</code>:</p></div>
+<pre>path  = /cameras/{id}/live_stream
+query = q=1&video_codecs=h265,h264&audio_codecs=pcmu,pcma,aac,mp3&access_token=TOKEN&cseq=SESSION:COUNTER
+        # SESSION = 8 симв [0-9a-zA-Z] / 8 chars ; COUNTER = монотонные мс / monotonic ms ; query — URL-кодирован
+cs    = hex( HMAC_SHA1( hmac_secret, hex( SHA1( "GET:" + path + ":" + query + ":" ) ) ) )
+URL   = https://{api_host}{path}?{query}&cs={cs}</pre>
+
+<h3><span class="ru">Шаг 6 — видео</span><span class="en">Step 6 — the video</span></h3>
+<div class="ru"><p>Тело ответа этого URL — <b>FLV поверх HTTPS</b> с H.264/H.265 и звуком AAC/G.711. Открывается плеером/ffmpeg напрямую. Отдельный кадр (JPEG): <code>GET /cameras/{id}/live_preview?q=</code>.</p></div>
+<div class="en"><p>The body of that URL is <b>FLV over HTTPS</b> with H.264/H.265 and AAC/G.711 audio. It opens in a player/ffmpeg directly. A single frame (JPEG): <code>GET /cameras/{id}/live_preview?q=</code>.</p></div>
+<pre># ffmpeg / ffplay открывает подписанный URL как есть / opens the signed URL as-is:
+ffplay "https://{api_host}/cameras/{id}/live_stream?...&cs=..."
+ffmpeg -i "https://...&cs=..." -c copy out.mp4</pre>
+<div class="ru"><p>Готовые реализации: <code>watch_camera.py</code> (вход + 2FA + подпись, Python) и модули Zig <code>src/net/ivideon.zig</code>, <code>src/capture/camera.zig</code>. Точные поля и подводные камни кодирования — в разделах <a href="03-auth.html">Авторизация</a>, <a href="05-url-signing.html">Подпись URL</a>, <a href="07-video.html">Видео</a>.</p></div>
+<div class="en"><p>Ready implementations: <code>watch_camera.py</code> (login + 2FA + signing, Python) and the Zig modules <code>src/net/ivideon.zig</code>, <code>src/capture/camera.zig</code>. Exact fields and encoding pitfalls are in <a href="03-auth.html">Authorization</a>, <a href="05-url-signing.html">URL signing</a>, <a href="07-video.html">Video</a>.</p></div>
+
+<h2><span class="ru">2. Прямое подключение к камере — исследование (не закончено)</span><span class="en">2. Direct connection to the camera — research (unfinished)</span></h2>
+<div class="ru"><p><b>Что выяснено:</b></p>
+<ul>
+<li>Ivideon <b>Cute 2 — OEM камеры Huacheng/EZVIZ</b> (семейство Hikvision): MAC OUI <code>30:24:50</code> её Wi-Fi-точки → Hangzhou Huacheng Network Technology.</li>
+<li>В режиме настройки камера поднимает <b>собственную Wi-Fi-точку</b> <code>Camera-&lt;serial&gt;</code> (WPA2), рядом (сигнал 95%).</li>
+<li>По <b>USB</b> камера не отдаёт ничего — на USB не перечисляется никак, кабель только для питания.</li>
+</ul>
+<p><b>Гипотезы (не подтверждены):</b></p>
+<ul>
+<li><b>Локальный RTSP</b> по схеме EZVIZ: <code>rtsp://admin:&lt;verification-code&gt;@&lt;ip&gt;:554/H.264</code> (или <code>/Streaming/Channels/101</code>).</li>
+<li><b>ONVIF</b> (порт 80/8000, WS-Discovery → <code>GetStreamUri</code>).</li>
+<li><b>Локальный HTTP setup-API</b> EZVIZ.</li>
+</ul>
+<p><b>Что помешало проверить:</b> пароль точки (verification code) не на основной наклейке (там S/N и MAC); активный VPN заворачивал локальную сеть в туннель.</p>
+<p><b>Статус: открыто.</b> Если фирменная прошивка Ivideon не заблокировала локальный доступ — картинку можно получить <b>без облака</b>. Детали и план проверки — в <a href="09-camera-attachment.html">Привязке камеры</a> и <a href="13-open-questions.html">Открытых вопросах</a>.</p></div>
+<div class="en"><p><b>What we found:</b></p>
+<ul>
+<li>The Ivideon <b>Cute 2 is an OEM of a Huacheng/EZVIZ camera</b> (Hikvision family): the MAC OUI <code>30:24:50</code> of its Wi-Fi AP resolves to Hangzhou Huacheng Network Technology.</li>
+<li>In setup mode the camera raises its <b>own Wi-Fi AP</b> <code>Camera-&lt;serial&gt;</code> (WPA2), right next to the PC (95% signal).</li>
+<li>Over <b>USB</b> the camera exposes nothing — it does not enumerate on USB at all; the cable is power only.</li>
+</ul>
+<p><b>Hypotheses (not confirmed):</b></p>
+<ul>
+<li><b>Local RTSP</b>, the EZVIZ way: <code>rtsp://admin:&lt;verification-code&gt;@&lt;ip&gt;:554/H.264</code> (or <code>/Streaming/Channels/101</code>).</li>
+<li><b>ONVIF</b> (port 80/8000, WS-Discovery → <code>GetStreamUri</code>).</li>
+<li>A local <b>EZVIZ HTTP setup API</b>.</li>
+</ul>
+<p><b>What blocked verification:</b> the AP password (the verification code) is not on the main label (which has only the S/N and MAC); an active VPN routed the local network into its tunnel.</p>
+<p><b>Status: open.</b> If Ivideon's OEM firmware did not disable local access, the picture can be obtained <b>without the cloud</b>. Details and a check plan are in <a href="09-camera-attachment.html">Camera attachment</a> and <a href="13-open-questions.html">Open questions</a>.</p></div>
+</main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

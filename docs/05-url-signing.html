@@ -1,0 +1,250 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Подпись URL — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="The cseq/cs algorithm, encoding pitfalls, a Python reference implementation, test vectors.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="on" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Подпись URL</span><span class="en">URL signing</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: The cseq/cs algorithm, encoding pitfalls, a Python reference implementation, test vectors.</span></div>
+<p><strong>Теги:</strong> #подпись_URL #HMAC #SHA1 #cseq #OkHttp #тестовые_векторы</p>
+<p>Запросы к видео и превью (<code>live_stream</code>, <code>archive_stream</code>, <code>live_preview</code>) приложение отправляет не через свой HTTP-клиент, а <strong>строит URL и отдаёт его плееру/загрузчику картинок</strong>. Чтобы такой URL нельзя было подделать или переиспользовать, он подписывается секретом <code>hmac_secret</code> из токена.</p>
+<p>Достоверность: алгоритм — <strong>[код]</strong>; то, что сервер действительно проверяет подпись и как реагирует на ошибку, — <strong>не проверено</strong>.</p>
+<h2 id="51">5.1. Когда подпись добавляется</h2>
+<p>Источник: <code>p000/g58.java</code>, метод <code>mo7583n</code> (строки 396–467).</p>
+<p>Подпись добавляется, только если выполнены оба условия (строка 431):</p>
+<ol>
+<li>метод сервиса помечен <code>@l85</code>. Таких методов три:
+   * <code>GET /cameras/{cameraId}/live_stream</code> — <code>p000/InterfaceC2236lu.java:78</code>
+   * <code>GET /cameras/{cameraId}/archive_stream</code> — <code>p000/InterfaceC2236lu.java:105</code>
+   * <code>GET /cameras/{cameraId}/live_preview</code> — <code>p000/InterfaceC2345or.java:12</code></li>
+<li>в токене есть непустой <code>hmac_secret</code> (флаг <code>C2470s2.f38388n</code>, вычисляется в <code>p000/C2470s2.java:21</code>).</li>
+</ol>
+<p>Если <code>hmac_secret</code> пуст — URL уходит только с <code>access_token</code>, без <code>cseq</code> и <code>cs</code>.</p>
+<blockquote>
+<p>Уточнение к первоначальному выводу: <code>live_preview</code> — это <code>@l85</code> (токен в query + подпись), а <strong>не</strong> <code>@zc0</code> (Bearer). Bearer используется для <code>GET /events/{eventId}/thumbnails</code> и для загрузки картинок по готовому URL (<code>InterfaceC2345or.m16309a</code>, <code>m16312d</code>).</p>
+</blockquote>
+<h2 id="52">5.2. Алгоритм</h2>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code>session  = 8 случайных символов из [0-9a-zA-Z]
+           генерируется один раз при создании объекта токена и живёт вместе с ним
+cseq     = session + &quot;:&quot; + counter
+           counter — SystemClock.elapsedRealtime(): миллисекунды с загрузки устройства
+
+1. К URL добавляется query-параметр access_token=&lt;token&gt;      (шаг общий для всех обычных запросов)
+2. К URL добавляется query-параметр cseq=&lt;cseq&gt;
+3. to_sign = METHOD + &quot;:&quot; + path + &quot;:&quot; + query + &quot;:&quot; + body
+4. digest  = hex_lower( SHA1( utf8(to_sign) ) )                 # 40 символов
+5. cs      = hex_lower( HMAC_SHA1( key = utf8(hmac_secret), msg = utf8(digest) ) )
+6. К URL добавляется query-параметр cs=&lt;cs&gt;
+</code></pre></div>
+
+<!-- figure: signing-pipeline | Конвейер подписи стримового URL -->
+
+<p>Детали, на которых легко ошибиться:</p>
+<table>
+<thead>
+<tr>
+<th>элемент</th>
+<th>точное значение</th>
+<th>где в коде</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>METHOD</code></td>
+<td>метод HTTP заглавными: <code>GET</code></td>
+<td><code>g08Var2.f13158b</code>, <code>g58.java:442</code></td>
+</tr>
+<tr>
+<td><code>path</code></td>
+<td><code>"/" + join("/", pathSegments)</code> — <strong>декодированные</strong> сегменты пути OkHttp, с ведущим слэшем. Двоеточие в id камеры (<code>100-…:0</code>) остаётся двоеточием</td>
+<td><code>p000/zbc.java:40-43</code>, <code>ps4.f34839f</code></td>
+</tr>
+<tr>
+<td><code>query</code></td>
+<td><strong>закодированная</strong> строка запроса — подстрока URL после <code>?</code> до <code>#</code>, как она есть в итоговом URL, <strong>уже включая</strong> <code>access_token</code> и <code>cseq</code>, но <strong>без</strong> <code>cs</code></td>
+<td><code>ps4.m17064d()</code>, <code>p000/ps4.java:89-96</code></td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td>тело запроса как строка UTF-8; для GET — пустая строка. Итоговая строка для GET заканчивается двоеточием</td>
+<td><code>g58.java:445-452</code></td>
+</tr>
+<tr>
+<td>разделитель</td>
+<td><code>:</code> (константа <code>StringUtils.PROCESS_POSTFIX_DELIMITER</code> из AppMetrica, равна <code>":"</code>)</td>
+<td><code>g58.java:453</code></td>
+</tr>
+<tr>
+<td>hex</td>
+<td>нижний регистр, без разделителей (<code>%02x</code>)</td>
+<td><code>c70.m2912D(bytes, "", …)</code></td>
+</tr>
+<tr>
+<td>порядок параметров</td>
+<td>исходные параметры → <code>access_token</code> → <code>cseq</code> → <code>cs</code>. <code>cs</code> всегда последний</td>
+<td><code>g58.java:416, 440, 462</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Двойное хеширование — не опечатка.</strong> HMAC считается не от <code>to_sign</code>, а от hex-строки его SHA-1 (40 ASCII-символов).</p>
+<p><strong>Кодирование query.</strong> OkHttp при добавлении параметра (<code>addQueryParameter</code>) percent-кодирует набор <code>QUERY_COMPONENT_ENCODE_SET</code>; нетронутыми остаются только <code>[A-Za-z0-9]</code> и <code>- . _ *</code>. Обратите внимание: тильда <code>~</code> <strong>кодируется</strong> (<code>%7E</code>), хотя большинство библиотек её не трогают. Практически важно: запятая в <code>video_codecs=h265,h264</code> превращается в <code>%2C</code>, двоеточие в <code>cseq</code> — в <code>%3A</code>, пробел — в <code>%20</code>. Подписывается именно закодированная форма, поэтому ваша реализация должна кодировать <strong>так же, как OkHttp</strong>, иначе <code>cs</code> не совпадёт. Реализация <code>zig-client/src/sign.zig</code> кодирует всё, кроме <code>[A-Za-z0-9-._*]</code>, в <code>%XX</code> заглавными hex-цифрами — этого достаточно для всех значений, которые реально встречаются (цифры, <code>h265,h264</code>, токен, <code>cseq</code>).</p>
+<h3 id="session">Генерация <code>session</code></h3>
+<p><code>p000/kr6.java:626-647</code> — восемь раз <code>Random.nextInt(62)</code>, отображение: <code>0–9</code> → цифры, <code>10–35</code> → <code>a–z</code> (<code>i + 87</code>), <code>36–61</code> → <code>A–Z</code> (<code>i + 29</code>). Случайность не криптографическая, и от неё ничего не зависит: это просто идентификатор клиентской сессии.</p>
+<h3 id="counter">Что такое <code>counter</code> <strong>[вывод]</strong></h3>
+<p>Значение монотонно растёт и уникально в пределах <code>session</code>. Вероятное назначение на сервере — защита от повторного использования URL (nonce/последовательность). В своём клиенте используйте любой монотонный счётчик миллисекунд (например, время с запуска процесса или Unix-время в мс). Принимает ли сервер значения «из прошлого» относительно уже виденных для той же <code>session</code> — <strong>неизвестно</strong>; безопаснее никогда не уменьшать счётчик в пределах одной <code>session</code>.</p>
+<h2 id="53-python">5.3. Эталонная реализация (Python)</h2>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #FF4689">import</span><span style="color: #F8F8F2"> hashlib</span><span style="color: #FF4689">,</span><span style="color: #F8F8F2"> hmac</span><span style="color: #FF4689">,</span><span style="color: #F8F8F2"> random</span><span style="color: #FF4689">,</span><span style="color: #F8F8F2"> string</span><span style="color: #FF4689">,</span><span style="color: #F8F8F2"> time</span>
+<span style="color: #FF4689">from</span><span style="color: #F8F8F2"> urllib.parse </span><span style="color: #FF4689">import</span> <span style="color: #F8F8F2">quote</span>
+
+<span style="color: #F8F8F2">SAFE</span> <span style="color: #FF4689">=</span> <span style="color: #E6DB74">&quot;-._*&quot;</span>                       <span style="color: #959077"># вместе с [A-Za-z0-9] — то, что OkHttp не кодирует в query</span>
+
+<span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">enc</span><span style="color: #F8F8F2">(s:</span> <span style="color: #F8F8F2">str)</span> <span style="color: #FF4689">-&gt;</span> <span style="color: #F8F8F2">str:</span>
+    <span style="color: #959077"># пробел -&gt; %20, &#39;,&#39; -&gt; %2C, &#39;:&#39; -&gt; %3A; quote() никогда не кодирует &#39;~&#39;, а OkHttp кодирует</span>
+    <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">quote(s,</span> <span style="color: #F8F8F2">safe</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">SAFE)</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">replace(</span><span style="color: #E6DB74">&quot;~&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">&quot;%7E&quot;</span><span style="color: #F8F8F2">)</span>
+
+<span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">new_session</span><span style="color: #F8F8F2">()</span> <span style="color: #FF4689">-&gt;</span> <span style="color: #F8F8F2">str:</span>
+    <span style="color: #66D9EF">return</span> <span style="color: #E6DB74">&quot;&quot;</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">join(random</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">choices(string</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">digits</span> <span style="color: #FF4689">+</span> <span style="color: #F8F8F2">string</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">ascii_letters,</span> <span style="color: #F8F8F2">k</span><span style="color: #FF4689">=</span><span style="color: #AE81FF">8</span><span style="color: #F8F8F2">))</span>
+
+<span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">signed_url</span><span style="color: #F8F8F2">(base,</span> <span style="color: #F8F8F2">path,</span> <span style="color: #F8F8F2">params,</span> <span style="color: #F8F8F2">access_token,</span> <span style="color: #F8F8F2">hmac_secret,</span> <span style="color: #F8F8F2">session,</span> <span style="color: #F8F8F2">counter,</span>
+               <span style="color: #F8F8F2">method</span><span style="color: #FF4689">=</span><span style="color: #E6DB74">&quot;GET&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #F8F8F2">body</span><span style="color: #FF4689">=</span><span style="color: #E6DB74">&quot;&quot;</span><span style="color: #F8F8F2">):</span>
+    <span style="color: #F8F8F2">pairs</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">list(params)</span> <span style="color: #FF4689">+</span> <span style="color: #F8F8F2">[(</span><span style="color: #E6DB74">&quot;access_token&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #F8F8F2">access_token)]</span>
+    <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">hmac_secret:</span>
+        <span style="color: #F8F8F2">pairs</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">append((</span><span style="color: #E6DB74">&quot;cseq&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">f&quot;{</span><span style="color: #F8F8F2">session</span><span style="color: #E6DB74">}:{</span><span style="color: #F8F8F2">counter</span><span style="color: #E6DB74">}&quot;</span><span style="color: #F8F8F2">))</span>
+    <span style="color: #F8F8F2">query</span> <span style="color: #FF4689">=</span> <span style="color: #E6DB74">&quot;&amp;&quot;</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">join(</span><span style="color: #E6DB74">f&quot;{</span><span style="color: #F8F8F2">enc(k)</span><span style="color: #E6DB74">}={</span><span style="color: #F8F8F2">enc(v)</span><span style="color: #E6DB74">}&quot;</span> <span style="color: #66D9EF">for</span> <span style="color: #F8F8F2">k,</span> <span style="color: #F8F8F2">v</span> <span style="color: #FF4689">in</span> <span style="color: #F8F8F2">pairs)</span>
+    <span style="color: #F8F8F2">url</span> <span style="color: #FF4689">=</span> <span style="color: #E6DB74">f&quot;{</span><span style="color: #F8F8F2">base</span><span style="color: #E6DB74">}{</span><span style="color: #F8F8F2">path</span><span style="color: #E6DB74">}?{</span><span style="color: #F8F8F2">query</span><span style="color: #E6DB74">}&quot;</span>
+    <span style="color: #66D9EF">if</span> <span style="color: #FF4689">not</span> <span style="color: #F8F8F2">hmac_secret:</span>
+        <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">url</span>
+    <span style="color: #F8F8F2">to_sign</span> <span style="color: #FF4689">=</span> <span style="color: #E6DB74">f&quot;{</span><span style="color: #F8F8F2">method</span><span style="color: #E6DB74">}:{</span><span style="color: #F8F8F2">path</span><span style="color: #E6DB74">}:{</span><span style="color: #F8F8F2">query</span><span style="color: #E6DB74">}:{</span><span style="color: #F8F8F2">body</span><span style="color: #E6DB74">}&quot;</span>
+    <span style="color: #F8F8F2">digest</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">hashlib</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">sha1(to_sign</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">encode())</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">hexdigest()</span>
+    <span style="color: #F8F8F2">cs</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">hmac</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">new(hmac_secret</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">encode(),</span> <span style="color: #F8F8F2">digest</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">encode(),</span> <span style="color: #F8F8F2">hashlib</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">sha1)</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">hexdigest()</span>
+    <span style="color: #66D9EF">return</span> <span style="color: #E6DB74">f&quot;{</span><span style="color: #F8F8F2">url</span><span style="color: #E6DB74">}&amp;cs={</span><span style="color: #F8F8F2">cs</span><span style="color: #E6DB74">}&quot;</span>
+
+<span style="color: #959077"># пример</span>
+<span style="color: #F8F8F2">url</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">signed_url(</span>
+    <span style="color: #E6DB74">&quot;https://eu01-api.ivideon.com&quot;</span><span style="color: #F8F8F2">,</span>
+    <span style="color: #E6DB74">&quot;/cameras/100-0123456789abcdef0123456789abcdef:0/live_stream&quot;</span><span style="color: #F8F8F2">,</span>
+    <span style="color: #F8F8F2">[(</span><span style="color: #E6DB74">&quot;q&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">&quot;2&quot;</span><span style="color: #F8F8F2">),</span> <span style="color: #F8F8F2">(</span><span style="color: #E6DB74">&quot;video_codecs&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">&quot;h265,h264&quot;</span><span style="color: #F8F8F2">),</span> <span style="color: #F8F8F2">(</span><span style="color: #E6DB74">&quot;audio_codecs&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">&quot;pcmu,pcma,aac,mp3&quot;</span><span style="color: #F8F8F2">)],</span>
+    <span style="color: #F8F8F2">access_token</span><span style="color: #FF4689">=</span><span style="color: #E6DB74">&quot;100-Kabcdef0123456789&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #F8F8F2">hmac_secret</span><span style="color: #FF4689">=</span><span style="color: #E6DB74">&quot;s3cr3tKey&quot;</span><span style="color: #F8F8F2">,</span>
+    <span style="color: #F8F8F2">session</span><span style="color: #FF4689">=</span><span style="color: #E6DB74">&quot;AbCd1234&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #F8F8F2">counter</span><span style="color: #FF4689">=</span><span style="color: #AE81FF">987654321</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">)</span>
+</code></pre></div>
+
+<p><code>path</code> не должен содержать символов, которые OkHttp стал бы кодировать в пути (пробелы, не-ASCII): тогда закодированный путь в URL и декодированный путь в <code>to_sign</code> разойдутся, и эту разницу надо воспроизводить отдельно. Для реальных id камер (<code>&lt;цифры&gt;-&lt;hex&gt;:&lt;индекс&gt;</code>) проблемы нет.</p>
+<h2 id="54">5.4. Тестовые векторы</h2>
+<p>Значения вымышленные (не настоящие токены). Векторы проверены двумя независимыми реализациями — Python (<code>hashlib</code>/<code>hmac</code>) и Zig (<code>zig-client/src/sign.zig</code>, <code>zig build test</code>). Это доказывает, что реализации совпадают <strong>между собой и с восстановленным алгоритмом</strong>, но не то, что сервер примет подпись.</p>
+<p><strong>Вектор 1 — <code>live_stream</code></strong></p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code>hmac_secret = s3cr3tKey
+session     = AbCd1234
+counter     = 987654321
+to_sign     = GET:/cameras/100-0123456789abcdef0123456789abcdef:0/live_stream:q=2&amp;video_codecs=h265%2Ch264&amp;audio_codecs=pcmu%2Cpcma%2Caac%2Cmp3&amp;access_token=100-Kabcdef0123456789&amp;cseq=AbCd1234%3A987654321:
+SHA1 hex    = 94298070007308832ae816515d93f90d1eb54314
+cs          = 555e417709d50f8ffff3ed9c6fc273b250368ebb
+
+URL = https://eu01-api.ivideon.com/cameras/100-0123456789abcdef0123456789abcdef:0/live_stream?q=2&amp;video_codecs=h265%2Ch264&amp;audio_codecs=pcmu%2Cpcma%2Caac%2Cmp3&amp;access_token=100-Kabcdef0123456789&amp;cseq=AbCd1234%3A987654321&amp;cs=555e417709d50f8ffff3ed9c6fc273b250368ebb
+</code></pre></div>
+
+<p><strong>Вектор 2 — «неудобные» символы в токене</strong></p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code>hmac_secret = k,  session = zzzzzzzz,  counter = 1,  access_token = &quot;tok+en/with=odd chars~&quot;
+URL = https://api.ivideon.com/cameras/100-ffff:3/live_preview?q=0&amp;access_token=tok%2Ben%2Fwith%3Dodd%20chars%7E&amp;cseq=zzzzzzzz%3A1&amp;cs=1818ad11a4776bfee60e97456c6d1c26f20b3e91
+</code></pre></div>
+
+<p><strong>Вектор 3 — токен без <code>hmac_secret</code></strong></p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code>URL = https://api.ivideon.com/cameras/1:0/live_preview?access_token=t
+</code></pre></div>
+
+<h2 id="55-url">5.5. Как приложение использует подписанный URL</h2>
+<p><code>p000/C2199ku.java:152-154</code> (<code>m14125h</code>): берётся подготовленный Retrofit-запрос (<code>ek6.m6026i()</code> — объект <code>okhttp3.Request</code> без выполнения), прогоняется через тот же интерцептор <code>g58.mo7583n</code>, и из результата извлекается <strong>строка URL</strong> (<code>ps4.f34842i</code>). Эта строка и передаётся в нативный плеер (<code>IvPlayer.nativeSetMedia</code>) — см. <a href="07-video.md">07-video.md</a>.</p>
+<p>Следствия для своего клиента:</p>
+<ul>
+<li>подписанный URL самодостаточен: его можно открыть любым HTTP-клиентом или плеером (ffmpeg/VLC/mpv) без дополнительных заголовков <strong>[вывод; проверить вживую]</strong>;</li>
+<li>URL содержит <code>access_token</code> — <strong>это секрет</strong>. Не логируйте его целиком, не передавайте в командной строке там, где её видят другие пользователи;</li>
+<li>на каждое новое открытие потока приложение строит новый URL с новым <code>counter</code>. Срок жизни подписанного URL на сервере <strong>неизвестен</strong>.</li>
+</ul></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

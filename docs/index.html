@@ -1,0 +1,115 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Документация — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="Bilingual documentation for the Ivideon camera fork.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Documentation</span></span>
+<h1><span class="ru">Документация iVideon</span><span class="en">iVideon documentation</span></h1>
+<div class="banner"><span class="ru">Реверс-инжиниринг приложения Ivideon и всё, чтобы написать свой клиент камеры. Слева — навигация; можно переключить язык (RU/EN) вверху справа. Подробные разделы — на русском (исходный язык), сводки — на английском.</span><span class="en">Reverse engineering of the Ivideon app and everything needed to build your own camera client. Navigation is on the left; switch the language (RU/EN) at the top right. The detailed references are in Russian (their source language); English summaries are provided.</span></div>
+<div class="grid2">
+<a class="feat" href="camera-guide.html" style="text-decoration:none;display:block"><h3><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></h3><p><span class="en"></span><span class="ru">Гайд: программа для камеры</span></p></a>
+<a class="feat" href="README.html" style="text-decoration:none;display:block"><h3><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></h3><p><span class="en">Index and a one-minute overview of the reconstructed Ivideon protocol.</span><span class="ru">Обзор протокола</span></p></a>
+<a class="feat" href="01-methodology.html" style="text-decoration:none;display:block"><h3><span class="ru">Методика</span><span class="en">Methodology</span></h3><p><span class="en">Object of study, tools, how to reproduce the decompilation, how to read the obfuscated code, confidence levels.</span><span class="ru">Методика</span></p></a>
+<a class="feat" href="02-architecture.html" style="text-decoration:none;display:block"><h3><span class="ru">Архитектура</span><span class="en">Architecture</span></h3><p><span class="en">Client–cloud–camera model, hosts and the role of api_host, partner clouds, app layers, push.</span><span class="ru">Архитектура</span></p></a>
+<a class="feat" href="03-auth.html" style="text-decoration:none;display:block"><h3><span class="ru">Авторизация</span><span class="en">Authorization</span></h3><p><span class="en">OAuth2 request, token model, refresh, two-factor sign-in, revoke, storage, pseudocode.</span><span class="ru">Авторизация</span></p></a>
+<a class="feat" href="04-request-conventions.html" style="text-decoration:none;display:block"><h3><span class="ru">Соглашения API</span><span class="en">API conventions</span></h3><p><span class="en">The ?op= style, ways the token is passed, headers, the envelope, list shapes, projections, seconds vs milliseconds, timeouts, redirects.</span><span class="ru">Соглашения API</span></p></a>
+<a class="feat" href="05-url-signing.html" style="text-decoration:none;display:block"><h3><span class="ru">Подпись URL</span><span class="en">URL signing</span></h3><p><span class="en">The cseq/cs algorithm, encoding pitfalls, a Python reference implementation, test vectors.</span><span class="ru">Подпись URL</span></p></a>
+<a class="feat" href="06-api-reference.html" style="text-decoration:none;display:block"><h3><span class="ru">Справочник API</span><span class="en">API reference</span></h3><p><span class="en">Every endpoint with fields: servers, cameras, archive, export, timelapses, events, user, batch; the minimal set for a driver.</span><span class="ru">Справочник API</span></p></a>
+<a class="feat" href="07-video.html" style="text-decoration:none;display:block"><h3><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></h3><p><span class="en">FLV stream, the native player and its JNI, the FFmpeg build, playback and reconnection logic, WebSocket preview, voice (Opus).</span><span class="ru">Видео, превью, звук</span></p></a>
+<a class="feat" href="08-camera-control.html" style="text-decoration:none;display:block"><h3><span class="ru">Управление камерой</span><span class="en">Camera control</span></h3><p><span class="en">PTZ, plugins (detectors, LED, IR), camera properties, SD card, device operations.</span><span class="ru">Управление камерой</span></p></a>
+<a class="feat" href="09-camera-attachment.html" style="text-decoration:none;display:block"><h3><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></h3><p><span class="en">QR / serial / MAC, attachment token, polling, moving to Wi-Fi, the lack of a LAN channel, the Cute 2 specifics.</span><span class="ru">Привязка камеры</span></p></a>
+<a class="feat" href="10-errors.html" style="text-decoration:none;display:block"><h3><span class="ru">Ошибки</span><span class="en">Errors</span></h3><p><span class="en">Error format, the classification algorithm, a table of codes, OAuth errors, recommendations.</span><span class="ru">Ошибки</span></p></a>
+<a class="feat" href="11-code-map.html" style="text-decoration:none;display:block"><h3><span class="ru">Карта кода</span><span class="en">Code map</span></h3><p><span class="en">Which obfuscated class does what; what did not decompile.</span><span class="ru">Карта кода</span></p></a>
+<a class="feat" href="12-zig-client.html" style="text-decoration:none;display:block"><h3><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></h3><p><span class="en">State of the Zig client, its commands, modules, design decisions, expected problems.</span><span class="ru">Клиент на Zig</span></p></a>
+<a class="feat" href="13-open-questions.html" style="text-decoration:none;display:block"><h3><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></h3><p><span class="en">What is verified and what is not, a safe live-check plan, differences from the early wiki.</span><span class="ru">Открытые вопросы</span></p></a>
+</div></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

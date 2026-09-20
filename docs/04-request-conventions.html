@@ -1,0 +1,339 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Соглашения API — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="The ?op= style, ways the token is passed, headers, the envelope, list shapes, projections, seconds vs milliseconds, timeouts, redirects.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="on" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Соглашения API</span><span class="en">API conventions</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: The ?op= style, ways the token is passed, headers, the envelope, list shapes, projections, seconds vs milliseconds, timeouts, redirects.</span></div>
+<p><strong>Теги:</strong> #API5 #JSON #проекции #конверт_ответа #unix_time #таймауты</p>
+<p>Правила, общие для всех вызовов «API5» — так в коде называется текущее поколение облачного API Ivideon. Достоверность — <strong>[код]</strong>, если не помечено иначе.</p>
+<h2 id="41">4.1. Стиль</h2>
+<ul>
+<li>Почти всё — <strong><code>POST &lt;ресурс&gt;?op=&lt;ОПЕРАЦИЯ&gt;</code></strong> с JSON-телом (<code>Content-Type: application/json</code>), даже чтение: <code>POST /servers?op=FIND</code>, <code>POST /cameras/{id}?op=GET</code>.</li>
+<li>Операции: <code>FIND</code>, <code>FIND_ONE</code>, <code>GET</code>, <code>CREATE</code>, <code>UPDATE</code>, <code>UPSERT</code>, <code>DELETE</code>, <code>SET</code>, <code>CONFIGURE</code>, <code>INVOKE</code>, <code>SHARE</code>, <code>REVOKE</code>, <code>POLL</code>, <code>STREAM</code>, <code>START</code>, <code>TEST</code>, <code>CHECK</code>, <code>FORMAT</code>, <code>SCAN</code>, <code>CONNECT</code>, <code>RECOGNIZE</code>, <code>EXPORT</code>, <code>MARK</code>, <code>SELECT</code>, <code>RESEND</code>, <code>SUBMIT</code>, <code>GET_ID</code>, <code>GET_TYPES</code>, <code>RESET_PASSWORD</code>…</li>
+<li>Настоящий <strong><code>GET</code></strong> — только для бинарных данных: видеопотоки и изображения.</li>
+<li>Исключение — <code>POST /auth/oauth/token</code>: <code>application/x-www-form-urlencoded</code>, ответ без конверта (<a href="03-auth.md">03-auth.md</a>).</li>
+<li>Базовый URL авторизованных вызовов — <code>https://{api_host}</code> из токена (<a href="02-architecture.md">02-architecture.md</a>).</li>
+</ul>
+<!-- figure: request-anatomy | Анатомия типового вызова API5 -->
+
+<h2 id="42">4.2. Авторизация запроса</h2>
+<p>Интерцептор <code>p000/g58.java:396-467</code>; режим задаётся аннотацией метода сервиса.</p>
+<table>
+<thead>
+<tr>
+<th>режим</th>
+<th>аннотация</th>
+<th>как передаётся токен</th>
+<th>где применяется</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>обычный</td>
+<td>нет</td>
+<td><strong>query-параметр</strong> <code>access_token=&lt;token&gt;</code></td>
+<td>все вызовы <code>?op=</code></td>
+</tr>
+<tr>
+<td>Bearer</td>
+<td><code>@zc0</code></td>
+<td>заголовок <code>Authorization: Bearer &lt;token&gt;</code></td>
+<td><code>GET /events/{id}/thumbnails</code>, загрузка картинок/клипов по готовому URL</td>
+</tr>
+<tr>
+<td>публичный</td>
+<td><code>@mn6</code></td>
+<td>никак</td>
+<td>OAuth-токен, 2FA-вход, регистрация, сброс пароля, <code>device_models?op=RECOGNIZE</code>, <code>access_tokens/{id}?op=REVOKE</code>, <code>customer_clouds?op=FIND</code></td>
+</tr>
+<tr>
+<td>подписанный</td>
+<td><code>@l85</code></td>
+<td><code>access_token</code> в query + <code>cseq</code> + <code>cs</code></td>
+<td><code>live_stream</code>, <code>archive_stream</code>, <code>live_preview</code> — <a href="05-url-signing.md">05-url-signing.md</a></td>
+</tr>
+</tbody>
+</table>
+<p>Пример обычного вызова:</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST https://eu01-api.ivideon.com/servers?op=FIND&amp;access_token=&lt;token&gt;</span>
+<span style="color: #ED007E; background-color: #1E0010">Content-Type: application/json</span>
+
+<span style="color: #ED007E; background-color: #1E0010">{&quot;projection&quot;: {&quot;id&quot;: 1, &quot;name&quot;: 1, &quot;online&quot;: 1, &quot;cameras&quot;: {&quot;id&quot;: 1, &quot;name&quot;: 1, &quot;online&quot;: 1}}}</span>
+</code></pre></div>
+
+<p>Токен в query-строке попадает в логи прокси и серверов — это свойство API. В своих логах маскируйте <code>access_token=…</code> и <code>cs=…</code>.</p>
+<h2 id="43">4.3. Заголовки</h2>
+<p>Приложение <strong>не добавляет собственных заголовков по умолчанию</strong>: нет ни <code>X-*</code>, ни версии приложения, ни <code>Accept-Language</code>. <code>User-Agent</code> — стандартный для OkHttp: <code>okhttp/5.3.2</code> (<code>p000/ns7.java:360</code>). Версия и платформа клиента передаются только полями <code>client_version</code> / <code>client_type</code> при входе; язык — полями тел (<code>lang</code>, <code>language</code>).</p>
+<p>Нативный плеер, открывая видео-URL, по-видимому, представляется как <code>Boost.Beast/359</code> <strong>[вывод]</strong>; WebSocket-превью — фиксированным User-Agent Chrome 27.</p>
+<p>Следствие: серверу не по чему отличить сторонний клиент, кроме User-Agent. Обязателен ли определённый User-Agent — <strong>не проверено</strong>.</p>
+<h2 id="44">4.4. Конверт ответа</h2>
+<p>Успех (<code>p000/C2619w2.java:64-114</code>):</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #F8F8F2">{</span><span style="color: #FF4689">&quot;success&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #66D9EF">true</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;result&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #ED007E; background-color: #1E0010">&lt;значение&gt;</span><span style="color: #F8F8F2">}</span>
+</code></pre></div>
+
+<ul>
+<li><code>success</code> — строго boolean; <code>result</code> <strong>обязателен даже для операций без данных</strong> (тогда это <code>{}</code>, <code>""</code> или <code>null</code> — <code>p000/un6.java</code>);</li>
+<li>порядок ключей не важен; все прочие ключи верхнего уровня клиент пропускает;</li>
+<li>идентификатора запроса, <code>total</code>, <code>next</code>, <code>retry_after</code> на уровне конверта клиент не читает.</li>
+</ul>
+<p>Ошибка — не-2xx + <code>{"success": false, "code", "message", "details"?}</code> — <a href="10-errors.md">10-errors.md</a>.</p>
+<h3 id="result">Списки в <code>result</code></h3>
+<p>Приложение принимает <strong>три формы</strong> списка (<code>p000/C2619w2.java:131-165</code>) — своему клиенту стоит принимать все:</p>
+<table>
+<thead>
+<tr>
+<th>форма</th>
+<th>пример</th>
+<th>обработка</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>массив</td>
+<td><code>[{…}, {…}]</code></td>
+<td>как есть</td>
+</tr>
+<tr>
+<td>объект с <code>items</code></td>
+<td><code>{"items": [{…}, {…}]}</code></td>
+<td>берётся <code>items</code></td>
+</tr>
+<tr>
+<td>словарь по id</td>
+<td><code>{"100-abc": {…}, "100-def": {…}}</code></td>
+<td>в каждое значение вставляется <code>"id": "&lt;ключ&gt;"</code>, значения становятся списком</td>
+</tr>
+</tbody>
+</table>
+<p>Какую форму отдаёт сервер для конкретного вызова, покажет живая проверка; у <code>/servers?op=FIND</code> это один из главных открытых вопросов.</p>
+<h3 id="_1">Пагинация</h3>
+<p>В запросах — <code>skip</code> и <code>limit</code>. Метаданных пагинации в ответах клиент не читает; конец выборки определяется, видимо, по размеру страницы меньше <code>limit</code> <strong>[вывод]</strong>.</p>
+<h2 id="45">4.5. Проекции</h2>
+<p>Читающие вызовы (<code>servers FIND/GET</code>, <code>cameras GET</code>, <code>events GET</code>, <code>users GET</code>, <code>folders FIND</code>, <code>notification_settings FIND</code>, <code>exported_records FIND</code>, <code>permission_grants FIND</code>) принимают <code>projection</code> — описание нужных полей в стиле MongoDB:</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #F8F8F2">{</span><span style="color: #FF4689">&quot;projection&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;id&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;name&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;cameras&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;id&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;online&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">}}}</span>
+</code></pre></div>
+
+<ul>
+<li><code>1</code> — включить поле; вложенный объект — проекция вложенного документа;</li>
+<li>встречается форма исключения: <code>{"option": 0, "_others": 1}</code> — «всё, кроме <code>option</code>»;</li>
+<li>ключи услуг содержат <code>&gt;</code>: <code>"notify&gt;motion"</code>.</li>
+</ul>
+<p>Методы с проекцией помечены <code>@kr7</code> — приложение получает <code>result</code> сырой JSON-строкой и разбирает в другом слое; поэтому их ответы типизированы в коде хуже остальных. Что вернёт сервер <strong>без</strong> <code>projection</code> (всё или минимум) — не проверено; безопаснее передавать проекцию всегда. Готовый образец — в <a href="06-api-reference.md">06-api-reference.md</a>, раздел 6.1.</p>
+<h2 id="46">4.6. Типы данных</h2>
+<table>
+<thead>
+<tr>
+<th>тип</th>
+<th>на проводе</th>
+<th>детали</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>дата</strong> (поля <code>Date</code>)</td>
+<td>JSON-число, <strong>Unix-секунды</strong>, возможна дробная часть до мс: <code>1700000000</code> или <code>1700000000.5</code></td>
+<td>запись — <code>p000/C2647wu.java</code>; чтение — <code>p000/nq2.java</code>: значение ≥ 3.1536·10¹⁰ трактуется как миллисекунды, иначе как секунды</td>
+</tr>
+<tr>
+<td><strong>время в миллисекундах</strong> (поля <code>long</code>)</td>
+<td>целое, Unix-мс</td>
+<td>только: <code>archive_timeline</code> (<code>start_time</code>, <code>end_time</code>, <code>duration</code>) и query-параметры <code>archive_stream</code></td>
+</tr>
+<tr>
+<td>календарная дата</td>
+<td>строка <code>yyyy-MM-dd</code></td>
+<td><code>archive_calendar</code></td>
+</tr>
+<tr>
+<td><code>turned_off_until</code></td>
+<td>число</td>
+<td><code>0</code> — включена, <code>-1</code> — выключена бессрочно, иначе Unix-секунды (<code>p000/ud7.java</code>)</td>
+</tr>
+<tr>
+<td>качество <code>q</code></td>
+<td><code>0</code> / <code>1</code> / <code>2</code></td>
+<td>low / medium / high</td>
+</tr>
+<tr>
+<td>id пользователя</td>
+<td>в токене — число (<code>owner_id</code>), в телах и путях — строка</td>
+<td></td>
+</tr>
+<tr>
+<td>id камеры</td>
+<td><code>&lt;serverId&gt;:&lt;индекс&gt;</code></td>
+<td>двоеточие в пути URL не кодируется</td>
+</tr>
+<tr>
+<td>часовой пояс</td>
+<td>IANA (<code>Europe/Moscow</code>)</td>
+<td></td>
+</tr>
+<tr>
+<td><code>null</code></td>
+<td>поле опускается</td>
+<td><code>serializeNulls</code> не включён</td>
+</tr>
+<tr>
+<td>enum</td>
+<td>строка в нижнем регистре (<code>"wifi"</code>, <code>"in_progress"</code>) либо число (<code>q</code>, чувствительность звука)</td>
+<td>значения — в справочнике</td>
+</tr>
+</tbody>
+</table>
+<!-- figure: time-units | Где секунды, а где миллисекунды -->
+
+<p><strong>Секунды или миллисекунды — главный источник ошибок</strong>: <code>events?op=FIND</code> и <code>archive?op=EXPORT</code> принимают секунды, <code>archive_timeline</code> и <code>archive_stream</code> — миллисекунды.</p>
+<h2 id="47">4.7. Сеть, таймауты, повторы</h2>
+<p>Конфигурация OkHttp (<code>p000/i85.java:76-92</code>):</p>
+<table>
+<thead>
+<tr>
+<th>параметр</th>
+<th>значение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TLS</td>
+<td>1.3 / 1.2 / 1.1 / 1.0; системное хранилище сертификатов. <strong>Пиннинга нет</strong> (<code>CertificatePinner</code> по умолчанию, в <code>network_security_config.xml</code> нет <code>&lt;pin-set&gt;</code>); cleartext запрещён для <code>ivideon.com</code> и <code>extcam.com</code></td>
+</tr>
+<tr>
+<td>таймауты</td>
+<td>connect 30 с, read 30 с, write 10 с; общий сторож на вызов — 33 с</td>
+</tr>
+<tr>
+<td>редиректы</td>
+<td>включены (по умолчанию OkHttp)</td>
+</tr>
+<tr>
+<td>повторы</td>
+<td>до 3 попыток на вызов; <strong>не повторяются</strong> 4xx, ошибки JSON, 2FA</td>
+</tr>
+<tr>
+<td>прокси</td>
+<td>системный</td>
+</tr>
+</tbody>
+</table>
+<p>Отсутствие пиннинга означает, что трафик официального приложения можно исследовать MITM-прокси с пользовательским сертификатом (на Android ≥ 7 — с поправкой на доверие только системным CA). Это резервный способ живой проверки, если статического анализа не хватит.</p>
+<p><strong>О редиректах.</strong> <code>api.ivideon.com</code> отвечает редиректом на региональный хост (<code>eu01-api.ivideon.com</code>) — <strong>[проверено]</strong> для запроса к корню. OkHttp при 301/302 превращает POST в GET и теряет тело; при 307/308 — сохраняет. Каким кодом сервер редиректит именно <code>POST /auth/oauth/token</code>, неизвестно. Своему клиенту: <strong>не следовать редиректам автоматически для POST</strong> — получив 3xx, повторить тот же POST с тем же телом на <code>Location</code>.</p>
+<h2 id="48">4.8. Частота запросов</h2>
+<p>Интервалы, которые использует само приложение — разумный верхний предел и для своего клиента:</p>
+<table>
+<thead>
+<tr>
+<th>что</th>
+<th>интервал</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>опрос токена привязки</td>
+<td>3 с</td>
+</tr>
+<tr>
+<td>опрос состояния сервера</td>
+<td>5 с</td>
+</tr>
+<tr>
+<td>опрос пакетного запроса</td>
+<td>1 с</td>
+</tr>
+<tr>
+<td>поток превью в сетке камер</td>
+<td>1 кадр/с</td>
+</tr>
+</tbody>
+</table>
+<p>Лимиты сервера неизвестны. Коды <code>TOO_MANY_LOGIN_ATTEMPTS</code>, <code>TOO_FREQUENT</code>, <code>LIMIT_EXCEEDED</code> показывают, что ограничения есть.</p></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

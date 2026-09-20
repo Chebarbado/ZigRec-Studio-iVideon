@@ -1,0 +1,505 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Видео, превью, звук — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="FLV stream, the native player and its JNI, the FFmpeg build, playback and reconnection logic, WebSocket preview, voice (Opus).">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="on" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: FLV stream, the native player and its JNI, the FFmpeg build, playback and reconnection logic, WebSocket preview, voice (Opus).</span></div>
+<p><strong>Теги:</strong> #видео #FLV #H264 #H265 #FFmpeg #WebSocket #protobuf #Opus #JNI</p>
+<p>Как приложение получает живое видео, архив, картинки-превью и как передаёт голос на камеру.</p>
+<p><strong>Главное:</strong></p>
+<ul>
+<li>Единственный путь видео — <strong>FLV поверх HTTP(S)</strong>: обычный <code>GET</code> по подписанному URL, в теле ответа — поток FLV с H.264/H.265 и AAC/MP3/G.711.</li>
+<li>Поток скачивает и разбирает <strong>собственный C++-плеер Ivideon</strong> (<code>libivplayerjni.so</code>: Boost.Beast + свой FLV-демуксер). FFmpeg в приложении собран <strong>без единого демуксера и протокола</strong> — только декодеры.</li>
+<li>ExoPlayer, WebRTC, HLS, RTSP, MJPEG в приложении <strong>нет</strong>.</li>
+<li>«Поток превью» для сетки камер — <strong>WebSocket с protobuf-сообщениями</strong>, внутри которых JPEG.</li>
+</ul>
+<p>Достоверность: Java-часть — <strong>[код]</strong>; сведения о нативной части получены <strong>по строкам в <code>.so</code></strong>, без дизассемблирования, сетевых дампов нет. Контейнер FLV — <strong>[вывод]</strong> из имён классов (<code>FlvHandler</code>, <code>flv::VideoPacket</code>…) и сообщений парсера; очень надёжный, но живым запросом не подтверждён.</p>
+<h2 id="71">7.1. Эндпоинты</h2>
+<table>
+<thead>
+<tr>
+<th>что</th>
+<th>запрос</th>
+<th>авторизация</th>
+<th>ответ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>живое видео</td>
+<td><code>GET /cameras/{cameraId}/live_stream?q=&amp;video_codecs=&amp;audio_codecs=</code></td>
+<td><code>access_token</code> + подпись</td>
+<td>поток FLV</td>
+</tr>
+<tr>
+<td>архив</td>
+<td><code>GET /cameras/{cameraId}/archive_stream?start_time=&amp;end_time=&amp;speed=&amp;q=&amp;video_codecs=&amp;audio_codecs=</code></td>
+<td><code>access_token</code> + подпись</td>
+<td>поток FLV</td>
+</tr>
+<tr>
+<td>кадр-превью</td>
+<td><code>GET /cameras/{cameraId}/live_preview?q=</code></td>
+<td><code>access_token</code> + подпись</td>
+<td>JPEG</td>
+</tr>
+<tr>
+<td>поток превью</td>
+<td><code>POST /cameras/{cameraId}/live_preview?op=STREAM&amp;fps=&amp;q=</code></td>
+<td><code>access_token</code></td>
+<td>JSON <code>{"url": "ws(s)://…"}</code></td>
+</tr>
+<tr>
+<td>миниатюры события</td>
+<td><code>GET /events/{eventId}/thumbnails?qty=&amp;width=&amp;height=&amp;columns=</code></td>
+<td><code>Authorization: Bearer</code></td>
+<td>картинка (спрайт из <code>qty</code> кадров в <code>columns</code> столбцов <strong>[вывод]</strong>)</td>
+</tr>
+<tr>
+<td>картинка по готовому URL</td>
+<td><code>GET &lt;url&gt;[?h=&lt;высота&gt;]</code></td>
+<td><code>Authorization: Bearer</code></td>
+<td>картинка</td>
+</tr>
+<tr>
+<td>голос на камеру</td>
+<td><code>POST /cameras/{cameraId}/voice_message?op=START</code></td>
+<td><code>access_token</code></td>
+<td>JSON <code>{"url": "…"}</code></td>
+</tr>
+</tbody>
+</table>
+<p>Подпись — в <a href="05-url-signing.md">05-url-signing.md</a>. Определения: <code>p000/InterfaceC2236lu.java:78-81, 105-108, 275-277, 19-21</code>; <code>p000/InterfaceC2345or.java</code>.</p>
+<h3 id="_1">Параметры</h3>
+<table>
+<thead>
+<tr>
+<th>параметр</th>
+<th>значения</th>
+<th>примечание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>q</code></td>
+<td><code>0</code> low, <code>1</code> medium, <code>2</code> high</td>
+<td>enum <code>p000/sw4.java</code>, сериализуется числом. В плеере хранится в SharedPreferences <code>player/quality</code>, по умолчанию <code>2</code>. Для превью приложение всегда шлёт <code>0</code></td>
+</tr>
+<tr>
+<td><code>video_codecs</code></td>
+<td><code>h265,h264</code></td>
+<td>константа, <code>PlayerController.java:790</code> — клиент объявляет, что умеет декодировать; порядок = предпочтение <strong>[вывод]</strong></td>
+</tr>
+<tr>
+<td><code>audio_codecs</code></td>
+<td><code>pcmu,pcma,aac,mp3</code></td>
+<td>константа, <code>PlayerController.java:791</code></td>
+</tr>
+<tr>
+<td><code>start_time</code></td>
+<td>Unix-время, <strong>миллисекунды</strong></td>
+<td>точка начала/перемотки (<code>dateFrom.getTime()</code>, <code>PlayerController.java:834</code>)</td>
+</tr>
+<tr>
+<td><code>end_time</code></td>
+<td>Unix-время, мс; опц.</td>
+<td>приложение шлёт <code>start + min(1 ч × speed, now − start)</code> (строки 813–819)</td>
+</tr>
+<tr>
+<td><code>speed</code></td>
+<td><code>1, 2, 4, 8, 16</code>; опц.</td>
+<td>ускорение архива. Сервер может выдать иную скорость — фактическая приходит в событии плеера</td>
+</tr>
+<tr>
+<td><code>fps</code></td>
+<td>float</td>
+<td>для <code>live_preview?op=STREAM</code>; приложение шлёт <code>1.0</code></td>
+</tr>
+</tbody>
+</table>
+<p>Хотите видео только в H.264 (например, плеер не умеет HEVC-in-FLV) — передайте <code>video_codecs=h264</code> <strong>[вывод; проверить]</strong>.</p>
+<h2 id="72">7.2. Как приложение открывает поток</h2>
+<ol>
+<li><code>PlayerController.m4284C0</code> (строки 785–837). Перед сборкой URL проверяется токен: <code>i85.m10135f()</code> считает его истёкшим <strong>за 300 с до реального срока</strong> (<code>p000/i85.java:218-240</code>); если истёк — сначала refresh, потом URL.</li>
+<li>Retrofit-запрос <strong>не выполняется</strong>: <code>C2199ku.m14125h</code> (<code>p000/C2199ku.java:152</code>) прогоняет его через интерцептор (<code>access_token</code>, <code>cseq</code>, <code>cs</code>) и забирает строку URL.</li>
+<li><code>IvPlayer.nativeReset</code> → <code>nativeSetMedia(handle, url, …)</code> → <code>nativeStart</code> (<code>p000/kr2.java:84-102</code>, <code>p000/t75.java</code>).</li>
+</ol>
+<!-- figure: video-pipeline | Путь видео от URL до экрана -->
+
+<p>Java не передаёт плееру ни заголовков, ни User-Agent — <strong>вся авторизация в query-строке URL</strong>. В <code>.so</code> есть литерал <code>Boost.Beast/359</code> рядом с именем заголовка <code>User-Agent</code> — вероятно, это и уходит на сервер <strong>[вывод]</strong>.</p>
+<h3 id="nativesetmedia">Аргументы <code>nativeSetMedia</code></h3>
+<p>Сигнатура <code>(JLjava/lang/String;ZZZIIII)V</code>:</p>
+<table>
+<thead>
+<tr>
+<th>режим</th>
+<th>вызов</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>live (в пути URL нет <code>archive</code>)</td>
+<td><code>nativeSetMedia(h, url, true, false, false, 15, 5, 1000, 5)</code></td>
+</tr>
+<tr>
+<td>архив</td>
+<td><code>nativeSetMedia(h, url, false, false, false, 15, 5, 0, 0)</code></td>
+</tr>
+</tbody>
+</table>
+<p>Смысл семи последних аргументов из Java не определить (имён нет, <code>.so</code> без символов). <strong>[гипотеза]</strong>: первый <code>boolean</code> — «это live», <code>1000, 5</code> — целевые задержка/буфер для live.</p>
+<h2 id="73-libivplayerjniso">7.3. Формат потока (по строкам <code>libivplayerjni.so</code>)</h2>
+<ul>
+<li>Схемы URL: только <code>http</code> и <code>https</code> (<code>expected URL scheme 'http' or 'https' but was '</code>).</li>
+<li>HTTP-клиент — Boost.Asio/Beast/URL со статически слинкованным BoringSSL; сам следует редиректам с ограничением (<code>too many redirects:</code>, <code>abort redirect from 'https' to '</code>). Сертификаты — системные (<code>/apex/com.android.conscrypt/cacerts</code>), пиннинга в плеере по строкам не видно.</li>
+<li>Демуксер — свой: классы <code>FlvHandler</code>, <code>flv::Packet</code>, <code>flv::VideoPacket</code>, <code>flv::AudioPacket</code>, <code>flv::Observer</code>; сообщения <code>flv parser error:</code>, <code>flv_tag_video: invalid video codec</code>, <code>nalu size not valid:</code>, <code>ERROR: no aac config in packet or in metadata</code>, <code>codec in metadata is not equal to codec of packet</code>.</li>
+<li>Вероятные ключи метаданных потока: <code>width</code>, <code>height</code>, <code>framerate</code>, <code>frameDuration</code>, <code>speed</code>, <code>syncTime</code>, <code>fragmentPosition</code>, <code>videocodecid</code>, <code>audiocodecid</code>, <code>audiosamplerate</code>, <code>audiochannels</code>. Строки <code>onMetaData</code> в <code>.so</code> нет — как именно передаются метаданные, не установлено.</li>
+<li><strong>Нестандартные ключи <code>syncTime</code>, <code>fragmentPosition</code>, <code>speed</code></strong> — видимо, источник абсолютного времени кадра и позиции в архиве (см. события 7 и 8 ниже). Стандартный FLV-плеер их проигнорирует: видео покажет, а привязку к реальному времени — нет.</li>
+<li>Как сигнализируется HEVC внутри FLV (старый «китайский» codec id 12 или Enhanced RTMP/extended header) — <strong>не установлено</strong>; FourCC <code>hvc1</code>/<code>hev1</code> в строках нет. От этого зависит, откроет ли поток H.265 обычный ffmpeg/VLC.</li>
+<li>Декодирование: аппаратное через MediaCodec с откатом на программное (<code>no hw decoders found or configured, fallback to sw decoder</code>). Вывод — EGL/GLES, звук — Oboe.</li>
+</ul>
+<h3 id="ffmpeg">FFmpeg в приложении</h3>
+<p>Версия 8.1 (<code>Lavf62.12.100</code>), строка конфигурации зашита в библиотеки:</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code>--disable-all --disable-network --enable-avutil --enable-avcodec --enable-avformat
+--enable-swscale --enable-swresample --enable-decoder=&#39;h264,hevc&#39;
+--enable-decoder=&#39;aac,mp3,pcm_alaw,pcm_mulaw&#39; --enable-jni --enable-mediacodec
+--enable-decoder=&#39;h264_mediacodec,hevc_mediacodec&#39;
+</code></pre></div>
+
+<p>Ноль демуксеров, ноль протоколов. Это уточняет первоначальный вывод («URL открывает FFmpeg»): URL открывает <strong>плеер Ivideon</strong>, FFmpeg только декодирует.</p>
+<h3 id="configarm64_v8aapk-libarm64-v8a">Нативные библиотеки (<code>config.arm64_v8a.apk</code>, <code>lib/arm64-v8a</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>библиотека</th>
+<th>байт</th>
+<th>назначение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>libivplayerjni.so</code></td>
+<td>4 021 112</td>
+<td>плеер Ivideon (исходный путь в строках: <code>/src/android-iv-player/</code>)</td>
+</tr>
+<tr>
+<td><code>libavcodec.so</code></td>
+<td>2 730 544</td>
+<td>FFmpeg 8.1, декодеры</td>
+</tr>
+<tr>
+<td><code>libavformat.so</code></td>
+<td>247 424</td>
+<td>FFmpeg, фактически пустая</td>
+</tr>
+<tr>
+<td><code>libavutil.so</code>, <code>libswscale.so</code>, <code>libswresample.so</code></td>
+<td>738 352 / 1 064 648 / 99 704</td>
+<td>FFmpeg</td>
+</tr>
+<tr>
+<td><code>libopusjni.so</code></td>
+<td>514 416</td>
+<td>кодер libopus 1.5.2 для передачи голоса</td>
+</tr>
+<tr>
+<td><code>libbarhopper_v3.so</code></td>
+<td>4 946 720</td>
+<td>ML Kit, сканер штрих-кодов (мастер привязки)</td>
+</tr>
+<tr>
+<td><code>libcrashlytics*.so</code>, CameraX, <code>androidx.graphics.path</code>, <code>datastore_shared_counter</code></td>
+<td>—</td>
+<td>инфраструктура</td>
+</tr>
+</tbody>
+</table>
+<h2 id="74-jni-ivplayer">7.4. JNI-интерфейс <code>IvPlayer</code></h2>
+<p><code>com/ivideon/sdk/player/p014iv/core/IvPlayer.java</code>. Полезен как спецификация «что должен уметь плеер».</p>
+<table>
+<thead>
+<tr>
+<th>метод</th>
+<th>назначение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>nativeInit()</code>, <code>long nativeSetup(WeakReference)</code></td>
+<td>инициализация; возвращает дескриптор, <code>0</code> = освобождён</td>
+</tr>
+<tr>
+<td><code>nativeSetMedia(long, String url, Z, Z, Z, I, I, I, I)</code></td>
+<td>задать URL (см. 7.2)</td>
+</tr>
+<tr>
+<td><code>nativeSetSurface(long, Surface)</code></td>
+<td>поверхность вывода</td>
+</tr>
+<tr>
+<td><code>nativeStart</code> / <code>nativePause</code> / <code>nativeStop</code> / <code>nativeReset</code> / <code>nativeRelease</code></td>
+<td>управление; <code>Reset</code> вызывается перед каждым <code>SetMedia</code></td>
+</tr>
+<tr>
+<td><code>boolean nativeIsPlaying</code>, <code>long nativeGetCurrentPosition</code></td>
+<td>позиция — мс от начала потока <strong>[вывод]</strong></td>
+</tr>
+<tr>
+<td><code>nativeGetVideoWidth/Height</code></td>
+<td>размер кадра</td>
+</tr>
+<tr>
+<td><code>nativeSetVideoScaleType(int)</code></td>
+<td>приложение всегда ставит <code>1</code>; смысл значений неизвестен</td>
+</tr>
+<tr>
+<td><code>nativeSetVideoTransform(int)</code></td>
+<td><code>0</code> identity, <code>1</code> mirror-H, <code>2</code> mirror-V, <code>3</code> rot90, <code>4</code> rot180, <code>5</code> rot270, <code>6</code> transpose, <code>7</code> anti-transpose (<code>p000/p75.java</code>). Приложение шлёт только rot180 — когда у камеры задан поворот 180°</td>
+</tr>
+<tr>
+<td><code>nativeSetCrop(x, y, w, h)</code></td>
+<td>цифровой зум</td>
+</tr>
+<tr>
+<td><code>nativeSetVolume(float)</code></td>
+<td>приложение использует только 0.0/1.0</td>
+</tr>
+<tr>
+<td><code>boolean nativeTakeSnapshot(Bitmap)</code></td>
+<td>снимок текущего кадра в ARGB_8888</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Метода перемотки нет</strong>: перемотка архива, смена качества и скорости — это всегда <strong>новый URL</strong> и пересоздание потока.</p>
+<h3 id="_2">События из нативного кода</h3>
+<p><code>postEventFromNative(ref, what, a, b)</code> (<code>IvPlayer.java:106-141</code>):</p>
+<table>
+<thead>
+<tr>
+<th>what</th>
+<th>событие</th>
+<th>данные</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Started</td>
+<td>—</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Paused</td>
+<td>—</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Stopped</td>
+<td>—</td>
+</tr>
+<tr>
+<td>4</td>
+<td>EndReached</td>
+<td>—</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Error</td>
+<td><code>a</code> — код; Java его <strong>не читает</strong>, значения неизвестны</td>
+</tr>
+<tr>
+<td>6</td>
+<td>VideoSizeChanged</td>
+<td><code>a</code> = ширина, <code>b</code> = высота</td>
+</tr>
+<tr>
+<td>7</td>
+<td>AbsoluteTimeChanged</td>
+<td><code>a</code> = абсолютное время кадра, Unix мс (live)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>ArchiveTimeChanged</td>
+<td><code>a</code> = <code>fragmentPosition</code> (Unix мс), младшие 32 бита <code>b</code> = <code>fragmentDuration</code>, старшие = фактическая <code>speed</code></td>
+</tr>
+</tbody>
+</table>
+<p>Текущее время на шкале приложение считает само, опрашивая позицию каждые <code>500 мс / speed</code> (<code>p000/e97.java:41-73</code>):</p>
+<ul>
+<li>live: <code>absoluteTime + (pos − posНаМоментСобытия)</code>; до первого события 7 — <code>времяЗапроса + pos</code>;</li>
+<li>архив: <code>min(fragmentPosition + (pos − posНаМоментСобытия) × speed, fragmentPosition + fragmentDuration)</code>.</li>
+</ul>
+<h2 id="75">7.5. Логика воспроизведения (для своего плеера)</h2>
+<p><strong>Архив.</strong> Запрашивается окно не более часа × скорость. По <code>EndReached</code> приложение ищет на таймлайне следующую запись и запрашивает новый URL с её начала (<code>p000/d97.java:308-354</code>). Таймлайн — <code>POST /cameras/{id}/archive_timeline?op=GET {"start_time": &lt;мс&gt;, "end_time": &lt;мс&gt;}</code>, календарь — <code>archive_calendar?op=GET</code>; см. <a href="06-api-reference.md">06-api-reference.md</a>. Ускорение доступно, только если у камеры есть возможность <code>speed_play</code> (<code>p000/C2363p8.java:902-941</code>).</p>
+<!-- figure: archive-windows | Архив воспроизводится окнами; перемотка и конец окна — новый URL -->
+
+<p><strong>Переподключение:</strong></p>
+<table>
+<thead>
+<tr>
+<th>ситуация</th>
+<th>реакция</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>событие Error, камера онлайн, режим live</td>
+<td>немедленный новый URL (<code>p000/fr2.java:350-361</code>)</td>
+</tr>
+<tr>
+<td>EndReached в live</td>
+<td>новый URL, пока счётчик попыток &lt; 3; затем состояние ошибки (<code>d97.java:355-374</code>)</td>
+</tr>
+<tr>
+<td>ожидание старта</td>
+<td>проверка каждые 500 мс; после 3 неудач или если камера офлайн — состояние OFFLINE</td>
+</tr>
+<tr>
+<td>камера в списке стала online; возврат в приложение (<code>onStart</code>)</td>
+<td>новый URL</td>
+</tr>
+<tr>
+<td>сменился токен во время воспроизведения</td>
+<td>лог <code>ANTIEXPIRED…</code>, новый URL (<code>PlayerController.java:2276-2293</code>)</td>
+</tr>
+<tr>
+<td>нет сети</td>
+<td>состояние ошибки</td>
+</tr>
+</tbody>
+</table>
+<p>Специальной обработки 401/403 посреди потока нет — такой случай попадает в общие ветки Error/EndReached. Срок жизни URL <strong>[вывод]</strong> равен сроку жизни <code>access_token</code>.</p>
+<p>Состояния UI (<code>p000/d97.java</code>): <code>PROGRESS</code>, <code>PLAY</code>, <code>PAUSED</code>, <code>BUFFERING</code>, <code>COMPLETED</code>, <code>ERR</code>, <code>OFFLINE</code>, <code>PAUSED_TO_SHOW_ARCHIVE_EXPORT_UI</code>. Процент буферизации нативный плеер не сообщает — Java рисует 0 при старте и 100 по Started.</p>
+<h2 id="76">7.6. Превью</h2>
+<h3 id="_3">Одиночный кадр</h3>
+<p><code>GET /cameras/{id}/live_preview?q=0</code> — подписанный URL, в ответе байты изображения, которые приложение отдаёт в <code>BitmapFactory</code> (при неудаче лог <code>decode jpeg failed</code>, <code>p000/ca1.java:84,188</code>) → формат <strong>JPEG [вывод]</strong>. Дополнительных заголовков нет: набор <code>Cache-Control: no-cache</code> в <code>C2199ku.java:44</code> объявлен, но ни к чему не прикреплён — в вызов передаётся пустой набор (<code>f26454i</code>). Это самый простой способ получить картинку с камеры — на нём строится <code>zig-client</code>.</p>
+<h3 id="_4">Поток кадров (сетка камер)</h3>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST /cameras/{id}/live_preview?op=STREAM&amp;fps=1.0&amp;q=0</span>
+<span style="color: #ED007E; background-color: #1E0010">→ {&quot;url&quot;: &quot;wss://…&quot;}</span>
+</code></pre></div>
+
+<p>Это <strong>не</strong> <code>multipart/x-mixed-replace</code>. Клиент открывает <strong>WebSocket</strong> по полученному URL (<code>p000/et5.java:40-60</code>): схема <code>ws(s)</code> переписывается в <code>http(s)</code>, заголовки апгрейда добавляются вручную, включая <code>Sec-WebSocket-Extensions: x-webkit-deflate-frame</code> и фиксированный User-Agent Chrome 27. Заголовка авторизации нет — значит, авторизация зашита в выданном URL <strong>[вывод]</strong>.</p>
+<p>Каждое бинарное сообщение — protobuf (<code>p000/k06.java:117-131</code>):</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #66D9EF">message</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">Envelope</span><span style="color: #F8F8F2"> { google.protobuf.Any </span><span style="color: #A6E22E">payload</span><span style="color: #F8F8F2"> </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">; }   </span><span style="color: #959077">// p000/r66.java</span>
+<span style="color: #66D9EF">message</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">Frame</span><span style="color: #F8F8F2">    { </span><span style="color: #66D9EF">bytes</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">image</span><span style="color: #F8F8F2"> </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">; }                   </span><span style="color: #959077">// p000/mg7.java — разбирается из Any.value</span>
+</code></pre></div>
+
+<!-- figure: ws-preview | Поток превью: WebSocket, protobuf и JPEG внутри -->
+
+<p><code>image</code> — JPEG; <code>Any.type_url</code> клиент игнорирует. Один сокет на камеру; новый закрывает предыдущий (<code>p000/dt5.java</code>, <code>p000/b28.java:205-211</code>).</p>
+<h3 id="_5">Клипы событий</h3>
+<p>Проигрываются штатным <code>android.media.MediaPlayer</code> по URL из API с заголовком <code>Authorization: Bearer &lt;access_token&gt;</code> (<code>p000/yu8.java:166-173</code>, <code>p000/ip3.java:944-955</code>). Формат клипа из кода не виден (раз его открывает <code>MediaPlayer</code> — вероятно, MP4 <strong>[гипотеза]</strong>).</p>
+<h2 id="77">7.7. Передача голоса на камеру</h2>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST /cameras/{cameraId}/voice_message?op=START</span>
+<span style="color: #ED007E; background-color: #1E0010">{&quot;mode&quot;: &quot;message&quot; | &quot;realtime&quot;, &quot;codec&quot;: &quot;opus&quot;, &quot;frame_size&quot;: 480}</span>
+<span style="color: #ED007E; background-color: #1E0010">→ {&quot;url&quot;: &quot;…&quot;}</span>
+</code></pre></div>
+
+<!-- figure: voice-pipeline | Передача голоса на камеру -->
+
+<ul>
+<li><code>mode</code>: <code>realtime</code>, если у камеры есть возможность <code>push_to_talk_2</code>, иначе <code>message</code> (<code>p000/du3.java:196-203</code>, enum <code>p000/lo7.java</code>). Лимит записи: 15 с для <code>message</code>, без лимита для <code>realtime</code> (<code>p000/bpa.java:65-75</code>).</li>
+<li>Захват: <code>AudioRecord</code>, <strong>8000 Гц, моно, PCM16</strong> (<code>p000/to7.java:69-86</code>).</li>
+<li>Кодер: libopus 1.5.2, <code>OPUS_APPLICATION_VOIP</code> (2048), <code>OPUS_SET_SIGNAL = OPUS_SIGNAL_VOICE</code>; кадр <strong>480 сэмплов = 60 мс</strong>, выход ≤ 1276 байт.</li>
+<li>Транспорт: <strong>один HTTP <code>POST &lt;url&gt;</code> с потоковым телом</strong> без <code>Content-Type</code> (<code>p000/zoa.java:73-86</code>). Каждый Opus-пакет — отдельный <code>write</code> + <code>flush</code>. Никакого контейнера и префиксов длины приложение не добавляет. <strong>[вывод]</strong>: поверх HTTP/1.1 это chunked-кодирование, «один чанк = один Opus-пакет», и сервер, возможно, полагается на границы чанков. Не-2xx → ошибка <code>Unsuccessful response</code>.</li>
+<li>Операции STOP нет: сообщение заканчивается, когда закрывается тело запроса.</li>
+</ul>
+<p>Часть этой логики восстановлена из fallback-дампа jadx (классы <code>apa</code>, <code>fm8</code> обычным режимом не декомпилируются).</p>
+<h2 id="78">7.8. Не установлено</h2>
+<ul>
+<li>смысл аргументов <code>nativeSetMedia</code>, коды <code>Error(what)</code>, значения scale type;</li>
+<li>сигнализация HEVC в FLV и способ передачи метаданных (<code>syncTime</code>, <code>fragmentPosition</code>);</li>
+<li>размеры буферов, политика задержки и таймауты нативного клиента;</li>
+<li>вид URL для WebSocket-превью и голосового канала (хост, авторизация);</li>
+<li><strong>откроет ли подписанный <code>live_stream</code> обычный ffplay/VLC/mpv</strong> — первая практическая проверка. Ожидание: H.264 + AAC — да; H.265 — зависит от способа сигнализации.</li>
+</ul></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

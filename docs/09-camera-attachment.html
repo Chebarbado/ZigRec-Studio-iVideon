@@ -1,0 +1,346 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Привязка камеры — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="QR / serial / MAC, attachment token, polling, moving to Wi-Fi, the lack of a LAN channel, the Cute 2 specifics.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="on" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: QR / serial / MAC, attachment token, polling, moving to Wi-Fi, the lack of a LAN channel, the Cute 2 specifics.</span></div>
+<p><strong>Теги:</strong> #привязка_камеры #QR #WiFi #Cute2 #облако</p>
+<p>Как мастер подключения (<code>com.ivideon.client.ui.wizard</code>) добавляет камеру. Главный вывод: <strong>приложение вообще не общается с камерой по локальной сети</strong> — вся привязка идёт через облачный API, а данные Wi-Fi камера получает, считывая объективом QR-код с экрана телефона.</p>
+<p>Достоверность: последовательность вызовов и поля — <strong>[код]</strong>. Содержимое QR-кода и то, как камера сама регистрируется в облаке, из APK <strong>не определить</strong> — это логика сервера и прошивки.</p>
+<p>Порядок экранов описан в <code>resources/res/navigation/device_connection_wizard.xml</code> и <code>camera_wifi_reconnection_flow.xml</code>.</p>
+<h2 id="91">9.1. Способы привязки</h2>
+<p>Какие способы доступны конкретной модели, решает сервер (<code>model_info.methods</code>, см. 9.3). Enum способов — <code>p000/ia0.java:19-22</code>: <code>qr</code>, <code>wps</code>, <code>mac</code>, <code>sn</code>.</p>
+<table>
+<thead>
+<tr>
+<th>способ</th>
+<th>состояние в приложении</th>
+<th>реализация</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>QR-код на экране телефона → объектив камеры</strong> (<code>qr</code>)</td>
+<td>реализован; основной для Wi-Fi-камер</td>
+<td>фрагменты <code>com/ivideon/client/p009ui/wizard/methods/p010qr/*</code>, ViewModel <code>p000/ls8.java</code>, <code>p000/js8.java</code></td>
+</tr>
+<tr>
+<td><strong>Серийный номер</strong> (<code>sn</code>) / <strong>MAC</strong> (<code>mac</code>), камера на Ethernet</td>
+<td>реализован</td>
+<td><code>…/wizard/methods/wired/*</code>, ViewModel <code>p000/a5a.java</code></td>
+</tr>
+<tr>
+<td>Перевод уже привязанной камеры с Ethernet на Wi-Fi</td>
+<td>реализован, запускается после привязки</td>
+<td><code>…/wizard/methods/wifi/*</code>, <code>p000/ui1.java</code>, <code>p000/io1.java</code></td>
+</tr>
+<tr>
+<td>ПК/веб-камера через Ivideon Server</td>
+<td>только экраны-инструкции</td>
+<td><code>…/wizard/methods/desktop/*</code></td>
+</tr>
+<tr>
+<td>WPS</td>
+<td>только значение enum, нигде не используется</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Точка доступа камеры (AP mode), Bluetooth, звук</td>
+<td><strong>отсутствуют</strong></td>
+<td>см. 9.6</td>
+</tr>
+</tbody>
+</table>
+<h2 id="92-qr">9.2. Привязка по QR — последовательность</h2>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code>sequenceDiagram
+    participant U as Пользователь
+    participant A as Клиент
+    participant C as Облако Ivideon
+    participant K as Камера
+    U-&gt;&gt;A: (опц.) сканирует наклейку камеры
+    A-&gt;&gt;C: POST /device_models?op=RECOGNIZE {label_text}
+    C--&gt;&gt;A: model_info (methods, scanning_led_color…)
+    U-&gt;&gt;A: SSID и пароль Wi-Fi
+    A-&gt;&gt;C: POST /servers?op=CREATE {name, user, timezone, attachment_timeout: 600}
+    C--&gt;&gt;A: attachment token {id, status: pending, expires_at}
+    A-&gt;&gt;C: POST /attachment_tokens/{id}/qr_code?op=GET {wifi_ssid, wifi_password}
+    C--&gt;&gt;A: изображение QR-кода
+    A-&gt;&gt;K: QR на экране → объектив камеры
+    K-&gt;&gt;C: подключается к Wi-Fi и регистрируется (вне приложения)
+    loop каждые 3 с, до expires_at
+        A-&gt;&gt;C: POST /attachment_tokens/{id}?op=GET
+    end
+    C--&gt;&gt;A: status: finished, server: &lt;serverId&gt;
+    loop каждые 5 с
+        A-&gt;&gt;C: POST /servers/{serverId}?op=GET {projection}
+    end
+    C--&gt;&gt;A: online: true → готово
+</code></pre></div>
+
+<h3 id="1">Шаг 1. Создание токена привязки</h3>
+<p>Отдельного «создать» у <code>/attachment_tokens</code> нет — токен возвращает <code>POST /servers?op=CREATE</code> (<code>p000/InterfaceC2236lu.java:91</code>; тело <code>p000/gl2.java</code>, сборка <code>p000/w03.java:75-79</code>).</p>
+<table>
+<thead>
+<tr>
+<th>поле запроса</th>
+<th>тип</th>
+<th>значение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td><code>"&lt;vendorName&gt; &lt;modelAlias&gt;"</code>, по умолчанию <code>"Camera"</code> (<code>p000/m13.java:66-77</code>)</td>
+</tr>
+<tr>
+<td><code>user</code></td>
+<td>string</td>
+<td><code>owner_id</code> из OAuth-токена строкой</td>
+</tr>
+<tr>
+<td><code>device_id</code></td>
+<td>string | null</td>
+<td>для QR — <code>null</code>; для проводной привязки — серийный номер или MAC</td>
+</tr>
+<tr>
+<td><code>device_id_type</code></td>
+<td><code>"mac"</code> | <code>"serial_number"</code> | null</td>
+<td><code>p000/u13.java</code></td>
+</tr>
+<tr>
+<td><code>timezone</code></td>
+<td>string</td>
+<td>IANA-зона телефона (<code>ZoneId.systemDefault().getId()</code>)</td>
+</tr>
+<tr>
+<td><code>attachment_timeout</code></td>
+<td>int, секунды</td>
+<td><code>600</code> (<code>p000/w03.java:17,76</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>Ответ — токен привязки (<code>p000/ja0.java</code>):</p>
+<table>
+<thead>
+<tr>
+<th>поле</th>
+<th>тип</th>
+<th>примечание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>string</td>
+<td>id токена</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td><code>pending</code> | <code>finished</code> | <code>timed_out</code></td>
+<td><code>p000/ka0.java</code></td>
+</tr>
+<tr>
+<td><code>expires_at</code></td>
+<td>дата</td>
+<td>крайний срок опроса</td>
+</tr>
+<tr>
+<td><code>server</code></td>
+<td>string | null</td>
+<td>id сервера; появляется при <code>finished</code></td>
+</tr>
+<tr>
+<td><code>owner</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>text_template</code></td>
+<td>string</td>
+<td>приложение его <strong>не читает</strong>. <strong>[гипотеза]</strong>: шаблон текстового содержимого QR. Стоит посмотреть в живом ответе</td>
+</tr>
+</tbody>
+</table>
+<h3 id="2-qr-">Шаг 2. Получение QR-кода</h3>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST /attachment_tokens/{tokenId}/qr_code?op=GET</span>
+<span style="color: #ED007E; background-color: #1E0010">{&quot;wifi_ssid&quot;: &quot;&lt;SSID&gt;&quot;, &quot;wifi_password&quot;: &quot;&lt;пароль&gt;&quot;}</span>
+</code></pre></div>
+
+<p>Ответ — <strong>картинка</strong> (приложение делает <code>BitmapFactory.decodeStream(body.byteStream())</code>; вызов — в недекомпилированном <code>invokeSuspend</code> класса <code>p000/C2711yj.java</code>, запускается из <code>p000/js8.java:167</code>). Телефон QR <strong>не генерирует</strong> — поэтому формат полезной нагрузки из APK узнать нельзя; надо декодировать реальный QR.</p>
+<blockquote>
+<p><strong>Пароль Wi-Fi уходит на сервер Ivideon</strong> в открытом виде внутри HTTPS-запроса — это свойство протокола, а не ошибка клиента.</p>
+</blockquote>
+<p><strong>Особенность Cute 2</strong> (<code>p000/es0.java:16-24</code>): для <code>model_id</code> из набора <code>cute-2</code>, <code>Ivideon-Cute-2</code>, <code>cute-360</code>, <code>Ivideon-Cute-360</code> приложение <strong>запрещает символ <code>&amp;</code></strong> в пароле и в имени сети, введённом вручную. <strong>[вывод]</strong>: парсер QR в этих камерах считает <code>&amp;</code> разделителем полей, то есть полезная нагрузка, вероятно, имеет вид <code>ключ=значение&amp;…</code>. Если в пароле вашей сети есть <code>&amp;</code>, привязка Cute 2 по QR не сработает.</p>
+<h3 id="3-p000q91java-p000p91java">Шаг 3. Ожидание (<code>p000/q91.java</code>, <code>p000/p91.java</code>)</h3>
+<ol>
+<li><strong>Опрос токена</strong> — <code>POST /attachment_tokens/{id}?op=GET</code> каждые <strong>3 с</strong>, общий таймаут <code>expires_at − now</code>. Сетевые ошибки логируются, опрос продолжается; <code>ATTACHMENT_TOKEN_NOT_FOUND</code> прерывает. Статус не <code>finished</code> к концу срока → состояние <code>Timeout</code>.</li>
+<li><strong>Опрос сервера</strong> — <code>POST /servers/{serverId}?op=GET</code> каждые <strong>5 с</strong> с проекцией по ключам <code>id, owner, connected, online, name, device_type, cameras{…}, software_version, available_updates, device_model, vendor, needs_credentials</code> (<code>p000/r23.java:99</code>). Собственного таймаута у этого цикла нет.</li>
+<li>Если <code>needs_credentials: true</code> — приложение спрашивает логин/пароль устройства и шлёт <code>POST /servers/{serverId}/auth_credentials?op=UPDATE {"username","password"}</code> (актуально для сторонних камер, не для Cute 2 <strong>[вывод]</strong>). Ошибка — <code>BAD_DEVICE_CREDENTIALS</code>.</li>
+<li><strong>Успех</strong>: <code>server.online</code> и первая камера сервера <code>online</code> (<code>p000/C2138j7.java:275-281</code>).</li>
+</ol>
+<!-- figure: attachment-states | Состояния мастера привязки -->
+
+<h3 id="_1">Отмена</h3>
+<p><code>p000/C2175k7.java:442-490</code>: если токен уже <code>finished</code> — удаляется сервер (<code>POST /servers/{id}?op=DELETE</code>); иначе — токен: <code>POST /attachment_tokens/{id}?op=DELETE {"fail_if_finished": false}</code> (<code>p000/rw2.java</code>).</p>
+<h3 id="_2">Коды ошибок сценария</h3>
+<p><code>ATTACHMENT_TOKEN_NOT_FOUND</code>, <code>TOKEN_FINISHED</code>, <code>SUBJECT_RIGHT_MISSING_FOR_ATTACHMENT_TOKEN</code>, <code>SUBJECT_RIGHT_REVOKED_FOR_ATTACHMENT_TOKEN</code>, <code>UNRECOGNIZED_FORMAT</code>, <code>UNSUPPORTED_DEVICE</code>, <code>BAD_DEVICE_CREDENTIALS</code>, <code>DEVICE_TIMED_OUT</code>, <code>SERVER_OFFLINE</code> (маппинг — <code>p000/C0297du.java:19</code>). Общая модель ошибок — в <a href="10-errors.md">10-errors.md</a>.</p>
+<h2 id="93">9.3. Распознавание модели по наклейке</h2>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST /device_models?op=RECOGNIZE          # публичный (@mn6) — токен не добавляется</span>
+<span style="color: #ED007E; background-color: #1E0010">{&quot;label_text&quot;: &quot;&lt;сырая строка из штрих-/QR-кода на наклейке камеры&gt;&quot;}</span>
+</code></pre></div>
+
+<p>Ответ (<code>p000/w13.java</code>, <code>p000/w96.java</code>, <code>p000/v13.java</code>):</p>
+<table>
+<thead>
+<tr>
+<th>путь</th>
+<th>тип</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>model_info.vendor_id</code>, <code>vendor_name</code>, <code>model_id</code>, <code>model_alias</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>model_info.methods</code></td>
+<td>массив из <code>qr</code>, <code>wps</code>, <code>mac</code>, <code>sn</code></td>
+</tr>
+<tr>
+<td><code>model_info.logo_url</code></td>
+<td>string | null</td>
+</tr>
+<tr>
+<td><code>model_info.scanning_led_color</code></td>
+<td><code>red</code>, <code>orange</code>, <code>yellow</code>, <code>green</code>, <code>blue</code>, <code>indigo</code>, <code>violet</code>, <code>white</code>, <code>gray</code> — цвет мигающего светодиода, когда камера готова читать QR (<code>p000/hl5.java</code>)</td>
+</tr>
+<tr>
+<td><code>device_info.serial_number</code>, <code>device_info.mac</code></td>
+<td>string | null</td>
+</tr>
+</tbody>
+</table>
+<p>Логика выбора (<code>p000/nb8.java:159-192</code>): <code>qr</code> в <code>methods</code> → беспроводной сценарий; <code>sn</code> + серийный номер → проводной по серийнику; иначе <code>mac</code> + MAC → проводной по MAC. Если возможны оба — пользователь выбирает. Ошибки: <code>UNRECOGNIZED_FORMAT</code>, <code>UNSUPPORTED_DEVICE</code>.</p>
+<p>Локального каталога моделей в приложении нет — все данные о моделях приходят отсюда.</p>
+<h2 id="94">9.4. Проводная привязка</h2>
+<p>Тот же <code>POST /servers?op=CREATE</code>, но <code>device_id</code> = серийный номер или MAC и соответствующий <code>device_id_type</code> (<code>p000/a5a.java:84-96</code>). Пользователь перезагружает камеру по питанию с подключённым Ethernet; дальше — тот же опрос, что в 9.2.</p>
+<h2 id="95-wi-fi">9.5. Перевод привязанной камеры на Wi-Fi</h2>
+<p>Только для <strong>уже привязанной и находящейся онлайн</strong> камеры. <code>serverId</code> — часть id камеры до <code>:</code> (<code>p000/vqa.java:30-35</code>); отсюда формат id камеры: <code>&lt;serverId&gt;:&lt;индекс канала&gt;</code>.</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST /servers/{serverId}/wifi?op=SCAN                     # без тела; сканирует сама камера</span>
+<span style="color: #ED007E; background-color: #1E0010">→ {&quot;networks&quot;: [{&quot;ssid&quot;: &quot;…&quot;, &quot;protection&quot;: &quot;OPEN&quot;|&quot;WPA2&quot;|&quot;WPA&quot;|&quot;WEP&quot;, &quot;signal&quot;: &lt;int&gt;}]}</span>
+
+<span style="color: #ED007E; background-color: #1E0010">POST /servers/{serverId}/wifi?op=CONNECT</span>
+<span style="color: #ED007E; background-color: #1E0010">{&quot;ssid&quot;: &quot;…&quot;, &quot;password&quot;: &quot;…&quot;, &quot;protection&quot;: &quot;OPEN&quot;|&quot;WEP&quot;|&quot;WPA2&quot;}</span>
+</code></pre></div>
+
+<p>Источники: <code>p000/lqa.java</code>, <code>kqa.java</code>, <code>tqa.java</code>, <code>wb2.java</code>, <code>io1.java:31</code>. Последовательность (<code>p000/ui1.java:180-240</code>, частично декомпилировано — условия цикла приблизительны):</p>
+<ol>
+<li><code>POST /servers/{id}?op=GET</code> с проекцией <code>{connected, network_type, wifi:{ssid}}</code>; <code>network_type</code> ∈ <code>eth</code>, <code>wifi</code>, <code>mobile</code>, <code>unknown</code>.</li>
+<li><code>CONNECT</code>.</li>
+<li>Пауза 5 с, затем тот же <code>GET</code> каждые 5 с до <code>connected &amp;&amp; network_type == "wifi" &amp;&amp; wifi.ssid == &lt;целевой&gt;</code>; три подряд «не подключена» → неудача; <code>SERVER_OFFLINE</code> → «связь потеряна».</li>
+</ol>
+<h2 id="96">9.6. Локальная сеть: что искали и чего нет</h2>
+<p>Поиск по всему <code>sources/</code>: <code>NsdManager</code>, <code>MulticastSocket</code>, <code>DatagramSocket</code>, <code>DatagramPacket</code>, <code>WifiNetworkSpecifier</code>, <code>WifiNetworkSuggestion</code>, классы Bluetooth, <code>WpsInfo</code>, <code>bindProcessToNetwork</code>, литералы SSDP/mDNS/ONVIF, <code>rtsp://</code>, частные IP-адреса — <strong>ноль совпадений</strong> (при этом <code>WifiManager</code> находится — в <code>p000/fx1.java</code>, то есть поиск рабочий). <code>java.net.Socket</code> встречается только во внутренностях OkHttp. В манифесте нет разрешений Bluetooth, <code>CHANGE_WIFI_MULTICAST_STATE</code>, <code>NEARBY_WIFI_DEVICES</code>. <code>WifiManager</code> используется лишь для списка сетей и текущего SSID — к сети камеры приложение не подключается; шаблонов SSID камер нет.</p>
+<p>Со стороны приложения вопрос закрыт: <strong>прямого LAN/P2P-канала «телефон — камера» нет</strong>. Открывает ли прошивка Cute 2 какие-то локальные порты (RTSP/ONVIF/HTTP) — отдельный вопрос, решается только сканом самой камеры.</p>
+<h2 id="97-apk">9.7. Что из APK узнать нельзя</h2>
+<ul>
+<li>содержимое QR-кода и смысл <code>text_template</code> — декодировать реальный QR и посмотреть живой ответ <code>servers?op=CREATE</code>;</li>
+<li>протокол «камера ↔ облако» — он в прошивке;</li>
+<li>принимает ли Cute 2 привязку по <code>sn</code>/<code>mac</code> — зависит от ответа <code>RECOGNIZE</code> на её наклейку.</li>
+</ul>
+<h2 id="98">9.8. Прочие перечисления</h2>
+<ul>
+<li><code>DeviceType</code> (<code>com/ivideon/sdk/network/data/p012v5/DeviceType.java</code>): <code>desktop</code>, <code>camera</code>, <code>dvr</code>, <code>doorbell</code>, <code>bridge</code>, <code>cloud_bridge</code>, <code>unknown</code>.</li>
+<li>Форм-фактор (<code>p000/yc1.java</code>, только для UI): <code>home</code>, <code>bullet</code>, <code>cupola</code>.</li>
+</ul></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

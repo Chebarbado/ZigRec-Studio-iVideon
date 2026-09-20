@@ -1,0 +1,830 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Справочник API — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="Every endpoint with fields: servers, cameras, archive, export, timelapses, events, user, batch; the minimal set for a driver.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="on" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Справочник API</span><span class="en">API reference</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: Every endpoint with fields: servers, cameras, archive, export, timelapses, events, user, batch; the minimal set for a driver.</span></div>
+<p><strong>Теги:</strong> #API5 #эндпоинты #камеры #архив #события #batches</p>
+<p>Все эндпоинты, которые вызывает приложение 3.7.1, с телами запросов и ответов. Общие правила (конверт, авторизация, даты, проекции) — в <a href="04-request-conventions.md">04-request-conventions.md</a>; здесь они подразумеваются: <strong>в таблицах показано содержимое <code>result</code></strong>, а не весь ответ.</p>
+<p>Достоверность: пути и имена полей — <strong>[код]</strong> (аннотации <code>@wy6</code>/<code>@mg4</code> и <code>@ok8</code>). Типы — как объявлены в клиенте; необязательность помечена там, где она видна. На живом API не проверено.</p>
+<p>Обозначения: <strong>дата</strong> — число, Unix-секунды (возможна дробная часть); <strong>мс</strong> — целое, Unix-миллисекунды; <code>?</code> — поле может отсутствовать; «пусто» — результат без данных (<code>{}</code>, <code>""</code> или <code>null</code>).</p>
+<!-- figure: api-map | Карта ресурсов API5 -->
+
+<p>Сервисные интерфейсы в коде:</p>
+<table>
+<thead>
+<tr>
+<th>интерфейс</th>
+<th>содержимое</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>p000/InterfaceC2236lu.java</code></td>
+<td>основной сервис, ~75 методов</td>
+</tr>
+<tr>
+<td><code>p000/InterfaceC2345or.java</code></td>
+<td>картинки</td>
+</tr>
+<tr>
+<td><code>p000/jc0.java</code>, <code>p000/tl7.java</code></td>
+<td>OAuth, 2FA, регистрация, сброс пароля — см. <a href="03-auth.md">03-auth.md</a></td>
+</tr>
+<tr>
+<td><code>p000/qm2.java</code>, <code>cv4.java</code>, <code>pp0.java</code>, <code>vx8.java</code>, <code>e26.java</code></td>
+<td>облака партнёров, IDAM, баннеры, site security, маркетинг</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="61">6.1. Серверы и камеры</h2>
+<p>Терминология: <strong>сервер</strong> — устройство, подключённое к облаку (камера с прошивкой Ivideon, видеорегистратор, ПК с Ivideon Server); <strong>камера</strong> — видеоканал сервера. Id камеры — <strong><code>&lt;serverId&gt;:&lt;индекс&gt;</code></strong> (приложение получает <code>serverId</code> как <code>cameraId.split(":")[0]</code>, <code>p000/r23.java:152</code>).</p>
+<h3 id="post-serversopfind"><code>POST /servers?op=FIND</code></h3>
+<p>Главный вызов «что есть в аккаунте». Помечен <code>@kr7</code>: приложение получает <code>result</code> сырым JSON и разбирает позже.</p>
+<p>Запрос (<code>p000/p14.java</code>):</p>
+<table>
+<thead>
+<tr>
+<th>поле</th>
+<th>тип</th>
+<th>примечание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>skip</code>, <code>limit</code></td>
+<td>int?</td>
+<td>постраничная выборка</td>
+</tr>
+<tr>
+<td><code>projection</code></td>
+<td>object</td>
+<td>какие поля вернуть — см. ниже</td>
+</tr>
+<tr>
+<td><code>user</code></td>
+<td>string?</td>
+<td>приложение не шлёт</td>
+</tr>
+<tr>
+<td><code>include_all</code></td>
+<td>bool</td>
+<td>приложение шлёт <code>false</code></td>
+</tr>
+</tbody>
+</table>
+<p>Вызывающий код FIND jadx не декомпилировал — какие <code>skip</code>/<code>limit</code> шлёт приложение, неизвестно.</p>
+<p><strong>Проекция, которую использует приложение</strong> (<code>p000/r23.java:64-99</code>) — готовый образец для своего клиента:</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #F8F8F2">{</span>
+<span style="color: #F8F8F2">  </span><span style="color: #FF4689">&quot;projection&quot;</span><span style="color: #F8F8F2">: {</span>
+<span style="color: #F8F8F2">    </span><span style="color: #FF4689">&quot;id&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;owner&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;connected&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;online&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;name&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;device_type&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">    </span><span style="color: #FF4689">&quot;software_version&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;available_updates&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;device_model&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;vendor&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">    </span><span style="color: #FF4689">&quot;needs_credentials&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">    </span><span style="color: #FF4689">&quot;cameras&quot;</span><span style="color: #F8F8F2">: {</span>
+<span style="color: #F8F8F2">      </span><span style="color: #FF4689">&quot;id&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;owner&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;name&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;plan&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;connected&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;online&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">      </span><span style="color: #FF4689">&quot;turned_off_until&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;width&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;height&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;rotation&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">      </span><span style="color: #FF4689">&quot;features&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;permissions&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;timezone&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">      </span><span style="color: #FF4689">&quot;services&quot;</span><span style="color: #F8F8F2">: {</span>
+<span style="color: #F8F8F2">        </span><span style="color: #FF4689">&quot;enabled&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;option&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">0</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;_others&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">},</span>
+<span style="color: #F8F8F2">        </span><span style="color: #FF4689">&quot;archive&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;days&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;active&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">},</span>
+<span style="color: #F8F8F2">        </span><span style="color: #FF4689">&quot;notify&gt;motion&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;active&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">}, </span><span style="color: #FF4689">&quot;notify&gt;sound&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;active&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">}, </span><span style="color: #FF4689">&quot;notify&gt;status&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;active&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">},</span>
+<span style="color: #F8F8F2">        </span><span style="color: #FF4689">&quot;timelapse&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;active&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">}, </span><span style="color: #FF4689">&quot;public_records&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;active&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">}</span>
+<span style="color: #F8F8F2">      }</span>
+<span style="color: #F8F8F2">    }</span>
+<span style="color: #F8F8F2">  }</span>
+<span style="color: #F8F8F2">}</span>
+</code></pre></div>
+
+<p>(в приложении внутри <code>services</code> есть ещё <code>archive_local</code>, <code>archive_export</code>, <code>rights</code>, <code>face_recognition</code> — все с <code>{"option": 0, "_others": 1}</code>).</p>
+<p><strong>Объект сервера</strong> (<code>ServerSlice</code>, <code>p000/vk8.java</code>):</p>
+<table>
+<thead>
+<tr>
+<th>поле</th>
+<th>тип</th>
+<th>примечание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>string</td>
+<td>префикс id его камер</td>
+</tr>
+<tr>
+<td><code>owner</code></td>
+<td>string</td>
+<td>id пользователя-владельца; приложение сравнивает с собой → «своя/расшаренная»</td>
+</tr>
+<tr>
+<td><code>connected</code>, <code>online</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>device_type</code></td>
+<td>string</td>
+<td><code>desktop</code>, <code>camera</code>, <code>dvr</code>, <code>doorbell</code>, <code>bridge</code>, <code>cloud_bridge</code>, <code>unknown</code></td>
+</tr>
+<tr>
+<td><code>cameras</code></td>
+<td>Camera[]</td>
+<td></td>
+</tr>
+<tr>
+<td><code>software_version</code></td>
+<td>string</td>
+<td><strong>версия прошивки/ПО</strong></td>
+</tr>
+<tr>
+<td><code>available_updates</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>device_model</code>, <code>vendor</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>needs_credentials</code></td>
+<td>bool</td>
+<td>устройству нужны логин/пароль</td>
+</tr>
+</tbody>
+</table>
+<p>Ключей <code>serial</code>, <code>mac</code>, <code>firmware_version</code> в этой модели нет.</p>
+<p><strong>Объект камеры</strong> (<code>CameraSlice</code>, <code>p000/tm1.java</code>):</p>
+<table>
+<thead>
+<tr>
+<th>поле</th>
+<th>тип</th>
+<th>примечание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>string</td>
+<td><code>&lt;serverId&gt;:&lt;индекс&gt;</code></td>
+</tr>
+<tr>
+<td><code>owner</code>, <code>name</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>plan</code></td>
+<td>string?</td>
+<td>тариф</td>
+</tr>
+<tr>
+<td><code>connected</code>, <code>online</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>turned_off_until</code></td>
+<td>number</td>
+<td><code>0</code> — включена; <code>-1</code> — выключена бессрочно; иначе Unix-секунды, до которых выключена</td>
+</tr>
+<tr>
+<td><code>width</code>, <code>height</code>, <code>rotation</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>timezone</code></td>
+<td>string</td>
+<td>IANA</td>
+</tr>
+<tr>
+<td><code>features</code></td>
+<td>string[]</td>
+<td>возможности: встречаются <code>ptz</code>, <code>push_to_talk</code>, <code>push_to_talk_2</code>, <code>speed_play</code>, <code>led_switch</code>, <code>ir_led</code>, <code>motion_detector</code>, <code>sound_detector</code>, <code>mic_sensitivity</code>, <code>sd_card</code>, <code>firmware</code>, <code>wifi_setup</code></td>
+</tr>
+<tr>
+<td><code>permissions</code></td>
+<td>string[]</td>
+<td><code>live</code>, <code>archive</code>, <code>ptz</code>, <code>admin</code>, <code>events</code> (<code>p000/ug1.java</code>); для своих камер приложение список игнорирует</td>
+</tr>
+<tr>
+<td><code>services</code></td>
+<td>object</td>
+<td>услуги: у каждой <code>active</code>; <code>enabled.active</code> — bool либо строка-причина <code>"billing"</code> / <code>"camera"</code>; <code>archive.days</code> — глубина архива (<code>p000/xzb.java:217-290</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>Перед вызовом управляющих функций проверяйте <code>features</code> — это способ узнать, что умеет Cute 2.</p>
+<h3 id="_1">Прочие вызовы</h3>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>тело</th>
+<th>результат</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /servers/{serverId}?op=GET</code></td>
+<td><code>{"projection": {…}}</code></td>
+<td>сервер (сырой JSON)</td>
+</tr>
+<tr>
+<td><code>POST /cameras/{cameraId}?op=GET</code></td>
+<td><code>{"projection": {…}}</code></td>
+<td>камера (сырой JSON)</td>
+</tr>
+<tr>
+<td><code>POST /servers?op=CREATE</code></td>
+<td>см. <a href="09-camera-attachment.md">09-camera-attachment.md</a></td>
+<td>токен привязки</td>
+</tr>
+<tr>
+<td><code>POST /servers/{serverId}?op=DELETE</code>, <code>POST /cameras/{cameraId}?op=DELETE</code></td>
+<td>—</td>
+<td>пусто</td>
+</tr>
+<tr>
+<td><code>POST /folders?op=FIND</code></td>
+<td><code>{"projection": {…}}</code></td>
+<td>папки (сырой JSON)</td>
+</tr>
+<tr>
+<td>управление камерой, PTZ, плагины, SD-карта, Wi-Fi</td>
+<td></td>
+<td>см. <a href="08-camera-control.md">08-camera-control.md</a></td>
+</tr>
+</tbody>
+</table>
+<h3 id="_2">Раскладки (сетки камер)</h3>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>тело</th>
+<th>результат</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /layouts?op=FIND</code></td>
+<td><code>{user?, limit?, skip?}</code></td>
+<td><code>CameraLayout[]</code></td>
+</tr>
+<tr>
+<td><code>POST /layouts?op=CREATE</code></td>
+<td><code>{name, columns, rows, user?}</code></td>
+<td><code>CameraLayout</code></td>
+</tr>
+<tr>
+<td><code>POST /layouts/{layoutId}?op=UPDATE</code></td>
+<td><code>{items?, name?, columns?, rows?}</code></td>
+<td>пусто</td>
+</tr>
+<tr>
+<td><code>POST /layouts/{layoutId}?op=DELETE</code></td>
+<td>—</td>
+<td>пусто</td>
+</tr>
+</tbody>
+</table>
+<p><code>CameraLayout</code> (<code>p000/ge1.java</code>): <code>{id, name, owner, columns: int, rows: int, items: […]}</code>.</p>
+<hr />
+<h2 id="62">6.2. Видео и изображения</h2>
+<p>Подробно — <a href="07-video.md">07-video.md</a>.</p>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>параметры</th>
+<th>результат</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /cameras/{cameraId}/live_stream</code></td>
+<td><code>q</code>, <code>video_codecs</code>, <code>audio_codecs</code></td>
+<td>поток FLV; URL подписывается</td>
+</tr>
+<tr>
+<td><code>GET /cameras/{cameraId}/archive_stream</code></td>
+<td><code>start_time</code> (мс), <code>end_time?</code> (мс), <code>speed?</code>, <code>q</code>, <code>video_codecs</code>, <code>audio_codecs</code></td>
+<td>поток FLV; URL подписывается</td>
+</tr>
+<tr>
+<td><code>GET /cameras/{cameraId}/live_preview</code></td>
+<td><code>q</code></td>
+<td>JPEG; URL подписывается</td>
+</tr>
+<tr>
+<td><code>POST /cameras/{cameraId}/live_preview?op=STREAM</code></td>
+<td>query: <code>fps</code>, <code>q</code></td>
+<td><code>{url}</code> — WebSocket</td>
+</tr>
+<tr>
+<td><code>GET /events/{eventId}/thumbnails</code></td>
+<td><code>qty</code>, <code>width?</code>, <code>height?</code>, <code>columns</code></td>
+<td>картинка; <code>Authorization: Bearer</code></td>
+</tr>
+<tr>
+<td><code>POST /cameras/{cameraId}/voice_message?op=START</code></td>
+<td><code>{mode, codec: "opus", frame_size: 480}</code></td>
+<td><code>{url}</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="63">6.3. Архив</h2>
+<h3 id="post-camerascameraidarchive_timelineopget"><code>POST /cameras/{cameraId}/archive_timeline?op=GET</code></h3>
+<p>Запрос (<code>p000/fo9.java</code>): <code>{"start_time": &lt;мс&gt;, "end_time": &lt;мс&gt;}</code> — <strong>миллисекунды</strong>, в отличие от большинства дат API.</p>
+<p>Результат (<code>ArchiveRecordsList</code>, <code>p000/g50.java</code>): <code>{"timeline": [ … ]}</code>, элемент:</p>
+<table>
+<thead>
+<tr>
+<th>поле</th>
+<th>тип</th>
+<th>примечание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start_time</code></td>
+<td>мс</td>
+<td></td>
+</tr>
+<tr>
+<td><code>duration</code></td>
+<td>мс</td>
+<td></td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>int</td>
+<td><code>1</code> — только локально (SD), <code>2</code> — только облако, <code>3</code> — и там и там (<code>p000/n30.java</code>)</td>
+</tr>
+<tr>
+<td><code>playback_allowed</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Приложение склеивает соседние записи одного типа с разрывом ≤ 200 мс (<code>p000/o50.java</code>).</p>
+<h3 id="post-camerascameraidarchive_calendaropget"><code>POST /cameras/{cameraId}/archive_calendar?op=GET</code></h3>
+<p>Два варианта тела на одном пути:</p>
+<table>
+<thead>
+<tr>
+<th>вариант</th>
+<th>запрос</th>
+<th>результат</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>диапазон дат (<code>p000/yh4.java</code>)</td>
+<td><code>{"start_date": "yyyy-MM-dd", "end_date": "yyyy-MM-dd", "timezone": "&lt;IANA&gt;"}</code> — конец не включается</td>
+<td><code>{"calendar": [{"date": "yyyy-MM-dd", "coverage": &lt;int&gt;}]}</code></td>
+</tr>
+<tr>
+<td>месяц (<code>p000/xh4.java</code>)</td>
+<td><code>{"month": "&lt;строка&gt;", "timezone": "&lt;IANA&gt;"}</code> — формат <code>month</code> не установлен</td>
+<td><code>{"calendar": [&lt;int&gt;, …]}</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="_3">Экспорт клипов</h3>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>тело</th>
+<th>результат</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /cameras/{cameraId}/archive?op=EXPORT</code></td>
+<td><code>{"start_time": &lt;дата&gt;, "end_time": &lt;дата&gt;, "_need_notify": true}</code></td>
+<td><code>ExportedRecord</code></td>
+</tr>
+<tr>
+<td><code>POST /exported_records?op=FIND</code></td>
+<td><code>{skip?, limit?, created_since?, created_until?, projection?}</code></td>
+<td><code>ExportedRecord[]</code></td>
+</tr>
+<tr>
+<td><code>POST /exported_records/{id}?op=GET</code></td>
+<td>—</td>
+<td><code>ExportedRecord</code></td>
+</tr>
+<tr>
+<td><code>POST /exported_records/{id}?op=DELETE</code></td>
+<td>—</td>
+<td>пусто</td>
+</tr>
+<tr>
+<td><code>POST /exported_records/{id}/public_access?op=SHARE</code> / <code>?op=REVOKE</code></td>
+<td>—</td>
+<td>пусто</td>
+</tr>
+</tbody>
+</table>
+<p><code>ExportedRecord</code> (<code>p000/yu3.java</code>): <code>{id, camera, created_at, start_time, end_time: дата, status, progress: int, file_size: long, has_public_access: bool, preview_url, video_url}</code>; <code>status</code> ∈ <code>in_queue</code>, <code>in_progress</code>, <code>ready</code>, ошибка (<code>p000/cv3.java</code>). Схема работы: EXPORT → опрашивать <code>GET</code> до <code>ready</code> → скачать <code>video_url</code>.</p>
+<h3 id="_4">Таймлапсы</h3>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>тело</th>
+<th>результат</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /timelapses?op=FIND</code></td>
+<td><code>{created_since?, created_until?, limit?, name?, cameras?, period_start?, period_end?, skip?}</code></td>
+<td><code>Timelapse[]</code></td>
+</tr>
+<tr>
+<td><code>POST /timelapses?op=CREATE</code></td>
+<td><code>{name, period_start, period_end, cameras: [id], schedule, duration: float, quality, clock_position, missing_frame_policy?}</code></td>
+<td><code>Timelapse</code></td>
+</tr>
+<tr>
+<td><code>POST /timelapses/{id}?op=GET</code> / <code>?op=DELETE</code></td>
+<td>—</td>
+<td><code>Timelapse</code> / пусто</td>
+</tr>
+<tr>
+<td><code>POST /timelapse_summary?op=FIND</code></td>
+<td><code>{cameras: [id], name?, statuses?, timeframe_since?, timeframe_until?, missing_frames_level_min?, missing_frames_level_max?, limit?, skip?}</code></td>
+<td><code>TimelapseSummary[]</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>Timelapse</code> (<code>p000/to9.java</code>): <code>id, name, owner_id, created_at, period_start, period_end, cameras, schedule, timezone, duration, quality, clock_position, missing_frame_policy, status, progress, preview_url, video_url, file_size, store_until, template_id, auto_generated</code>.</p>
+<hr />
+<h2 id="64">6.4. События и уведомления</h2>
+<h3 id="post-eventsopfind"><code>POST /events?op=FIND</code></h3>
+<p>Запрос (<code>EventsFilter</code>, <code>p000/tp3.java</code>):</p>
+<table>
+<thead>
+<tr>
+<th>поле</th>
+<th>тип</th>
+<th>примечание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start_time</code>, <code>end_time</code></td>
+<td>дата</td>
+<td>Unix-секунды</td>
+</tr>
+<tr>
+<td><code>types</code></td>
+<td>string[]</td>
+<td>иерархические имена, например <code>analytics/tampering/image_too_dark/started</code></td>
+</tr>
+<tr>
+<td><code>sources</code></td>
+<td><code>[{type: "camera"\|"server", id}]</code></td>
+<td>фильтр по источникам (<code>p000/ho3.java</code>)</td>
+</tr>
+<tr>
+<td><code>delivered</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>skip</code>, <code>limit</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sort_by_time</code></td>
+<td>string</td>
+<td>по умолчанию <code>"desc"</code></td>
+</tr>
+<tr>
+<td><code>user</code>, <code>lang</code></td>
+<td>string</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Результат — <code>Event[]</code> (<code>p000/en3.java</code>): <code>id, type, time: дата, status, preview, clip: URL, clip_duration: int, date, value, user, delivered, chain_id, device_id, source_type, source_id, device_type, name, description</code>.</p>
+<p><code>preview</code> и <code>clip</code> — URL, которые приложение загружает с <code>Authorization: Bearer &lt;access_token&gt;</code>.</p>
+<h3 id="_5">Прочее</h3>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>тело</th>
+<th>результат</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /events/{eventId}?op=GET</code></td>
+<td><code>{"projection": {…}}</code></td>
+<td>событие (сырой JSON)</td>
+</tr>
+<tr>
+<td><code>POST /events?op=GET_TYPES</code></td>
+<td><code>{platform: "android", partner_id?, user_id?, lang?}</code></td>
+<td><code>[{type, feed_settings, color, name: {&lt;lang&gt;: …}, template: {&lt;lang&gt;: …}}]</code> — <strong>справочник типов событий</strong>, полезно запросить один раз</td>
+</tr>
+<tr>
+<td><code>POST /notification_settings?op=FIND</code></td>
+<td><code>{"projection": {…}}</code></td>
+<td>сырой JSON</td>
+</tr>
+<tr>
+<td><code>POST /notification_settings?op=FIND_ONE</code></td>
+<td><code>{camera_id}</code> или <code>{camera_id, user, projection}</code></td>
+<td><code>{user_id, camera_id, event_types, channels, restrictions, mute_until}</code></td>
+</tr>
+<tr>
+<td><code>POST /notification_settings?op=UPSERT</code></td>
+<td><code>{camera_id, event_types, channels, schedule, mute_until, user}</code></td>
+<td>пусто</td>
+</tr>
+<tr>
+<td><code>POST /cameras/{cameraId}/notifications?op=TEST</code></td>
+<td>карта строк</td>
+<td>пусто</td>
+</tr>
+<tr>
+<td><code>POST /push_subscriptions?op=CREATE</code></td>
+<td><code>{user, platform: "android", device_id, tokens: {fcm?, rustore?, hms?}, app_id, language, sandbox: false}</code></td>
+<td>не типизирован</td>
+</tr>
+</tbody>
+</table>
+<p>Push-подписка привязана к экосистемам Android (FCM, RuStore, HMS); стороннему клиенту для событий остаётся <strong>опрос <code>events?op=FIND</code></strong>. Канала событий в реальном времени (WebSocket/long-poll) в основном сервисе не видно.</p>
+<hr />
+<h2 id="65">6.5. Пользователь и доступ</h2>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>тело</th>
+<th>результат</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /users/{uid}?op=GET</code></td>
+<td><code>{"projection": {…}}</code></td>
+<td>пользователь (сырой JSON); <code>uid</code> = <code>owner_id</code> из токена</td>
+</tr>
+<tr>
+<td><code>POST /users?op=GET_ID</code></td>
+<td><code>{login}</code></td>
+<td><code>{id}</code></td>
+</tr>
+<tr>
+<td><code>POST /users/{userId}/{property}?op=SET</code></td>
+<td><code>{"value": …}</code></td>
+<td>пусто; свойства: <code>dnd_until</code>, <code>events_clips_enabled</code></td>
+</tr>
+<tr>
+<td><code>POST /users/{uid}?op=DELETE</code></td>
+<td><code>{complete: true, password}</code></td>
+<td>пусто — <strong>удаление аккаунта</strong></td>
+</tr>
+<tr>
+<td><code>POST /users/{uid}/managed_accounts?op=CREATE</code></td>
+<td><code>{email}</code></td>
+<td><code>User</code></td>
+</tr>
+<tr>
+<td><code>POST /permission_grants?op=FIND</code></td>
+<td><code>{object_id, object_type, grantee_id, explicit_only, projection}</code></td>
+<td>сырой JSON</td>
+</tr>
+<tr>
+<td><code>POST /permission_grants/{permissionId}?op=DELETE</code></td>
+<td>—</td>
+<td>пусто</td>
+</tr>
+<tr>
+<td><code>POST /cameras/{cameraId}?op=SHARE</code></td>
+<td><code>{grantee_type: "user", grantee_id, permission}</code></td>
+<td>не типизирован</td>
+</tr>
+<tr>
+<td><code>POST /two_factor_methods?op=CREATE</code></td>
+<td><code>{value, type, password}</code></td>
+<td><code>{id, type, value, state, owner_id?}</code></td>
+</tr>
+<tr>
+<td><code>POST /two_factor_methods?op=CONFIRM</code></td>
+<td><code>{two_factor_method_id, code}</code></td>
+<td>то же</td>
+</tr>
+<tr>
+<td><code>POST /access_tokens/{accessTokenId}?op=REVOKE</code></td>
+<td>—</td>
+<td>пусто; публичный (<code>@mn6</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><code>User</code> (<code>p000/ada.java</code>): <code>id, login, login_type, account_type, partner, root_folder, language, country, currency, timezone, created_at, last_login, deleted, dnd_until, billing_version, api_host, api4_host, api5_host, access_token, _misc, services_b4, options</code>.</p>
+<p>Публичные (без токена), из <code>p000/tl7.java</code>: <code>POST /users?op=CREATE</code>, <code>POST /users?op=RESET_PASSWORD</code>, <code>POST /partners/{partnerId}/signup_form_config?op=GET</code>.</p>
+<hr />
+<h2 id="66">6.6. Пакетные запросы</h2>
+<p>Несколько POST-вызовов одним запросом.</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST /batches?op=CREATE</span>
+<span style="color: #ED007E; background-color: #1E0010">[</span>
+<span style="color: #ED007E; background-color: #1E0010">  {&quot;op&quot;: &quot;GET&quot;, &quot;path&quot;: &quot;/cameras/100-…:0&quot;, &quot;body&quot;: {&quot;projection&quot;: {&quot;online&quot;: 1}}},</span>
+<span style="color: #ED007E; background-color: #1E0010">  {&quot;op&quot;: &quot;GET&quot;, &quot;path&quot;: &quot;/cameras/100-…:1&quot;, &quot;body&quot;: {&quot;projection&quot;: {&quot;online&quot;: 1}}}</span>
+<span style="color: #ED007E; background-color: #1E0010">]</span>
+<span style="color: #ED007E; background-color: #1E0010">→ {&quot;id&quot;: &quot;&lt;batchId&gt;&quot;}</span>
+
+<span style="color: #ED007E; background-color: #1E0010">POST /batches/{batchId}?op=POLL</span>
+<span style="color: #ED007E; background-color: #1E0010">→ {&quot;id&quot;: &quot;…&quot;, &quot;all_done&quot;: true, &quot;all_ok&quot;: true, &quot;responses&quot;: [ … ]}</span>
+</code></pre></div>
+
+<ul>
+<li>тело CREATE — <strong>голый JSON-массив</strong> элементов <code>{op, path, body}</code> (<code>p000/fv0.java</code>): <code>op</code> — значение <code>?op=</code> вложенного вызова, <code>path</code> — путь от корня API с ведущим <code>/</code>;</li>
+<li>лимит — <strong>50 элементов</strong>, только POST-вызовы (<code>p000/cv0.java:44-52</code>);</li>
+<li>приложение опрашивает POLL раз в 1 с до <code>all_done</code> (<code>p000/zb7.java:32</code>);</li>
+<li>каждый элемент <code>responses</code> — полноценный конверт API5 (<code>success</code>/<code>result</code> либо ошибка) с целым <code>id</code> = индексу запроса; приложение сортирует по нему (<code>p000/b77.java:32</code>). Цикл опроса восстановлен из fallback-дампа jadx.</li>
+</ul>
+<hr />
+<h2 id="67">6.7. Прочие сервисы</h2>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>назначение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /customer_clouds?op=FIND</code> (<code>p000/qm2.java</code>)</td>
+<td>список облаков партнёров; без авторизации — см. <a href="02-architecture.md">02-architecture.md</a></td>
+</tr>
+<tr>
+<td><code>POST /idam?op=SHARE</code> (<code>p000/cv4.java</code>, <code>p000/qo8.java</code>)</td>
+<td><strong>выдача доступа к камере по номеру телефона</strong>: <code>{"phone_number", "camera_id", "permissions": […]}</code>; уходит на auth-хост с <code>access_token</code>. Это не SSO, как предполагалось вначале</td>
+</tr>
+<tr>
+<td><code>POST /banners?op=FIND</code>, <code>?op=FIND_NO_AUTH</code>, <code>POST /banners/{bannerId}?op=MARK</code> (<code>p000/pp0.java</code>)</td>
+<td>рекламные баннеры в приложении</td>
+</tr>
+<tr>
+<td><code>POST /site_security_integrations?op=LIST_SITES</code>, <code>?op=PRESS_ALERT_BUTTON</code> (<code>p000/vx8.java</code>)</td>
+<td>интеграция с охранными объектами («тревожная кнопка»); свои коды ошибок</td>
+</tr>
+<tr>
+<td><code>POST /marketing_leads?op=CREATE</code> (<code>p000/e26.java</code>)</td>
+<td>маркетинговые заявки</td>
+</tr>
+</tbody>
+</table>
+<p>Для драйвера камеры не нужны.</p>
+<hr />
+<h2 id="68">6.8. Минимальный набор для драйвера</h2>
+<!-- figure: driver-path | Минимальный путь драйвера: от входа до картинки и событий -->
+
+<table>
+<thead>
+<tr>
+<th>шаг</th>
+<th>вызов</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. вход</td>
+<td><code>POST /auth/oauth/token</code></td>
+</tr>
+<tr>
+<td>2. найти камеру</td>
+<td><code>POST /servers?op=FIND</code> с проекцией из 6.1</td>
+</tr>
+<tr>
+<td>3. картинка</td>
+<td><code>GET /cameras/{id}/live_preview?q=…</code> (подписанный)</td>
+</tr>
+<tr>
+<td>4. видео</td>
+<td><code>GET /cameras/{id}/live_stream?…</code> (подписанный) → FLV</td>
+</tr>
+<tr>
+<td>5. события</td>
+<td><code>POST /events?op=FIND</code> с <code>sources</code> и <code>start_time</code>, периодически</td>
+</tr>
+<tr>
+<td>6. настройки</td>
+<td><code>POST /cameras/{id}/plugins?op=INVOKE</code> c <code>"method": "GET"</code> — только для возможностей из <code>features</code></td>
+</tr>
+<tr>
+<td>7. обновление токена</td>
+<td><code>grant_type=refresh_token</code> при 401 или заранее по <code>expires_in</code></td>
+</tr>
+</tbody>
+</table></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

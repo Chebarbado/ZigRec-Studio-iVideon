@@ -1,0 +1,265 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Клиент на Zig — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="State of the Zig client, its commands, modules, design decisions, expected problems.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="on" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: State of the Zig client, its commands, modules, design decisions, expected problems.</span></div>
+<p><strong>Теги:</strong> #Zig #клиент #Windows #GDIplus #подпись_URL</p>
+<p>Собственная программа проекта: консольный клиент под Windows, который входит в аккаунт Ivideon, находит камеру <strong>Ivideon Cute 2</strong> и показывает её изображение. Язык и цель выбраны пользователем: Zig 0.16, без сторонних библиотек.</p>
+<h2 id="121-2026-09-20">12.1. Состояние на 2026-09-20</h2>
+<table>
+<thead>
+<tr>
+<th>часть</th>
+<th>файл</th>
+<th>состояние</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>сборка</td>
+<td><code>zig-client/build.zig</code></td>
+<td>готово: цели <code>install</code>, <code>run</code>, <code>test</code></td>
+</tr>
+<tr>
+<td>подпись URL</td>
+<td><code>zig-client/src/sign.zig</code></td>
+<td><strong>готово и покрыто тестами</strong> (4 теста, векторы из <a href="05-url-signing.md">05-url-signing.md</a>)</td>
+</tr>
+<tr>
+<td>точка входа</td>
+<td><code>zig-client/src/main.zig</code></td>
+<td>заглушка: пустой <code>main</code>, подключает тесты <code>sign.zig</code></td>
+</tr>
+<tr>
+<td>HTTP/конверт ответа</td>
+<td><code>src/api.zig</code></td>
+<td>не написано</td>
+</tr>
+<tr>
+<td>OAuth, файл токена</td>
+<td><code>src/auth.zig</code></td>
+<td>не написано</td>
+</tr>
+<tr>
+<td>окно просмотра</td>
+<td><code>src/viewer_win32.zig</code></td>
+<td>не написано</td>
+</tr>
+</tbody>
+</table>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #66D9EF">cd</span> zig-client
+..\tools\zig\zig.exe build test     :: тесты подписи; молчание и код 0 = успех
+..\tools\zig\zig.exe build          :: zig-out\bin\ivideon.exe
+</code></pre></div>
+
+<h2 id="122-usb-lan">12.2. Почему облако, а не USB или LAN</h2>
+<ul>
+<li><strong>USB</strong> (проверено на машине пользователя): Cute 2 по USB не определяется никак — ни UVC-камера, ни сетевой адаптер RNDIS/ECM, ни COM-порт, ни диск; её нет и в истории USB-устройств Windows. Micro-USB у камеры — только питание.</li>
+<li><strong>LAN</strong> (проверка не завершена): скан локальной сети не удался — AmneziaVPN на ПК заворачивает <code>192.168.0.0/24</code> в туннель. Отдаёт ли прошивка RTSP/ONVIF/HTTP локально — неизвестно. В коде Android-приложения прямого обмена с камерой по LAN не найдено (см. <a href="09-camera-attachment.md">09-camera-attachment.md</a>).</li>
+<li><strong>Облако</strong>: протокол восстановлен — этим путём идёт программа. Условие: камера привязана к аккаунту и в сети по Wi-Fi.</li>
+</ul>
+<h2 id="123">12.3. Команды (проект)</h2>
+<table>
+<thead>
+<tr>
+<th>команда</th>
+<th>действие</th>
+<th>запрос API</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ivideon login</code></td>
+<td>спрашивает email и пароль (пароль без эха; либо <code>IVIDEON_EMAIL</code>/<code>IVIDEON_PASSWORD</code>), сохраняет токен в <code>.ivideon/token.json</code>. <strong>Пароль не сохраняется</strong></td>
+<td><code>POST /auth/oauth/token</code></td>
+</tr>
+<tr>
+<td><code>ivideon cameras</code></td>
+<td>серверы и камеры: id, имя, online, модель, прошивка</td>
+<td><code>POST {api_host}/servers?op=FIND</code></td>
+</tr>
+<tr>
+<td><code>ivideon snapshot [camera_id] [файл.jpg]</code></td>
+<td>один кадр в файл</td>
+<td><code>GET /cameras/{id}/live_preview</code> (подписанный)</td>
+</tr>
+<tr>
+<td><code>ivideon watch [camera_id] [--fps N] [--q 0..2]</code></td>
+<td>окно с «живой картинкой» из JPEG-превью</td>
+<td>тот же <code>live_preview</code> в цикле</td>
+</tr>
+<tr>
+<td><code>ivideon url [camera_id] [--q 0..2]</code></td>
+<td>печатает подписанный URL живого видео для VLC/ffplay/mpv. <strong>URL содержит токен</strong></td>
+<td><code>GET /cameras/{id}/live_stream</code></td>
+</tr>
+<tr>
+<td><code>ivideon logout</code></td>
+<td>удаляет локальный файл токена (отзыв на сервере — <code>POST /access_tokens/{id}?op=REVOKE</code> — возможное улучшение, см. <a href="03-auth.md">03-auth.md</a>)</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>У всех команд планируется ключ <code>--raw</code> — печать ответа сервера с вырезанными секретами, для первой живой сверки протокола.</p>
+<h2 id="124">12.4. Модули</h2>
+<table>
+<thead>
+<tr>
+<th>файл</th>
+<th>ответственность</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/main.zig</code></td>
+<td>разбор командной строки, диспетчер команд, человекочитаемые ошибки</td>
+</tr>
+<tr>
+<td><code>src/api.zig</code></td>
+<td>HTTP через <code>std.http.Client</code> (TLS — реализация Zig std); конверт ответа; добавление <code>access_token</code>; повтор запроса после обновления токена</td>
+</tr>
+<tr>
+<td><code>src/auth.zig</code></td>
+<td>OAuth-запрос (form-urlencoded + <code>Basic base64("android-client:")</code>), модель токена, чтение/запись <code>.ivideon/token.json</code>, <code>refresh_token</code></td>
+</tr>
+<tr>
+<td><code>src/sign.zig</code></td>
+<td><code>signedUrl()</code> — сборка query в кодировке OkHttp, <code>cseq</code>, <code>cs</code></td>
+</tr>
+<tr>
+<td><code>src/viewer_win32.zig</code></td>
+<td>окно Win32; JPEG декодирует GDI+ (<code>gdiplus.dll</code>, поток из памяти — <code>SHCreateMemStream</code> из <code>shlwapi.dll</code>); перерисовка по таймеру; сеть в отдельном потоке</td>
+</tr>
+</tbody>
+</table>
+<!-- figure: zig-modules | Модули zig-client и их готовность -->
+
+<h3 id="api-signzig">API <code>sign.zig</code></h3>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #66D9EF">const</span><span style="color: #F8F8F2"> sign </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> @import(</span><span style="color: #E6DB74">&quot;sign.zig&quot;</span><span style="color: #F8F8F2">);</span>
+
+<span style="color: #66D9EF">const</span><span style="color: #F8F8F2"> url </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> </span><span style="color: #66D9EF">try</span><span style="color: #F8F8F2"> sign.signedUrl(gpa, .{</span>
+<span style="color: #F8F8F2">    .base_url     </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> </span><span style="color: #E6DB74">&quot;https://eu01-api.ivideon.com&quot;</span><span style="color: #F8F8F2">,   </span><span style="color: #959077">// без завершающего &#39;/&#39;</span>
+<span style="color: #F8F8F2">    .path         </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> </span><span style="color: #E6DB74">&quot;/cameras/&lt;id&gt;/live_stream&quot;</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">    .params       </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> </span><span style="color: #FF4689">&amp;</span><span style="color: #F8F8F2">.{ .{ .name </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> </span><span style="color: #E6DB74">&quot;q&quot;</span><span style="color: #F8F8F2">, .value </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> </span><span style="color: #E6DB74">&quot;2&quot;</span><span style="color: #F8F8F2"> } },</span>
+<span style="color: #F8F8F2">    .access_token </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> token.access_token,</span>
+<span style="color: #F8F8F2">    .hmac_secret  </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> token.hmac_secret,                 </span><span style="color: #959077">// &quot;&quot; -&gt; URL без подписи</span>
+<span style="color: #F8F8F2">    .session      </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> session,                           </span><span style="color: #959077">// 8 символов [0-9a-zA-Z], один на сессию</span>
+<span style="color: #F8F8F2">    .counter      </span><span style="color: #FF4689">=</span><span style="color: #F8F8F2"> monotonic_ms,                      </span><span style="color: #959077">// не уменьшать в пределах session</span>
+<span style="color: #F8F8F2">});</span>
+<span style="color: #66D9EF">defer</span><span style="color: #F8F8F2"> gpa.free(url);</span>
+</code></pre></div>
+
+<p><code>signedUrl</code> возвращает <code>error.UnsupportedPathCharacter</code>, если в <code>path</code> есть символ, который OkHttp закодировал бы: в этом случае подписываемый (декодированный) путь и путь в URL различались бы, а такой сценарий для реальных id камер не нужен и не реализован.</p>
+<h2 id="125">12.5. Проектные решения</h2>
+<ul>
+<li><strong>JPEG-превью вместо декодирования видео.</strong> Живой поток — H.264/H.265; декодера на чистом Zig нет, а FFmpeg ради первой картинки — лишняя зависимость. <code>live_preview</code> отдаёт JPEG, который Windows декодирует сама. Это несколько кадров в секунду, не полноценное видео.</li>
+<li><strong>Полноценное видео — внешним плеером.</strong> Приложение Ivideon поступает так же: строит подписанный URL и отдаёт строку плееру на FFmpeg. Команда <code>url</code> даёт ту же строку.</li>
+<li><strong>Только std и системные DLL.</strong> Сборка одной командой, без менеджера пакетов.</li>
+<li><strong>Секреты.</strong> Пароль не хранится и не печатается; токен — в локальном файле, который должен попасть в <code>.gitignore</code>; URL с токеном выводится только по явной команде <code>url</code>.</li>
+</ul>
+<h2 id="126">12.6. Где вероятнее всего сломается при первом запуске</h2>
+<ol>
+<li><strong>TLS.</strong> <code>std.http.Client</code> использует собственную реализацию TLS из Zig std; совместимость с серверами Ivideon (набор шифров, цепочка сертификатов) не проверена.</li>
+<li><strong>Редирект на региональный хост.</strong> <code>api.ivideon.com</code> отвечает редиректом на <code>eu01-api.ivideon.com</code> (проверено для корня). POST с телом при 301/302 многие клиенты превращают в GET — редирект логина надо обрабатывать вручную, повторяя тот же POST на <code>Location</code>. После входа все запросы идут сразу на <code>https://{api_host}</code> из токена, и проблема исчезает.</li>
+<li><strong>Форма ответа <code>/servers?op=FIND</code>.</strong> Метод помечен <code>@kr7</code> — приложение получает «сырой» JSON и разбирает его вручную, поэтому структура известна хуже, чем у типизированных ответов. См. <a href="06-api-reference.md">06-api-reference.md</a>.</li>
+<li><strong>2FA.</strong> Если на аккаунте включена двухфакторная авторизация, придёт токен с <code>limited_to_2fa: true</code>. Первая версия должна это распознать и сообщить, а не падать. См. <a href="03-auth.md">03-auth.md</a>.</li>
+<li><strong><code>Content-Type</code> у <code>live_preview</code>.</strong> Ожидается <code>image/jpeg</code>; не проверено.</li>
+</ol>
+<h2 id="127">12.7. Порядок работы</h2>
+<ol>
+<li>Zig 0.16.0 в <code>tools/zig</code> — сделано.</li>
+<li>Каркас CLI + <code>sign.zig</code> с тестами — <code>sign.zig</code> готов, CLI нет.</li>
+<li><code>login</code> → <code>cameras</code> → <code>snapshot</code>, <code>url</code> — <strong>первая живая проверка протокола</strong>; запускает пользователь со своим аккаунтом.</li>
+<li><code>watch</code> — окно просмотра.</li>
+</ol></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

@@ -1,0 +1,372 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ошибки — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="Error format, the classification algorithm, a table of codes, OAuth errors, recommendations.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="on" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Ошибки</span><span class="en">Errors</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: Error format, the classification algorithm, a table of codes, OAuth errors, recommendations.</span></div>
+<p><strong>Теги:</strong> #ошибки #коды_ошибок #HTTP401 #диагностика</p>
+<p>Как API сообщает об ошибках и как их классифицирует приложение. Формат тела и коды — <strong>[код]</strong>. <strong>Какой HTTP-статус сервер шлёт с каким кодом — из клиента не определить</strong>: ни один класс ошибки не привязан к статусу (кроме 401), статус просто сохраняется.</p>
+<h2 id="101-api5">10.1. Формат ошибки API5</h2>
+<p>Ошибкой считается <strong>любой не-2xx ответ</strong>. Тело разбирается как ошибка, только если <code>Content-Type: application/json</code> (<code>p000/e21.java:385-412</code>, <code>p000/wm3.java:20-21</code>). Разбор — <code>p000/C0334eu.java:19-105</code>, модель <code>Api5Error</code> — <code>p000/C2382pr.java</code>.</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #F8F8F2">{</span><span style="color: #FF4689">&quot;success&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #66D9EF">false</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;code&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;CAMERA_OFFLINE&quot;</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;message&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;…&quot;</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;details&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #ED007E; background-color: #1E0010">…</span><span style="color: #F8F8F2">}}</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>поле</th>
+<th>тип</th>
+<th>обязательность</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>success</code></td>
+<td>boolean, строго <code>false</code></td>
+<td>да</td>
+</tr>
+<tr>
+<td><code>code</code></td>
+<td>string</td>
+<td>да</td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td>да</td>
+</tr>
+<tr>
+<td><code>details</code></td>
+<td>object</td>
+<td>нет. Единственный ключ, который читает клиент, — <code>retry_at</code> (Unix-секунды, дробное) при <code>TOO_MANY_LOGIN_ATTEMPTS</code></td>
+</tr>
+</tbody>
+</table>
+<p>Ответ 2xx с <code>"success": false</code> клиент считает сбоем протокола (<code>Unexpected unsuccessful API5 response</code>).</p>
+<h2 id="102">10.2. Алгоритм классификации</h2>
+<p><code>p000/C0297du.java:38-73</code>:</p>
+<ol>
+<li><strong>HTTP 401 → <code>AuthError</code></strong>, независимо от <code>code</code>. Это сигнал «токен недействителен» — запускает обновление токена (см. <a href="03-auth.md">03-auth.md</a>). У <code>AuthError</code> есть признаки по тексту <code>message</code>: <code>"Session's subject doesn't exist."</code> и <code>"Incorrect login or password"</code>.</li>
+<li><code>TOO_MANY_LOGIN_ATTEMPTS</code> → отдельный класс с <code>details.retry_at</code>.</li>
+<li>Поиск <code>code</code> в статической таблице (10.3).</li>
+<li>Поиск в таблице расширений (<code>p000/xw8.java</code>, только сервис site-security).</li>
+<li>Иначе — <code>GenericError(httpStatus, code)</code>.</li>
+</ol>
+<!-- figure: error-flow | Классификация ответа сервера -->
+
+<p>Рекомендация для своего клиента: ветвиться по <strong><code>code</code></strong>, статус использовать только для 401 и как запасной признак.</p>
+<h2 id="103">10.3. Коды ошибок сервера</h2>
+<p>Классы — в <code>com/ivideon/sdk/network/data/error/</code>. Смысл выведен из имён — <strong>[вывод]</strong>, если не указано иное.</p>
+<h3 id="_1">Общие</h3>
+<table>
+<thead>
+<tr>
+<th><code>code</code></th>
+<th>класс</th>
+<th>смысл</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BAD_REQUEST</code></td>
+<td><code>BadRequestError</code></td>
+<td>некорректный запрос</td>
+</tr>
+<tr>
+<td><code>OPERATION_RESTRICTED</code></td>
+<td><code>OperationRestrictedError</code></td>
+<td>операция запрещена для аккаунта/тарифа</td>
+</tr>
+<tr>
+<td><code>FEATURE_NOT_SUPPORTED</code></td>
+<td><code>FeatureNotSupportedError</code></td>
+<td>устройство/тариф не поддерживает функцию</td>
+</tr>
+<tr>
+<td><code>INACTIVE_SERVICE</code></td>
+<td><code>InactiveServiceError</code></td>
+<td>платная услуга не активна</td>
+</tr>
+<tr>
+<td><code>LIMIT_EXCEEDED</code></td>
+<td><code>LimitExceededError</code></td>
+<td>превышен лимит</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_2">Устройства</h3>
+<table>
+<thead>
+<tr>
+<th><code>code</code></th>
+<th>класс</th>
+<th>смысл</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SERVER_NOT_FOUND</code> / <code>SERVER_OFFLINE</code></td>
+<td><code>ServerNotFoundError</code> / <code>ServerOfflineError</code></td>
+<td>устройство не найдено / не на связи</td>
+</tr>
+<tr>
+<td><code>CAMERA_NOT_FOUND</code> / <code>CAMERA_OFFLINE</code></td>
+<td><code>CameraNotFoundError</code> / <code>CameraOfflineError</code></td>
+<td>камера не найдена / не на связи</td>
+</tr>
+<tr>
+<td><code>DEVICE_TIMED_OUT</code></td>
+<td><code>DeviceTimedOutError</code></td>
+<td>устройство не ответило на команду</td>
+</tr>
+<tr>
+<td><code>BAD_DEVICE_CREDENTIALS</code></td>
+<td><code>BadDeviceCredentialsError</code></td>
+<td>неверные логин/пароль самого устройства</td>
+</tr>
+<tr>
+<td><code>DEVICE_NOT_ALLOWED</code></td>
+<td><code>DeviceNotAllowedError</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>VENDOR_NOT_FOUND</code></td>
+<td><code>VendorNotFoundError</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>UNRECOGNIZED_FORMAT</code> / <code>UNSUPPORTED_DEVICE</code></td>
+<td><code>DeviceModelsError.*</code></td>
+<td>ответы <code>/device_models?op=RECOGNIZE</code></td>
+</tr>
+<tr>
+<td><code>ATTACHMENT_TOKEN_NOT_FOUND</code> / <code>TOKEN_FINISHED</code></td>
+<td><code>AttachmentToken…Error</code></td>
+<td>привязка камеры</td>
+</tr>
+<tr>
+<td><code>MALFORMED_SCHEDULE</code></td>
+<td><code>MalformedScheduleError</code></td>
+<td>некорректное расписание</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_3">Права доступа</h3>
+<p><code>SUBJECT_RIGHT_MISSING_FOR_&lt;X&gt;</code> / <code>SUBJECT_RIGHT_REVOKED_FOR_&lt;X&gt;</code>, где <code>&lt;X&gt;</code> ∈ <code>USER</code>, <code>SERVER</code>, <code>CAMERA</code>, <code>ATTACHMENT_TOKEN</code>, <code>TIMELAPSE</code>, <code>TIMELAPSE_TEMPLATE</code>, <code>EXPORTED_RECORD</code> (для последнего — только <code>MISSING</code>). Классы <code>SubjectRightMissingFor…Error</code> / <code>SubjectRightRevokedFor…Error</code>.</p>
+<p>Совместный доступ: <code>GRANTEE_NOT_FOUND</code>, <code>GRANTEE_LIMIT_EXCEEDED</code>, <code>GRANTEE_DEMO_RESTRICTION</code>, <code>SAME_ACCOUNT</code> (доступ самому себе), <code>IMPLICITLY_SHARED</code>, <code>PERMISSION_NOT_FOUND</code>, <code>PERMISSION_GRANT_NOT_FOUND</code>.</p>
+<h3 id="_4">Архив, экспорт, таймлапсы</h3>
+<p><code>EMPTY_INTERVAL</code> (в интервале нет архива), <code>RECORD_ALREADY_EXISTS</code>, <code>RECORD_QUOTA_EXHAUSTED</code>, <code>EXPORTED_RECORD_NOT_FOUND</code>, <code>EXPORTED_RECORD_NOT_READY</code>, <code>TIMELAPSE_NOT_FOUND</code>, <code>TIMELAPSE_TEMPLATE_NOT_FOUND</code>.</p>
+<h3 id="2fa">Вход, регистрация, 2FA</h3>
+<table>
+<thead>
+<tr>
+<th><code>code</code></th>
+<th>класс</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TOO_MANY_LOGIN_ATTEMPTS</code></td>
+<td><code>TooManyLoginAttemptsError</code> (+ <code>details.retry_at</code>)</td>
+</tr>
+<tr>
+<td><code>USER_NOT_FOUND</code>, <code>USER_EXISTS</code></td>
+<td><code>UserNotFoundError</code>, <code>UsersExistsError</code></td>
+</tr>
+<tr>
+<td><code>PASSWORD_MISMATCH</code>, <code>VULNERABLE_PASSWORD</code></td>
+<td><code>PasswordMismatch</code>, <code>PasswordVulnerabilityError</code></td>
+</tr>
+<tr>
+<td><code>SIGN_UP_REQUIRED</code> / <code>SIGNUP_REQUIRED</code>, <code>OTP_MISMATCH</code>, <code>OTP_LOCKED</code>, <code>PROVIDER_ERROR</code></td>
+<td>семейство <code>OtpError</code> (вход по одноразовому коду)</td>
+</tr>
+<tr>
+<td><code>PHONE_NUMBER_USAGE_LIMIT_REACHED</code></td>
+<td><code>PhoneNumberUsageLimitReached</code></td>
+</tr>
+<tr>
+<td><code>CHALLENGE_NOT_FOUND</code>, <code>CHALLENGE_EXPIRED</code>, <code>TWO_FACTOR_METHOD_NOT_FOUND</code>, <code>TWO_FACTOR_METHOD_NOT_SELECTED</code>, <code>TOO_FREQUENT</code>, <code>INVALID_CODE</code>, <code>NO_ATTEMPTS_LEFT</code></td>
+<td><code>TwoFaError.*</code></td>
+</tr>
+<tr>
+<td><code>BAD_CODE</code></td>
+<td><code>BadCodeError</code></td>
+</tr>
+<tr>
+<td><code>EXT_AUTH_ERROR</code></td>
+<td><code>ExternalAuthError</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="104-oauth-">10.4. Ошибки OAuth-эндпоинта</h2>
+<p><code>/auth/oauth/token</code> отвечает <strong>не</strong> конвертом API5, а в стиле OAuth2 (<code>p000/ua0.java</code>):</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #F8F8F2">{</span><span style="color: #FF4689">&quot;error&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;invalid_grant&quot;</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;error_description&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;…&quot;</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;reason&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;…&quot;</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;retry_in&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">30</span><span style="color: #F8F8F2">}</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>условие</th>
+<th>результат (<code>p000/va0.java</code>)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>error=invalid_request</code>, <code>reason=TOO_MANY_LOG_IN_ATTEMPTS</code></td>
+<td><code>TwoFaError.TooManyLoginAttemptsError</code> с <code>retry_in</code></td>
+</tr>
+<tr>
+<td><code>error=invalid_grant</code>, <code>reason=2FA_IS_MANDATORY</code></td>
+<td><code>TwoFaError.TfaIsMandatory</code></td>
+</tr>
+<tr>
+<td>всё прочее</td>
+<td><code>AuthError</code></td>
+</tr>
+</tbody>
+</table>
+<p>Требование второго фактора — <strong>не ошибка</strong>: это ответ 200 с <code>"proceed_with_2fa": true</code>, см. <a href="03-auth.md">03-auth.md</a>.</p>
+<h2 id="105">10.5. Ошибки, которые клиент порождает сам</h2>
+<table>
+<thead>
+<tr>
+<th>ситуация</th>
+<th>ошибка</th>
+<th>источник</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>не-JSON тело, HTTP 403</td>
+<td><code>AccessDeniedError(status, "ACCESS_DENIED")</code></td>
+<td><code>e21.java:423-436</code></td>
+</tr>
+<tr>
+<td>не-JSON тело, HTTP 404</td>
+<td><code>NotFoundError(status, "NOT_FOUND")</code></td>
+<td>там же</td>
+</tr>
+<tr>
+<td>прочее не-JSON тело или JSON, не прошедший проверку типов</td>
+<td><code>GenericError(status, "UNEXPECTED_ERROR_" + hex(hash тела))</code></td>
+<td><code>wm3.java:31-33</code></td>
+</tr>
+<tr>
+<td>битый JSON в ошибке / в ответе 200</td>
+<td><code>JsonMalformedError</code></td>
+<td><code>e21.java:412-418, 470-475</code></td>
+</tr>
+<tr>
+<td>любое исключение (сеть, TLS, таймаут)</td>
+<td><code>ExceptionError</code>, статус 0</td>
+<td><code>e21.java:476-482</code></td>
+</tr>
+<tr>
+<td>вызов отменён</td>
+<td><code>networkcall/CallCanceledError</code>, статус 0</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>В строках 423–436 jadx вывел условия <code>if (i != 403)</code> инвертированными (метод помечен <code>Code duplicated</code>); таблица даёт очевидно задуманное прочтение.</p>
+<h2 id="106-api4">10.6. Устаревший API4</h2>
+<p>Основной сервис его не использует, но адаптер в приложении остался. Конверт: <code>{"success": bool, "response": …}</code>; при ошибке <code>response = {code: int, code_alias: string, message, details}</code> (<code>p000/C2233lr.java</code>, <code>p000/C0258cr.java</code>). Числовые коды (<code>p000/C2196kr.java:17</code>): <code>10002</code> → <code>AuthError</code>, <code>10004</code> → <code>NotFoundError</code>, <code>10005</code> → <code>AlreadyExistsError</code>, <code>10008</code> → <code>RecursiveGrantingError</code>, <code>10020</code> → <code>InactiveServiceError</code>, <code>20001</code> → <code>OperationRestrictedError</code>, <code>20003</code> → <code>LimitExceededError</code>.</p>
+<h2 id="107">10.7. Рекомендации для своего клиента</h2>
+<ul>
+<li>Сначала смотрите HTTP-статус: 2xx → конверт успеха; иначе пробуйте разобрать <code>{success, code, message}</code>; не получилось — сохраняйте статус и кусок тела.</li>
+<li><code>401</code> → один раз обновить токен и повторить запрос; повторный 401 → требовать новый вход.</li>
+<li><code>CAMERA_OFFLINE</code> / <code>SERVER_OFFLINE</code> — штатная ситуация, а не сбой: показывайте «камера не в сети».</li>
+<li><code>TOO_MANY_LOGIN_ATTEMPTS</code> / <code>retry_at</code>, <code>retry_in</code>, <code>TOO_FREQUENT</code> — <strong>уважайте паузу</strong>, не повторяйте вход в цикле.</li>
+<li>Неизвестные <code>code</code> обрабатывайте обобщённо — таблица отражает только то, что знала версия 3.7.1.</li>
+</ul></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

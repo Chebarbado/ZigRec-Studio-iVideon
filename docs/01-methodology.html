@@ -1,0 +1,423 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Методика — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="Object of study, tools, how to reproduce the decompilation, how to read the obfuscated code, confidence levels.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="on" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Методика</span><span class="en">Methodology</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: Object of study, tools, how to reproduce the decompilation, how to read the obfuscated code, confidence levels.</span></div>
+<p><strong>Теги:</strong> #реверс_инжиниринг #методика #jadx #R8 #обфускация #Retrofit #Gson</p>
+<p>Как получены исходные данные, как воспроизвести декомпиляцию и как читать обфусцированный код. Этот документ нужен, чтобы любой вывод из остальных разделов можно было перепроверить по коду.</p>
+<!-- figure: re-pipeline | От XAPK до документации: откуда взяты сведения -->
+
+<h2 id="11">1.1. Объект исследования</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Приложение</td>
+<td>Ivideon для Android, пакет <code>com.ivideon.client</code></td>
+</tr>
+<tr>
+<td>Версия</td>
+<td>3.7.1 (<code>version_code</code> 3317), <code>minSdk</code> 29, <code>targetSdk</code> 35</td>
+</tr>
+<tr>
+<td>Источник</td>
+<td>XAPK с APKPure: <code>apk/com.ivideon.client-3.7.1-apkpure.xapk</code></td>
+</tr>
+<tr>
+<td>Состав XAPK</td>
+<td><code>com.ivideon.client.apk</code> (base, 17,3 МБ), <code>config.arm64_v8a.apk</code> (нативные библиотеки, 15,9 МБ), <code>config.xxhdpi.apk</code> (ресурсы)</td>
+</tr>
+<tr>
+<td>Обфускация</td>
+<td>R8, map-id <code>ae391790d39fdfc0500d736c71fa099e0f969a7a28f208fca120cb0c8f9eafe8</code> (виден в заголовке каждого декомпилированного файла)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Ловушка.</strong> Файл <code>uptodown-com.ivideon.client.apk</code> в корне проекта — это <strong>не Ivideon</strong>, а установщик магазина Uptodown 7.39 (кнопка «Скачать» на Uptodown отдаёт свой магазин). Его декомпиляция лежит в <code>decompiled/</code> и для проекта бесполезна. Рабочий каталог — только <code>decompiled-ivideon-3.7.1/</code>.</p>
+</blockquote>
+<h2 id="12">1.2. Инструменты</h2>
+<p>Всё портативное, лежит в <code>tools/</code>, в систему ничего не ставится.</p>
+<table>
+<thead>
+<tr>
+<th>инструмент</th>
+<th>версия</th>
+<th>путь</th>
+<th>назначение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Eclipse Temurin JRE</td>
+<td>21.0.12</td>
+<td><code>tools/jre</code></td>
+<td>среда для jadx</td>
+</tr>
+<tr>
+<td>jadx</td>
+<td>1.5.6</td>
+<td><code>tools/jadx</code></td>
+<td>DEX → Java, ресурсы, манифест</td>
+</tr>
+<tr>
+<td>Zig</td>
+<td>0.16.0</td>
+<td><code>tools/zig</code></td>
+<td>сборка клиента (<code>zig-client/</code>)</td>
+</tr>
+<tr>
+<td>Python 3</td>
+<td>любая</td>
+<td>—</td>
+<td>скрипт сборки PDF, эталонные векторы подписи</td>
+</tr>
+<tr>
+<td>pandoc</td>
+<td>3.11</td>
+<td><code>tools/pandoc</code></td>
+<td>Markdown → LaTeX при сборке PDF этой документации</td>
+</tr>
+<tr>
+<td>Tectonic</td>
+<td>0.17.0</td>
+<td><code>tools/tectonic</code></td>
+<td>LaTeX-движок (XeTeX) для сборки PDF; пакеты и шрифты докачивает сам</td>
+</tr>
+</tbody>
+</table>
+<p>Нативный код (<code>libivplayerjni.so</code>) дизассемблером пока не разбирался; инструмент (Ghidra или rizin) не выбран.</p>
+<h2 id="13">1.3. Как воспроизвести декомпиляцию</h2>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #F8F8F2">:</span><span style="color: #959077">: 1. XAPK — это zip. Распаковать в apk\xapk\</span>
+<span style="color: #F8F8F2">:</span><span style="color: #959077">: 2. Декомпилировать base APK</span>
+<span style="color: #66D9EF">set</span> <span style="color: #F8F8F2">JAVA_HOME=%CD%</span>\tools\jre
+tools\jadx\bin\jadx.bat --deobf --show-bad-code -d decompiled-ivideon-3.7.1 apk\xapk\com.ivideon.client.apk
+</code></pre></div>
+
+<ul>
+<li><code>--deobf</code> — заменяет короткие/конфликтующие имена на уникальные вида <code>C2199ku</code>, <code>InterfaceC2236lu</code>, <code>m14706Q</code>, <code>f26461g</code>. <strong>Имена детерминированы</strong>: при той же версии jadx и тех же опциях получатся те же имена, поэтому ссылки вида <code>p000/C2199ku.java</code> в документации стабильны. При другой версии jadx имена «поедут» — ориентируйтесь тогда на комментарий <code>/* renamed from: ku */</code> (это настоящее имя класса в DEX) и на строковые литералы.</li>
+<li><code>--show-bad-code</code> — оставляет в выводе методы, которые декомпилировались с ошибками. Таких 223 из 11 746 классов (лог: <code>tools/jadx-ivideon.log</code>). В тексте они помечены <code>JADX WARN</code>/<code>JADX ERROR</code>; некоторые выведены только заглушкой <code>Method dump skipped</code> (пример — <code>C2199ku.m14118a</code>). Для них нужен просмотр smali/байткода (<code>jadx --comments-level debug</code> или jadx-gui).</li>
+</ul>
+<p>Результат: <code>decompiled-ivideon-3.7.1/sources/</code> (Java) и <code>decompiled-ivideon-3.7.1/resources/</code> (манифест, <code>res/</code>, assets).</p>
+<h2 id="14">1.4. Структура декомпилированного кода</h2>
+<table>
+<thead>
+<tr>
+<th>каталог в <code>sources/</code></th>
+<th>что там</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>p000/</code></td>
+<td><strong>почти весь код приложения</strong> после R8: классы без пакета, имена 2–3 символа. Здесь сервисы API, DTO, интерцепторы, репозитории, ViewModel-и</td>
+</tr>
+<tr>
+<td><code>com/ivideon/client/</code></td>
+<td>то, что R8 не переименовал: Activity/Fragment/Service из манифеста, UI (<code>p009ui/player</code>, <code>p009ui/wizard</code>)</td>
+</tr>
+<tr>
+<td><code>com/ivideon/sdk/network/data/error/</code></td>
+<td>иерархия ошибок API — имена сохранены (65 классов + <code>export/</code>, <code>timelapse/</code>)</td>
+</tr>
+<tr>
+<td><code>com/ivideon/sdk/player/p014iv/core/IvPlayer.java</code></td>
+<td>JNI-обёртка нативного плеера — имена <code>native</code>-методов сохранены (иначе не слинкуется)</td>
+</tr>
+<tr>
+<td><code>okhttp3/</code>, <code>retrofit2/</code>, <code>kotlin/</code>, <code>kotlinx/</code>, <code>androidx/</code>, <code>coil3/</code>, <code>io/</code>, <code>ru/</code> …</td>
+<td>сторонние библиотеки; частично переименованы, часть их классов «уехала» в <code>p000/</code></td>
+</tr>
+</tbody>
+</table>
+<p>Сегменты пакетов вида <code>p009ui</code>, <code>p014iv</code>, <code>p012v5</code> — это jadx переименовал <code>ui</code>, <code>iv</code>, <code>v5</code> (слишком короткие имена). Реальные пакеты: <code>com.ivideon.client.ui</code>, <code>com.ivideon.sdk.player.iv.core</code>, <code>com.ivideon.sdk.network.data.v5</code>.</p>
+<h2 id="15">1.5. Как читать обфусцированный код</h2>
+<h3 id="_1">Что переживает обфускацию</h3>
+<p>R8 переименовывает классы, методы и поля, но <strong>не трогает</strong>:</p>
+<ol>
+<li><strong>Строковые литералы</strong> — пути API (<code>"/cameras/{cameraId}/live_stream"</code>), JSON-ключи (<code>"access_token"</code>), лог-сообщения (<code>"Update token: refresh (1) starting..."</code>), имена алгоритмов (<code>"HmacSHA1"</code>). Это главный инструмент навигации: поиск по строке почти всегда выводит на нужный класс.</li>
+<li><strong>Значения аннотаций</strong> — пути Retrofit и имена JSON-полей Gson лежат в аннотациях как строки.</li>
+<li><strong>Имена <code>native</code>-методов и классов из манифеста.</strong></li>
+<li><strong>Ссылки на методы Kotlin</strong> — при компиляции <code>::signWithSecret</code> в байткод попадает исходное имя и сигнатура. Так восстановлено имя <code>signWithSecret(Ljava/lang/String;)Ljava/lang/String;</code> (<code>p000/C2470s2.java:22</code>).</li>
+</ol>
+<h3 id="-">«Классы-швейцарские ножи»</h3>
+<p>R8 склеивает много мелких лямбд и классов в один (class merging). Такой класс имеет поле-дискриминатор <code>int</code> (обычно <code>f…a</code>) и <code>switch</code> по нему в каждом методе. Примеры: <code>g58</code>, <code>kr6</code>, <code>qv5</code>, <code>C2504t</code>. В них <strong>99 % кода не относится к Ivideon</strong> (Compose, CameraX, Firebase, protobuf…). Читать надо только нужную ветку:</p>
+<table>
+<thead>
+<tr>
+<th>класс</th>
+<th>нужная часть</th>
+<th>как найти</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>p000/g58.java</code></td>
+<td>метод <code>mo7583n</code> — интерцептор авторизации и подписи</td>
+<td>создаётся как <code>new g58(7, i85Var)</code> в <code>C2199ku</code></td>
+</tr>
+<tr>
+<td><code>p000/kr6.java</code></td>
+<td>конструктор <code>kr6(C2504t)</code> (строки 626–647) — генерация идентификатора сессии</td>
+<td><code>this.f26374a = 7</code></td>
+</tr>
+<tr>
+<td><code>p000/qv5.java</code></td>
+<td>конструктор <code>qv5(i85, ry1)</code> (697–701) и метод <code>m17621g</code> (358–366) — форма OAuth</td>
+<td><code>this.f36623a = 6</code></td>
+</tr>
+<tr>
+<td><code>p000/C2504t.java</code></td>
+<td><code>case 1</code> (119–138) — <code>signWithSecret</code>, HMAC-SHA1</td>
+<td>по строке <code>"HmacSHA1"</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="_2">Словарь аннотаций сетевого слоя</h3>
+<p>Сетевой слой — Retrofit 2 + OkHttp + <strong>Gson</strong>. Аннотации Retrofit и собственные аннотации Ivideon переименованы; соответствие восстановлено по их форме (наличие <code>value()</code>, <code>encoded()</code>, <code>alternate()</code>) и по использованию.</p>
+<table>
+<thead>
+<tr>
+<th>обфусц.</th>
+<th>оригинал</th>
+<th>смысл</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>@wy6("…")</code></td>
+<td><code>retrofit2.http.POST</code></td>
+<td>метод POST, путь</td>
+</tr>
+<tr>
+<td><code>@mg4("…")</code></td>
+<td><code>retrofit2.http.GET</code></td>
+<td>метод GET, путь (пустой — если URL динамический)</td>
+</tr>
+<tr>
+<td><code>@g47("x")</code></td>
+<td><code>retrofit2.http.Path</code></td>
+<td>подстановка в <code>{x}</code></td>
+</tr>
+<tr>
+<td><code>@fp7("x")</code></td>
+<td><code>retrofit2.http.Query</code></td>
+<td>query-параметр; <code>null</code> — параметр опускается</td>
+</tr>
+<tr>
+<td><code>@ey0</code></td>
+<td><code>retrofit2.http.Body</code></td>
+<td>тело запроса, сериализуется Gson в JSON</td>
+</tr>
+<tr>
+<td><code>@iba</code></td>
+<td><code>retrofit2.http.Url</code></td>
+<td>полный URL передаётся аргументом</td>
+</tr>
+<tr>
+<td><code>@xa4</code></td>
+<td><code>retrofit2.http.FormUrlEncoded</code></td>
+<td>тело <code>application/x-www-form-urlencoded</code></td>
+</tr>
+<tr>
+<td><code>@zz3</code></td>
+<td><code>retrofit2.http.FieldMap</code></td>
+<td>карта полей формы (есть <code>encoded()</code>)</td>
+</tr>
+<tr>
+<td><code>@bo4</code></td>
+<td><code>retrofit2.http.HeaderMap</code></td>
+<td>заголовки аргументом (есть <code>allowUnsafeNonAsciiValues()</code>)</td>
+</tr>
+<tr>
+<td><code>@ok8("x")</code></td>
+<td><code>com.google.gson.annotations.SerializedName</code></td>
+<td>имя JSON-поля (есть <code>alternate()</code>)</td>
+</tr>
+<tr>
+<td><code>@mn6</code></td>
+<td>собственная Ivideon</td>
+<td>публичный запрос — токен не добавляется</td>
+</tr>
+<tr>
+<td><code>@zc0</code></td>
+<td>собственная Ivideon</td>
+<td>токен в заголовке <code>Authorization: Bearer</code></td>
+</tr>
+<tr>
+<td><code>@l85</code></td>
+<td>собственная Ivideon</td>
+<td>стримовый URL — подписывается (<code>cseq</code>, <code>cs</code>)</td>
+</tr>
+<tr>
+<td><code>@kr7</code></td>
+<td>собственная Ivideon</td>
+<td>метод возвращает <code>String</code> — «сырой» JSON, который разбирается вручную выше по стеку</td>
+</tr>
+</tbody>
+</table>
+<p>Прочие типы: <code>ek6&lt;T&gt;</code> — обёртка вызова (аналог <code>retrofit2.Call&lt;T&gt;</code> с колбэками статуса), <code>sn6</code> — пустой результат-синглтон («данных нет, важен только успех»), <code>v28</code> — <code>okhttp3.ResponseBody</code> (бинарный ответ), <code>ct5</code> — DTO <code>LivePreviewChannel{url}</code> (имя видно в его <code>toString()</code>), <code>ps4</code> — <code>okhttp3.HttpUrl</code>, <code>e82</code> — <code>HttpUrl.Builder</code>, <code>g08</code> — <code>okhttp3.Request</code>, <code>a40</code> — <code>Request.Builder</code>, <code>fo4</code> — <code>okhttp3.Headers</code>.</p>
+<h3 id="_3">Рецепты поиска</h3>
+<table>
+<thead>
+<tr>
+<th>задача</th>
+<th>приём</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>найти все эндпоинты</td>
+<td>grep по <code>@wy6\("</code> и <code>@mg4\("</code> в <code>p000/</code> — их объявляют только интерфейсы сервисов</td>
+</tr>
+<tr>
+<td>найти JSON-поля запроса/ответа</td>
+<td>открыть класс-аргумент <code>@ey0</code> или параметр типа <code>ek6&lt;…&gt;</code>, читать <code>@ok8("…")</code></td>
+</tr>
+<tr>
+<td>найти, кто вызывает эндпоинт</td>
+<td>grep по имени метода с префиксом <code>m</code> и номером, например <code>m14706Q\(</code></td>
+</tr>
+<tr>
+<td>найти значения enum</td>
+<td>открыть enum; у «строковых» enum значение — аргумент конструктора (<code>UP("up")</code>), а <code>toString()</code> его и возвращает</td>
+</tr>
+<tr>
+<td>найти, куда уходит значение поля DTO</td>
+<td>grep по геттеру (<code>m7191e\(</code> для <code>api_host</code>)</td>
+</tr>
+<tr>
+<td>понять ветку класса-ножа</td>
+<td>найти <code>new &lt;класс&gt;(N, …)</code> и читать <code>case N</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="16">1.6. Уровни достоверности</h2>
+<p>Во всей документации используются пометки:</p>
+<table>
+<thead>
+<tr>
+<th>пометка</th>
+<th>значение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>[код]</strong></td>
+<td>прямо видно в декомпилированном коде; указаны файл и строки</td>
+</tr>
+<tr>
+<td><strong>[вывод]</strong></td>
+<td>логическое следствие из кода, но не дословно написано в нём</td>
+</tr>
+<tr>
+<td><strong>[гипотеза]</strong></td>
+<td>предположение; нужно проверить</td>
+</tr>
+<tr>
+<td><strong>[проверено]</strong></td>
+<td>подтверждено реальным запросом к серверу или запуском</td>
+</tr>
+</tbody>
+</table>
+<!-- figure: confidence-levels | Пометки достоверности, которыми размечен весь текст -->
+
+<p>На момент написания <strong>[проверено]</strong> только: редиректы хостов (<code>api.ivideon.com</code> → <code>eu01-api.ivideon.com</code>) и совпадение реализации подписи в <code>zig-client/src/sign.zig</code> с независимой реализацией на Python. <strong>Ни один авторизованный запрос к живому API ещё не выполнялся</strong>. Поведение сервера (коды ошибок, точные формы ответов, лимиты) известно только в той мере, в какой его отражает код клиента.</p>
+<h2 id="17">1.7. Правовые и этические рамки</h2>
+<p>Исследование ведётся для совместимости с <strong>собственной</strong> камерой и <strong>собственным</strong> аккаунтом пользователя. Документация не содержит учётных данных, токенов и способов обхода чужой авторизации. <code>client_id</code> <code>android-client</code> с пустым секретом — публичная константа из приложения, а не секрет. Условия использования сервиса Ivideon и ограничения по частоте запросов не изучены — при живых проверках не создавайте нагрузку: единичные запросы, без циклов опроса быстрее, чем это делает само приложение.</p></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

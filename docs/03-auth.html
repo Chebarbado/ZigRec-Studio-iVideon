@@ -1,0 +1,437 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Авторизация — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="OAuth2 request, token model, refresh, two-factor sign-in, revoke, storage, pseudocode.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="on" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Авторизация</span><span class="en">Authorization</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: OAuth2 request, token model, refresh, two-factor sign-in, revoke, storage, pseudocode.</span></div>
+<p><strong>Теги:</strong> #OAuth2 #токен #refresh_token #двухфакторка #безопасность</p>
+<p>OAuth2 password grant с публичным клиентом <code>android-client</code>, обновление по <code>refresh_token</code>, двухфакторный вход, отзыв токена.</p>
+<p>Достоверность: запросы, поля и логика клиента — <strong>[код]</strong>. Ответы сервера известны только по моделям, в которые клиент их разбирает. <strong>Ни один вход на живом сервере не выполнялся</strong>.</p>
+<!-- figure: token-lifecycle | Жизненный цикл токена: три исхода входа, обновление, выход -->
+
+<h2 id="31">3.1. Получение токена</h2>
+<p>Источники: <code>p000/jc0.java</code> (сервис), <code>p000/qv5.java:358-366, 697-701</code> (форма), <code>p000/C2552ua.java:63-81</code> (Basic-заголовок).</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST https://api.ivideon.com/auth/oauth/token</span>
+<span style="color: #ED007E; background-color: #1E0010">Authorization: Basic YW5kcm9pZC1jbGllbnQ6</span>
+<span style="color: #ED007E; background-color: #1E0010">Content-Type: application/x-www-form-urlencoded</span>
+
+<span style="color: #ED007E; background-color: #1E0010">grant_type=password&amp;username=&lt;email&gt;&amp;password=&lt;пароль&gt;&amp;client_type=android&amp;client_version=3.7.1&amp;device_instance_id=&lt;id&gt;&amp;device_type=&lt;строка&gt;&amp;device_name=&lt;строка&gt;&amp;trusted_device=true</span>
+</code></pre></div>
+
+<p><code>YW5kcm9pZC1jbGllbnQ6</code> = <code>base64("android-client:")</code> — <code>client_id</code> <code>android-client</code>, <strong>секрет пустой</strong>. Это публичная константа приложения.</p>
+<table>
+<thead>
+<tr>
+<th>поле формы</th>
+<th>значение в приложении</th>
+<th>что слать своему клиенту</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>grant_type</code></td>
+<td><code>password</code></td>
+<td>то же</td>
+</tr>
+<tr>
+<td><code>username</code>, <code>password</code></td>
+<td>логин (email) и пароль</td>
+<td>то же</td>
+</tr>
+<tr>
+<td><code>client_type</code></td>
+<td><code>android</code></td>
+<td><code>android</code> — с другим значением поведение сервера неизвестно</td>
+</tr>
+<tr>
+<td><code>client_version</code></td>
+<td><code>3.7.1</code></td>
+<td><code>3.7.1</code></td>
+</tr>
+<tr>
+<td><code>device_instance_id</code></td>
+<td>Firebase Installation ID — 22 символа base64url (<code>p000/q10.java:21-27</code>)</td>
+<td>любой <strong>стабильный</strong> идентификатор установки: сгенерировать один раз и хранить рядом с токеном</td>
+</tr>
+<tr>
+<td><code>device_type</code></td>
+<td><code>"&lt;MANUFACTURER&gt; &lt;MODEL&gt;, Android &lt;RELEASE&gt;"</code>, напр. <code>samsung SM-G991B, Android 13</code> (<code>p000/p52.java:111</code>)</td>
+<td>произвольная строка-описание</td>
+</tr>
+<tr>
+<td><code>device_name</code></td>
+<td>имя устройства из настроек либо <code>Build.MODEL</code></td>
+<td>произвольная строка</td>
+</tr>
+<tr>
+<td><code>trusted_device</code></td>
+<td>всегда <code>true</code></td>
+<td><code>true</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>[гипотеза]</strong> <code>device_instance_id</code> + <code>trusted_device</code> влияют на то, будет ли сервер запрашивать второй фактор повторно с того же устройства. Меняя идентификатор при каждом входе, вы, вероятно, будете каждый раз выглядеть как новое устройство.</p>
+<p>Хост: в обычном режиме — <code>https://api.ivideon.com</code>; для партнёрского облака — <code>https://{api4_host}</code> этого облака (см. <a href="02-architecture.md">02-architecture.md</a>).</p>
+<h2 id="32">3.2. Ответ: три варианта</h2>
+<h3 id="a">A. Токен</h3>
+<p>Модель <code>p000/fr7.java</code> (+ <code>p000/C2470s2.java</code>):</p>
+<table>
+<thead>
+<tr>
+<th>поле</th>
+<th>тип</th>
+<th>примечание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>access_token</code></td>
+<td>string</td>
+<td>он же — идентификатор токена для отзыва</td>
+</tr>
+<tr>
+<td><code>token_type</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>expires_in</code></td>
+<td>int, секунды</td>
+<td></td>
+</tr>
+<tr>
+<td><code>refresh_token</code></td>
+<td>string?</td>
+<td>если нет — обновление невозможно</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>дата?</td>
+<td>если отсутствует, клиент подставляет локальное «сейчас»</td>
+</tr>
+<tr>
+<td><strong><code>api_host</code></strong></td>
+<td>string</td>
+<td><strong>базовый хост всего дальнейшего API</strong>; если без схемы — клиент добавляет <code>https://</code> (<code>p000/or7.java:167-171</code>)</td>
+</tr>
+<tr>
+<td><code>hmac_secret</code></td>
+<td>string?</td>
+<td>ключ подписи стримовых URL; пусто → URL не подписываются (<a href="05-url-signing.md">05-url-signing.md</a>)</td>
+</tr>
+<tr>
+<td><code>owner_id</code></td>
+<td>long</td>
+<td>id пользователя; подставляется в <code>user</code>, <code>/users/{uid}</code></td>
+</tr>
+<tr>
+<td><code>owner_type</code>, <code>scope</code>, <code>client_type</code>, <code>client_version</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>limited_to_2fa</code></td>
+<td>bool?</td>
+<td><code>true</code> → токен ограничен: годится только для настройки 2FA (3.5)</td>
+</tr>
+</tbody>
+</table>
+<p>Ответ приходит <strong>без конверта API5</strong> — голый JSON-объект.</p>
+<h3 id="b-http-200">B. Вызов второго фактора — HTTP 200, не ошибка</h3>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #F8F8F2">{</span>
+<span style="color: #F8F8F2">  </span><span style="color: #FF4689">&quot;proceed_with_2fa&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #66D9EF">true</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">  </span><span style="color: #FF4689">&quot;message&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;…&quot;</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">  </span><span style="color: #FF4689">&quot;challenge_token&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;…&quot;</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">  </span><span style="color: #FF4689">&quot;api5_host&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;…&quot;</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">  </span><span style="color: #FF4689">&quot;available_methods&quot;</span><span style="color: #F8F8F2">: [</span>
+<span style="color: #F8F8F2">    {</span><span style="color: #FF4689">&quot;id&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;…&quot;</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;type&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;email&quot;</span><span style="color: #F8F8F2"> </span><span style="color: #ED007E; background-color: #1E0010">|</span><span style="color: #F8F8F2"> </span><span style="color: #E6DB74">&quot;sms&quot;</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;value&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #E6DB74">&quot;…&quot;</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;owner_id&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #AE81FF">123</span><span style="color: #F8F8F2">,</span>
+<span style="color: #F8F8F2">     </span><span style="color: #FF4689">&quot;state&quot;</span><span style="color: #F8F8F2">: {</span><span style="color: #FF4689">&quot;no_resend_until&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #ED007E; background-color: #1E0010">…</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;resend_timeout&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #ED007E; background-color: #1E0010">…</span><span style="color: #F8F8F2">, </span><span style="color: #FF4689">&quot;submit_attempts&quot;</span><span style="color: #F8F8F2">: </span><span style="color: #ED007E; background-color: #1E0010">…</span><span style="color: #F8F8F2">}}</span>
+<span style="color: #F8F8F2">  ]</span>
+<span style="color: #F8F8F2">}</span>
+</code></pre></div>
+
+<p>Источники: <code>p000/j5a.java</code>, <code>p000/bb0.java</code>, <code>p000/eb0.java</code>, адаптер <code>p000/C2270mr.java</code> (восстановлен из fallback-дампа). Дальше — раздел 3.4.</p>
+<blockquote>
+<p>Первоначально предполагалось, что признак 2FA — поле <code>limited_to_2fa</code> в токене. Это <strong>другой</strong> сценарий (3.5). Обычный вход с включённой 2FA даёт ответ <code>proceed_with_2fa</code>.</p>
+</blockquote>
+<h3 id="c-oauth">C. Ошибка OAuth</h3>
+<p><code>{"error", "error_description", "reason", "retry_in"}</code> — см. <a href="10-errors.md">10-errors.md</a>, раздел 10.4. Неверный пароль → <code>AuthError</code>; <code>reason=TOO_MANY_LOG_IN_ATTEMPTS</code> → ждать <code>retry_in</code>.</p>
+<h2 id="33">3.3. Срок жизни и обновление</h2>
+<table>
+<thead>
+<tr>
+<th>аспект</th>
+<th>поведение приложения</th>
+<th>источник</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>проверка срока</td>
+<td>токен считается истёкшим при <code>now &gt; created_at + expires_in − 300 с</code> — <strong>запас 5 минут</strong></td>
+<td><code>p000/i85.java:218-240</code></td>
+</tr>
+<tr>
+<td>упреждающее обновление</td>
+<td>при старте приложения и перед сборкой каждого URL потока</td>
+<td><code>App.java:293</code>, <code>PlayerController.java:803,831</code></td>
+</tr>
+<tr>
+<td>реактивное обновление</td>
+<td>HTTP 401 → принудительный refresh → повтор исходного запроса</td>
+<td><code>p000/e21.java:86-103</code></td>
+</tr>
+<tr>
+<td>исключение</td>
+<td>401 с <code>message</code> = <code>"Session's subject doesn't exist."</code> → «аккаунт деактивирован или токен отозван», refresh <strong>не</strong> делается</td>
+<td><code>AuthError.java:20</code>, <code>e21.java:89-92</code></td>
+</tr>
+<tr>
+<td>конкурентность</td>
+<td>один <code>AtomicBoolean</code>: параллельные попытки не шлют второй запрос, а подписываются на идущий</td>
+<td><code>i85.java:243-295</code></td>
+</tr>
+<tr>
+<td>неудача с <code>AuthError</code></td>
+<td>состояние <code>NO_FATE</code> → токен сбрасывается, пользователь разлогинен</td>
+<td><code>p000/h85.java:59-81</code></td>
+</tr>
+<tr>
+<td>прочая неудача (сеть)</td>
+<td><code>FAILED</code>, токен сохраняется</td>
+<td>там же</td>
+</tr>
+<tr>
+<td>запасной вход паролем</td>
+<td><strong>нет</strong> — пароль не хранится (лог: <code>we don't keep credentials anymore</code>)</td>
+<td><code>h85.java:90</code></td>
+</tr>
+</tbody>
+</table>
+<p>Запрос обновления — тот же эндпоинт и тот же Basic-заголовок (<code>h85.java:113-118</code>):</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code>grant_type=refresh_token
+refresh_token=&lt;refresh_token&gt;
+access_token=&lt;текущий access_token&gt;          ← нестандартно для OAuth2, но приложение шлёт
+client_type, client_version, device_instance_id, device_type, device_name, trusted_device=true
+</code></pre></div>
+
+<p>После обновления приложение <strong>пересоздаёт все сервисы</strong> с новым <code>api_host</code> и заново генерирует <code>session</code> для подписи URL.</p>
+<h2 id="34">3.4. Вход с двухфакторной авторизацией</h2>
+<p>Все шаги — публичные запросы (без <code>access_token</code>) на хост <code>https://{api5_host}</code> из ответа-вызова; авторизует их <code>challenge_token</code>. Источники: <code>p000/tl7.java</code>, <code>p000/sl7.java:23-34</code>, <code>p000/ic0.java:581, 645, 715</code>.</p>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code>sequenceDiagram
+    participant A as Клиент
+    participant O as auth-хост
+    participant P as api5_host
+    A-&gt;&gt;O: POST /auth/oauth/token (password)
+    O--&gt;&gt;A: 200 {proceed_with_2fa, challenge_token, api5_host, available_methods}
+    Note over A: методов несколько — выбирает пользователь
+    A-&gt;&gt;P: POST /two_factor_methods/{methodId}?op=SELECT {challenge_token}
+    P--&gt;&gt;A: {no_resend_until, submit_attempts}
+    Note over P: сервер отправляет код на email/SMS
+    opt код не пришёл
+        A-&gt;&gt;P: POST /two_factor_methods/{methodId}/code?op=RESEND {challenge_token}
+    end
+    A-&gt;&gt;P: POST /two_factor_methods/{methodId}/code?op=SUBMIT {challenge_token, code}
+    P--&gt;&gt;A: полноценный токен (модель из 3.2 A)
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>шаг</th>
+<th>запрос</th>
+<th>тело</th>
+<th>ответ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>выбрать метод</td>
+<td><code>POST /two_factor_methods/{id}?op=SELECT</code></td>
+<td><code>{"challenge_token"}</code></td>
+<td><code>{no_resend_until, submit_attempts}</code></td>
+</tr>
+<tr>
+<td>переслать код</td>
+<td><code>POST /two_factor_methods/{id}/code?op=RESEND</code></td>
+<td><code>{"challenge_token"}</code></td>
+<td>то же</td>
+</tr>
+<tr>
+<td>отправить код</td>
+<td><code>POST /two_factor_methods/{id}/code?op=SUBMIT</code></td>
+<td><code>{"challenge_token", "code"}</code></td>
+<td>токен</td>
+</tr>
+</tbody>
+</table>
+<p>Ответы, предположительно, в конверте API5 <strong>[вывод: общий конвертер]</strong>. Ошибки: <code>CHALLENGE_NOT_FOUND</code>, <code>CHALLENGE_EXPIRED</code>, <code>TWO_FACTOR_METHOD_NOT_FOUND</code>, <code>TWO_FACTOR_METHOD_NOT_SELECTED</code>, <code>TOO_FREQUENT</code> (соблюдайте <code>no_resend_until</code>), <code>INVALID_CODE</code>, <code>NO_ATTEMPTS_LEFT</code>, <code>BAD_CODE</code>, <code>OTP_LOCKED</code>.</p>
+<h2 id="35-2fa-limited_to_2fa">3.5. Принудительная настройка 2FA (<code>limited_to_2fa</code>)</h2>
+<p>Если сервер требует 2FA, а она не настроена: либо ошибка OAuth <code>invalid_grant</code> / <code>reason=2FA_IS_MANDATORY</code>, либо токен с <code>limited_to_2fa: true</code>. С ограниченным токеном приложение сразу ведёт на привязку телефона (<code>signin/C0237c.java:153-162</code>):</p>
+<table>
+<thead>
+<tr>
+<th>запрос (на <code>api_host</code>, с <code>access_token</code>)</th>
+<th>тело</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /two_factor_methods?op=CREATE</code></td>
+<td><code>{"value": "&lt;телефон&gt;", "type": "sms", "password": "&lt;пароль&gt;"}</code></td>
+</tr>
+<tr>
+<td><code>POST /two_factor_methods?op=CONFIRM</code></td>
+<td><code>{"two_factor_method_id": "…", "code": "…"}</code></td>
+</tr>
+</tbody>
+</table>
+<p>Каким вызовом ограниченный токен превращается в полный — не прослежено; <strong>[вывод]</strong>: приложение входит заново и проходит сценарий 3.4.</p>
+<p>Минимальная стратегия для своего клиента: распознать <code>proceed_with_2fa</code> и <code>limited_to_2fa</code>, сообщить пользователю и не пытаться работать с таким ответом как с токеном.</p>
+<h2 id="36">3.6. Выход и отзыв токена</h2>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #ED007E; background-color: #1E0010">POST https://{api_host}/access_tokens/{accessTokenId}?op=REVOKE</span>
+</code></pre></div>
+
+<ul>
+<li>публичный (<code>@mn6</code>): <code>access_token</code> в query <strong>не</strong> добавляется, тела нет;</li>
+<li><code>accessTokenId</code> — <strong>сама строка <code>access_token</code></strong> (<code>p000/ic0.java:180-183, 345-348</code>; косвенно подтверждается десериализатором <code>p000/C2582v2.java</code>, где <code>id</code> токена отображается на <code>access_token</code>);</li>
+<li>ошибки отзыва приложение игнорирует; затем очищает локальные данные.</li>
+</ul>
+<h2 id="37">3.7. Хранение</h2>
+<p>Приложение хранит токен <strong>в открытом виде</strong>: SharedPreferences <code>PREFSES</code>, ключ <code>ACCESS_TOKEN</code>, JSON модели токена (<code>p000/ob0.java:79-84</code>). Без шифрования и без AccountManager. Пароль не хранится.</p>
+<p>Для своего клиента: <code>access_token</code>, <code>refresh_token</code> и <code>hmac_secret</code> — секреты одного уровня с паролем на время жизни. Файл — только для текущего пользователя ОС, вне репозитория (<code>.gitignore</code>), не печатать в логах. Учтите, что само приложение передаёт <code>access_token</code> в query-строке URL (включая ссылки на веб-портал <code>go.ivideon.com</code>, параметр <code>_go.session</code>) — URL с токеном нельзя публиковать.</p>
+<h2 id="38">3.8. Регистрация и сброс пароля (для полноты)</h2>
+<p>Публичные вызовы на public-API5-хосте (<code>p000/tl7.java</code>):</p>
+<table>
+<thead>
+<tr>
+<th>запрос</th>
+<th>тело</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /users?op=CREATE</code></td>
+<td><code>login, password, language, country, device_type, device_name, device_instance_id, sign_in, marketing_data, account_type</code> + константы <code>client_id: "android-client"</code>, <code>client_type: "android"</code>, <code>client_version: "3.7.1"</code>, <code>partner_id: "ivideon"</code> (<code>p000/xt8.java</code>). Ответ — пользователь с встроенными полями токена</td>
+</tr>
+<tr>
+<td><code>POST /users?op=RESET_PASSWORD</code></td>
+<td><code>{"login"}</code></td>
+</tr>
+<tr>
+<td><code>POST /partners/ivideon/signup_form_config?op=GET</code></td>
+<td><code>{"client_language", "client_type": "mobile", "ip": null}</code></td>
+</tr>
+</tbody>
+</table>
+<p>Входа через соцсети/внешних провайдеров в приложении нет; демо-режима с отдельным токеном тоже нет.</p>
+<h2 id="39">3.9. Псевдокод клиента</h2>
+<div class="codehilite" style="background: #272822"><pre style="line-height: 125%;"><span></span><code><span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">login</span><span style="color: #F8F8F2">(email,</span> <span style="color: #F8F8F2">password):</span>
+    <span style="color: #F8F8F2">r</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">post_form(AUTH_HOST</span> <span style="color: #FF4689">+</span> <span style="color: #E6DB74">&quot;/auth/oauth/token&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #F8F8F2">basic(</span><span style="color: #E6DB74">&quot;android-client&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">&quot;&quot;</span><span style="color: #F8F8F2">),</span> <span style="color: #F8F8F2">{</span>
+        <span style="color: #E6DB74">&quot;grant_type&quot;</span><span style="color: #F8F8F2">:</span> <span style="color: #E6DB74">&quot;password&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">&quot;username&quot;</span><span style="color: #F8F8F2">:</span> <span style="color: #F8F8F2">email,</span> <span style="color: #E6DB74">&quot;password&quot;</span><span style="color: #F8F8F2">:</span> <span style="color: #F8F8F2">password,</span> <span style="color: #FF4689">**</span><span style="color: #F8F8F2">DEVICE_FIELDS,</span>
+        <span style="color: #E6DB74">&quot;trusted_device&quot;</span><span style="color: #F8F8F2">:</span> <span style="color: #E6DB74">&quot;true&quot;</span><span style="color: #F8F8F2">})</span>
+    <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">r</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">status</span> <span style="color: #FF4689">!=</span> <span style="color: #AE81FF">200</span><span style="color: #F8F8F2">:</span>            <span style="color: #66D9EF">raise</span> <span style="color: #F8F8F2">OAuthError(r</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">json())</span>      <span style="color: #959077"># error / reason / retry_in</span>
+    <span style="color: #F8F8F2">j</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">r</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">json()</span>
+    <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">j</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">get(</span><span style="color: #E6DB74">&quot;proceed_with_2fa&quot;</span><span style="color: #F8F8F2">):</span>  <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">TwoFactorChallenge(j)</span>    <span style="color: #959077"># раздел 3.4</span>
+    <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">j</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">get(</span><span style="color: #E6DB74">&quot;limited_to_2fa&quot;</span><span style="color: #F8F8F2">):</span>    <span style="color: #66D9EF">raise</span> <span style="color: #F8F8F2">TwoFactorSetupRequired()</span>  <span style="color: #959077"># раздел 3.5</span>
+    <span style="color: #F8F8F2">j</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">setdefault(</span><span style="color: #E6DB74">&quot;created_at&quot;</span><span style="color: #F8F8F2">,</span> <span style="color: #F8F8F2">time</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">time())</span>
+    <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">Token(j)</span>                <span style="color: #959077"># base_url = ensure_https(j[&quot;api_host&quot;])</span>
+
+<span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">call</span><span style="color: #F8F8F2">(token,</span> <span style="color: #F8F8F2">method,</span> <span style="color: #F8F8F2">path,</span> <span style="color: #FF4689">**</span><span style="color: #F8F8F2">kw):</span>
+    <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">token</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">expires_within(</span><span style="color: #AE81FF">300</span><span style="color: #F8F8F2">):</span>  <span style="color: #F8F8F2">token</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">refresh(token)</span>
+    <span style="color: #F8F8F2">r</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">send(token,</span> <span style="color: #F8F8F2">method,</span> <span style="color: #F8F8F2">path,</span> <span style="color: #FF4689">**</span><span style="color: #F8F8F2">kw)</span>
+    <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">r</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">status</span> <span style="color: #FF4689">==</span> <span style="color: #AE81FF">401</span> <span style="color: #FF4689">and</span> <span style="color: #F8F8F2">r</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">message</span> <span style="color: #FF4689">!=</span> <span style="color: #E6DB74">&quot;Session&#39;s subject doesn&#39;t exist.&quot;</span><span style="color: #F8F8F2">:</span>
+        <span style="color: #F8F8F2">token</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">refresh(token)</span>     <span style="color: #959077"># AuthError при refresh -&gt; требовать новый вход</span>
+        <span style="color: #F8F8F2">r</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">send(token,</span> <span style="color: #F8F8F2">method,</span> <span style="color: #F8F8F2">path,</span> <span style="color: #FF4689">**</span><span style="color: #F8F8F2">kw)</span>
+    <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">r</span>
+</code></pre></div></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>

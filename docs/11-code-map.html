@@ -1,0 +1,552 @@
+<!DOCTYPE html><html class="lang-ru" lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Карта кода — Zig-Rec Studio · iVideon</title>
+<meta name="description" content="Which obfuscated class does what; what did not decompile.">
+<style>
+:root{--bg:#0c0d10;--bg2:#131519;--card:#171a20;--line:#262a32;--ink:#e8eaed;--dim:#9aa0aa;--faint:#6b7280;
+--red:#e23b3b;--red2:#ff5a5a;--blue:#5aa0e6;--mono:'Cascadia Code','JetBrains Mono','Consolas',ui-monospace,monospace;
+--sans:'Segoe UI',system-ui,-apple-system,Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--red2);text-decoration:none}a:hover{text-decoration:underline}
+.lang-ru .en{display:none}.lang-en .ru{display:none}
+.topbar{position:sticky;top:0;z-index:20;background:rgba(12,13,16,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.brand{font-weight:800;letter-spacing:-.01em;color:var(--ink);font-size:16px;white-space:nowrap}
+.brand .t{color:var(--red2)}
+.topbar .sp{flex:1}
+.topbar a.nav{color:var(--dim);font-size:14px}.topbar a.nav:hover{color:var(--ink);text-decoration:none}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:transparent;border:0;color:var(--dim);font:600 13px var(--sans);padding:6px 11px;cursor:pointer}
+.lang button.on{background:var(--red);color:#fff}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid var(--line);transition:.15s}
+.btn.primary{background:var(--red);border-color:var(--red);color:#fff}.btn.primary:hover{background:var(--red2);text-decoration:none}
+.btn.ghost{background:#1b1e25;color:var(--ink)}.btn.ghost:hover{border-color:var(--red);text-decoration:none}
+pre{background:#0a0b0d;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#cdd3db}
+code{font-family:var(--mono);font-size:.92em;background:#1b1e25;padding:1px 5px;border-radius:4px;color:#e6c07b}
+pre code{background:none;padding:0;color:inherit}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;display:block;overflow:auto}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}th{background:#1b1e25}
+blockquote{border-left:3px solid var(--red);margin:14px 0;padding:2px 16px;background:var(--bg2);color:var(--dim);border-radius:0 8px 8px 0}
+.mermaid{background:#0f1114;border:1px solid var(--line);border-radius:8px;padding:12px;margin:14px 0;text-align:center}
+/* layout */
+.layout{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:260px 1fr;gap:0}
+.side{border-right:1px solid var(--line);padding:24px 8px 60px;position:sticky;top:53px;align-self:start;height:calc(100vh - 53px);overflow:auto}
+.side .grp{color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-size:11px;margin:16px 12px 6px}
+.side a{display:block;color:var(--dim);font-size:14px;padding:7px 12px;border-radius:7px;margin:1px 4px}
+.side a:hover{background:var(--card);color:var(--ink);text-decoration:none}
+.side a.on{background:rgba(226,59,59,.14);color:var(--red2);font-weight:600}
+.main{padding:34px 40px 80px;min-width:0}
+.main h1{font-size:clamp(26px,4vw,38px);margin:0 0 6px;letter-spacing:-.02em;line-height:1.12}
+.main h2{font-size:24px;margin:34px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.main h3{font-size:18px;margin:22px 0 6px;color:#dfe3e8}
+.main img{max-width:100%;border:1px solid var(--line);border-radius:10px}
+.banner{background:rgba(90,160,230,.09);border:1px solid rgba(90,160,230,.32);border-radius:9px;padding:11px 15px;margin:0 0 22px;color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pill{display:inline-block;font-size:12px;color:var(--red2);border:1px solid rgba(226,59,59,.4);border-radius:100px;padding:3px 11px;margin-bottom:14px}
+.hero{padding:60px 40px 30px}
+.hero h1{font-size:clamp(30px,6vw,50px);font-weight:800}
+.hero .lead{font-size:clamp(16px,2.4vw,20px);color:var(--dim);max-width:640px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.feat h3{margin:0 0 5px;font-size:16px;border:0}.feat p{margin:0;color:var(--dim);font-size:14px}
+.foot{border-top:1px solid var(--line);color:var(--faint);font-size:13px;padding:26px 40px}
+.step b{color:var(--ink)}
+ul li{margin:3px 0}
+@media(max-width:820px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+ .main,.hero,.foot{padding-left:20px;padding-right:20px}.grid2{grid-template-columns:1fr}
+ .topbar a.nav{display:none}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body>
+<div class="topbar"><div class="in">
+  <span class="brand">Zig-Rec Studio <span class="t">· iVideon</span></span>
+  <a class="nav" href="../index.html"><span class="ru">Главная</span><span class="en">Home</span></a>
+  <a class="nav" href="../docs/index.html"><span class="ru">Документация</span><span class="en">Docs</span></a>
+  <div class="sp"></div>
+  <div class="lang"><button id="b-ru" onclick="setLang('ru')">RU</button><button id="b-en" onclick="setLang('en')">EN</button></div>
+  <a class="btn ghost" href="https://github.com/Chebarbado/ZigRec-Studio-iVideon">GitHub</a>
+</div></div><div class="layout"><nav class="side">
+<div class="grp"><span class="ru">Документация</span><span class="en">Documentation</span></div>
+<a class="" href="camera-guide.html"><span class="ru">Гайд: программа для камеры</span><span class="en">Guide: build a camera app</span></a>
+<a class="" href="README.html"><span class="ru">Обзор протокола</span><span class="en">Protocol overview</span></a>
+<a class="" href="01-methodology.html"><span class="ru">Методика</span><span class="en">Methodology</span></a>
+<a class="" href="02-architecture.html"><span class="ru">Архитектура</span><span class="en">Architecture</span></a>
+<a class="" href="03-auth.html"><span class="ru">Авторизация</span><span class="en">Authorization</span></a>
+<a class="" href="04-request-conventions.html"><span class="ru">Соглашения API</span><span class="en">API conventions</span></a>
+<a class="" href="05-url-signing.html"><span class="ru">Подпись URL</span><span class="en">URL signing</span></a>
+<a class="" href="06-api-reference.html"><span class="ru">Справочник API</span><span class="en">API reference</span></a>
+<a class="" href="07-video.html"><span class="ru">Видео, превью, звук</span><span class="en">Video, preview, audio</span></a>
+<a class="" href="08-camera-control.html"><span class="ru">Управление камерой</span><span class="en">Camera control</span></a>
+<a class="" href="09-camera-attachment.html"><span class="ru">Привязка камеры</span><span class="en">Camera attachment</span></a>
+<a class="" href="10-errors.html"><span class="ru">Ошибки</span><span class="en">Errors</span></a>
+<a class="on" href="11-code-map.html"><span class="ru">Карта кода</span><span class="en">Code map</span></a>
+<a class="" href="12-zig-client.html"><span class="ru">Клиент на Zig</span><span class="en">Zig client</span></a>
+<a class="" href="13-open-questions.html"><span class="ru">Открытые вопросы</span><span class="en">Open questions</span></a>
+<div class="grp">PDF</div>
+<a href="ivideon-developer-docs.pdf"><span class="ru">Все доки одним PDF</span><span class="en">All docs as one PDF</span></a>
+</nav><main class="main"><span class="pill"><span class="ru">Документация</span><span class="en">Reference</span></span><h1><span class="ru">Карта кода</span><span class="en">Code map</span></h1><div class="banner"><span class="ru">Раздел на русском — исходный язык документации.</span><span class="en">This reference is in Russian. In brief: Which obfuscated class does what; what did not decompile.</span></div>
+<p><strong>Теги:</strong> #карта_кода #p000 #обфускация #jadx</p>
+<p>Где что лежит в <code>decompiled-ivideon-3.7.1/sources/</code>. Имена вида <code>C2199ku</code> стабильны для <strong>jadx 1.5.6 с <code>--deobf</code></strong>; в скобках — настоящее имя класса в DEX (из комментария <code>renamed from</code>), оно не зависит от версии jadx. Если у класса есть «говорящий» <code>toString()</code>, оттуда взято исходное имя.</p>
+<p>Как читать такие классы — <a href="01-methodology.md">01-methodology.md</a>, раздел 1.5.</p>
+<h2 id="111">11.1. Сервисные интерфейсы (точки входа)</h2>
+<table>
+<thead>
+<tr>
+<th>файл</th>
+<th>содержимое</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>p000/InterfaceC2236lu.java</code> (<code>lu</code>)</td>
+<td><strong>основной сервис API5</strong>, ~75 методов</td>
+</tr>
+<tr>
+<td><code>p000/InterfaceC2345or.java</code> (<code>or</code>)</td>
+<td>картинки: <code>live_preview</code>, миниатюры, загрузка по URL</td>
+</tr>
+<tr>
+<td><code>p000/jc0.java</code></td>
+<td><code>POST /auth/oauth/token</code></td>
+</tr>
+<tr>
+<td><code>p000/tl7.java</code></td>
+<td>публичные: шаги 2FA (динамический URL), регистрация, сброс пароля, конфиг формы</td>
+</tr>
+<tr>
+<td><code>p000/qm2.java</code></td>
+<td><code>/customer_clouds?op=FIND</code></td>
+</tr>
+<tr>
+<td><code>p000/cv4.java</code></td>
+<td><code>/idam?op=SHARE</code> — доступ к камере по номеру телефона</td>
+</tr>
+<tr>
+<td><code>p000/pp0.java</code>, <code>p000/vx8.java</code>, <code>p000/e26.java</code></td>
+<td>баннеры, site security, маркетинг</td>
+</tr>
+</tbody>
+</table>
+<h2 id="112">11.2. Ядро сети и сессии</h2>
+<table>
+<thead>
+<tr>
+<th>файл</th>
+<th>роль</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>p000/i85.java</code></td>
+<td>ядро SDK: OkHttpClient (76–92), Gson и адаптеры (91–120), токен, проверка срока (218–240), блокировка обновления (243–295)</td>
+</tr>
+<tr>
+<td><code>p000/k85.java</code></td>
+<td>сборка <code>i85</code>, выбор хостов по режиму (47–151)</td>
+</tr>
+<tr>
+<td><code>p000/l21.java</code></td>
+<td>константы: хосты, бренды, права для шаринга, email поддержки</td>
+</tr>
+<tr>
+<td><code>p000/yl6.java</code></td>
+<td>набор сервисов на токен; создаёт <code>C2199ku</code> с <code>api_host</code> (28)</td>
+</tr>
+<tr>
+<td><code>p000/or7.java</code></td>
+<td>нормализация <code>api_host</code> → <code>https://…</code> (167–171)</td>
+</tr>
+<tr>
+<td><code>p000/C2199ku.java</code> (<code>ku</code>)</td>
+<td>«сессия API»: base URL, сервисы, интерцептор; <code>m14125h</code> (152) — получение подписанного URL без выполнения запроса</td>
+</tr>
+<tr>
+<td><code>p000/zn3.java</code></td>
+<td>фабрика Retrofit-сервисов</td>
+</tr>
+<tr>
+<td><code>p000/ek6.java</code></td>
+<td><code>NetworkCall&lt;T&gt;</code> — обёртка вызова</td>
+</tr>
+<tr>
+<td><code>p000/e21.java</code></td>
+<td>выполнение: повторы (81–143), 401 → refresh (86–103), разбор ошибок (385–482)</td>
+</tr>
+<tr>
+<td><code>p000/g58.java</code> → <code>mo7583n</code> (396–467)</td>
+<td><strong>интерцептор авторизации и подписи</strong></td>
+</tr>
+<tr>
+<td><code>p000/zbc.java</code> → <code>m22152b</code> (40–43)</td>
+<td>путь для подписи: <code>"/" + join(pathSegments)</code></td>
+</tr>
+<tr>
+<td><code>p000/C2504t.java</code> → <code>case 1</code> (119–138)</td>
+<td><code>signWithSecret</code>: HMAC-SHA1</td>
+</tr>
+<tr>
+<td><code>p000/kr6.java</code> → <code>kr6(C2504t)</code> (626–647)</td>
+<td>генерация 8-символьного id сессии</td>
+</tr>
+<tr>
+<td><code>p000/ps4.java</code>, <code>e82.java</code>, <code>g08.java</code>, <code>a40.java</code>, <code>fo4.java</code>, <code>v28.java</code></td>
+<td>OkHttp: <code>HttpUrl</code>, <code>HttpUrl.Builder</code>, <code>Request</code>, <code>Request.Builder</code>, <code>Headers</code>, <code>ResponseBody</code></td>
+</tr>
+<tr>
+<td><code>p000/qs6.java</code>, <code>p000/ns7.java</code></td>
+<td>OkHttp: <code>OkHttpClient.Builder</code>, <code>BridgeInterceptor</code> (User-Agent <code>okhttp/5.3.2</code>)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="113">11.3. Авторизация</h2>
+<table>
+<thead>
+<tr>
+<th>файл</th>
+<th>роль</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>p000/qv5.java</code> → <code>qv5(i85, ry1)</code> (697–701), <code>m17621g</code> (358–366)</td>
+<td>форма OAuth: поля клиента/устройства, <code>grant_type</code>, <code>trusted_device</code></td>
+</tr>
+<tr>
+<td><code>p000/C2552ua.java</code> (63–81)</td>
+<td><code>Authorization: Basic base64("android-client:")</code></td>
+</tr>
+<tr>
+<td><code>p000/fr7.java</code>, <code>p000/C2470s2.java</code> (<code>s2</code>)</td>
+<td>модель токена; <code>C2470s2</code> добавляет флаг наличия <code>hmac_secret</code> и подписчик</td>
+</tr>
+<tr>
+<td><code>p000/h85.java</code></td>
+<td>конечный автомат обновления токена (лог-строки <code>Update token: …</code>)</td>
+</tr>
+<tr>
+<td><code>p000/ob0.java</code></td>
+<td>хранение токена в SharedPreferences, состояние входа</td>
+</tr>
+<tr>
+<td><code>p000/ic0.java</code></td>
+<td>вход, 2FA (<code>SELECT</code> 645, <code>RESEND</code> 581, <code>SUBMIT</code> 715), выход, отзыв (180–183, 345–348)</td>
+</tr>
+<tr>
+<td><code>p000/sl7.java</code> (23–34)</td>
+<td>сборка динамических URL 2FA</td>
+</tr>
+<tr>
+<td><code>p000/j5a.java</code>, <code>bb0.java</code>, <code>eb0.java</code>, <code>b18.java</code>, <code>j99.java</code>, <code>ta0.java</code></td>
+<td>DTO 2FA: вызов, метод, состояние, тела запросов</td>
+</tr>
+<tr>
+<td><code>p000/ua0.java</code>, <code>p000/va0.java</code></td>
+<td>тело и классификация ошибок OAuth</td>
+</tr>
+<tr>
+<td><code>p000/C2270mr.java</code></td>
+<td>адаптер ответа токена / вызова 2FA (<strong>не декомпилируется</strong>, нужен fallback-режим)</td>
+</tr>
+<tr>
+<td><code>p000/ry1.java</code>, <code>p52.java</code>, <code>q10.java</code></td>
+<td>идентификаторы устройства: <code>device_type</code>, <code>device_name</code>, Firebase Installation ID</td>
+</tr>
+<tr>
+<td><code>p000/xt8.java</code></td>
+<td>тело регистрации</td>
+</tr>
+<tr>
+<td><code>p000/C2582v2.java</code></td>
+<td>десериализатор ресурса access-token</td>
+</tr>
+</tbody>
+</table>
+<h2 id="114">11.4. Формат данных и ошибки</h2>
+<table>
+<thead>
+<tr>
+<th>файл</th>
+<th>роль</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>p000/C2619w2.java</code></td>
+<td>адаптеры: конверт успеха (64–114), распаковка <code>items</code> (131–143), словарь-по-id (144–165)</td>
+</tr>
+<tr>
+<td><code>p000/ld3.java</code> (364–380)</td>
+<td>фабрика конвертеров; обработка <code>@kr7</code></td>
+</tr>
+<tr>
+<td><code>p000/nr7.java</code></td>
+<td>«сырой» JSON-результат для <code>@kr7</code></td>
+</tr>
+<tr>
+<td><code>p000/nq2.java</code>, <code>p000/C2647wu.java</code></td>
+<td>даты: чтение (секунды/мс), запись (секунды с дробью)</td>
+</tr>
+<tr>
+<td><code>p000/un6.java</code>, <code>p000/sn6.java</code></td>
+<td>пустой результат</td>
+</tr>
+<tr>
+<td><code>p000/ud7.java</code></td>
+<td><code>turned_off_until</code></td>
+</tr>
+<tr>
+<td><code>p000/z10.java</code></td>
+<td>дата <code>yyyy-MM-dd</code></td>
+</tr>
+<tr>
+<td><code>p000/C0334eu.java</code>, <code>p000/C2382pr.java</code></td>
+<td>разбор и модель <code>Api5Error</code></td>
+</tr>
+<tr>
+<td><code>p000/C0297du.java</code> (19, 38–73)</td>
+<td><strong>таблица <code>code</code> → класс ошибки</strong>, правило 401</td>
+</tr>
+<tr>
+<td><code>p000/xw8.java</code></td>
+<td>таблица ошибок site security</td>
+</tr>
+<tr>
+<td><code>p000/wm3.java</code></td>
+<td>ошибки для не-JSON ответов</td>
+</tr>
+<tr>
+<td><code>com/ivideon/sdk/network/data/error/</code></td>
+<td>иерархия ошибок (имена сохранены), базовый <code>NetworkError</code></td>
+</tr>
+<tr>
+<td><code>p000/C2233lr.java</code>, <code>C0258cr.java</code>, <code>C2196kr.java</code>; <code>com/ivideon/sdk/network/service/p013v4/</code></td>
+<td>наследие API4</td>
+</tr>
+</tbody>
+</table>
+<p>Аннотации: <code>wy6</code> POST, <code>mg4</code> GET, <code>g47</code> Path, <code>fp7</code> Query, <code>ey0</code> Body, <code>iba</code> Url, <code>xa4</code> FormUrlEncoded, <code>zz3</code> FieldMap, <code>bo4</code> HeaderMap, <code>ok8</code> SerializedName, <code>ka5</code> JsonAdapter, <code>mn6</code> без токена, <code>zc0</code> Bearer, <code>l85</code> подпись, <code>kr7</code> сырой результат.</p>
+<p>Gson: <code>jm4</code> Gson, <code>km4</code> GsonBuilder, <code>o5a</code> TypeAdapter, <code>p5a</code> TypeAdapterFactory, <code>x6a</code> TypeToken, <code>jc5</code>/<code>bd5</code> JsonReader/Writer, <code>zb5</code> JsonObject, <code>pa5</code> JsonArray, <code>fb5</code> JsonElement.</p>
+<h2 id="115-dto">11.5. DTO по областям</h2>
+<table>
+<thead>
+<tr>
+<th>область</th>
+<th>файлы (<code>p000/</code>)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>серверы и камеры</td>
+<td><code>vk8</code> ServerSlice, <code>tm1</code> CameraSlice, <code>r23</code> репозиторий + проекция (64–99), <code>p14</code> тело FIND, <code>kj7</code> тело с проекцией, <code>ug1</code> права, <code>xzb</code> разбор <code>services</code>, <code>com/ivideon/sdk/network/data/p012v5/DeviceType</code></td>
+</tr>
+<tr>
+<td>привязка</td>
+<td><code>gl2</code> тело <code>servers CREATE</code>, <code>ja0</code> токен привязки, <code>ka0</code> статус, <code>u13</code> тип id, <code>zh4</code> тело QR, <code>rw2</code> тело DELETE, <code>vs7</code>/<code>w13</code>/<code>w96</code>/<code>v13</code> RECOGNIZE, <code>ia0</code> способы, <code>hl5</code> цвет LED, <code>es0</code> правило <code>&amp;</code> для Cute 2</td>
+</tr>
+<tr>
+<td>привязка — логика</td>
+<td><code>w03</code>, <code>q91</code>, <code>p91</code>, <code>l91</code>, <code>C2138j7</code>, <code>C2175k7</code>, <code>js8</code>, <code>ls8</code>, <code>a5a</code>, <code>nb8</code>, <code>m13</code>, <code>C2711yj</code> (<strong>не декомпилируется</strong>)</td>
+</tr>
+<tr>
+<td>Wi-Fi</td>
+<td><code>lqa</code>/<code>kqa</code>/<code>tqa</code> скан, <code>wb2</code> CONNECT, <code>io1</code>, <code>ui1</code>, <code>ti1</code>, <code>vqa</code>, <code>fx1</code> (WifiManager телефона)</td>
+</tr>
+<tr>
+<td>управление</td>
+<td><code>ql7</code>/<code>pl7</code>/<code>ol7</code> PTZ, <code>db7</code>/<code>cb7</code>/<code>y65</code>/<code>za6</code> плагины, <code>ab6</code>/<code>va6</code>/<code>bb6</code> движение, <code>m19</code>/<code>l19</code>/<code>n19</code> звук, <code>il5</code>/<code>gl5</code> LED, <code>x65</code>/<code>w65</code> ИК, <code>k86</code> микрофон, <code>zaa</code> config, <code>qz1</code> режим архива, <code>ku7</code> расписание, <code>bg8</code>/<code>cg8</code>/<code>zf8</code> SD-карта, <code>cba</code>, <code>bba</code></td>
+</tr>
+<tr>
+<td>видео</td>
+<td><code>sw4</code> качество, <code>ct5</code> LivePreviewChannel, <code>mo7</code>/<code>lo7</code> голос</td>
+</tr>
+<tr>
+<td>архив</td>
+<td><code>fo9</code>/<code>g50</code>/<code>o50</code>/<code>n30</code> таймлайн, <code>yh4</code>/<code>xh4</code>/<code>d20</code>/<code>a20</code>/<code>e20</code>/<code>c20</code> календарь, <code>t20</code>/<code>yu3</code>/<code>cv3</code>/<code>bv3</code> экспорт</td>
+</tr>
+<tr>
+<td>таймлапсы</td>
+<td><code>to9</code>, <code>np9</code>, <code>sr9</code>, <code>kt9</code>, <code>ot9</code></td>
+</tr>
+<tr>
+<td>события</td>
+<td><code>tp3</code> фильтр, <code>en3</code> Event, <code>ho3</code> источник, <code>qo3</code>/<code>oo3</code> типы, <code>gp6</code>/<code>hp6</code>/<code>nd1</code>/<code>o14</code> настройки уведомлений</td>
+</tr>
+<tr>
+<td>пользователь, доступ</td>
+<td><code>ada</code> User, <code>gda</code>, <code>hi4</code>, <code>vw2</code>, <code>r65</code>, <code>ro8</code> SHARE, <code>ci4</code>, <code>dl2</code>/<code>la2</code> 2FA-методы, <code>qo8</code> IDAM</td>
+</tr>
+<tr>
+<td>пакеты</td>
+<td><code>fv0</code>, <code>gv0</code>, <code>yb7</code>, <code>cv0</code> сборщик, <code>zb7</code> интервал, <code>b77</code>, <code>C2340on</code> цикл (<strong>не декомпилируется</strong>)</td>
+</tr>
+<tr>
+<td>облака</td>
+<td><code>xz1</code> CustomerCloud, <code>i86</code>/<code>te2</code> microcloud</td>
+</tr>
+<tr>
+<td>push</td>
+<td><code>ho7</code> тело подписки, <code>bo7</code> провайдеры, <code>xn7</code>, <code>pc7</code>, <code>nc1</code>, <code>jrc</code>; <code>com/ivideon/client/notifications/push/</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="116">11.6. Плеер и медиа</h2>
+<table>
+<thead>
+<tr>
+<th>файл</th>
+<th>роль</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>com/ivideon/sdk/player/p014iv/core/IvPlayer.java</code></td>
+<td>JNI-обёртка: native-методы, события (106–141)</td>
+</tr>
+<tr>
+<td><code>com/ivideon/client/p009ui/player/PlayerController.java</code></td>
+<td>экран плеера (190 КБ): сборка URL (785–837), перемотка (1873–1900), скорости (2710), токен-обсервер (2276–2293)</td>
+</tr>
+<tr>
+<td><code>p000/kr2.java</code> (84–102)</td>
+<td><code>nativeSetMedia</code>: live / архив</td>
+</tr>
+<tr>
+<td><code>p000/t75.java</code>, <code>r75.java</code>, <code>q75.java</code>, <code>p75.java</code></td>
+<td>управление плеером, поверхность, трансформации</td>
+</tr>
+<tr>
+<td><code>p000/g75…n75.java</code></td>
+<td>классы событий плеера</td>
+</tr>
+<tr>
+<td><code>p000/fr2.java</code> (323–400)</td>
+<td>обработка событий, переподключение</td>
+</tr>
+<tr>
+<td><code>p000/d97.java</code></td>
+<td>конечный автомат UI плеера</td>
+</tr>
+<tr>
+<td><code>p000/e97.java</code> (41–73)</td>
+<td>расчёт текущего времени на шкале</td>
+</tr>
+<tr>
+<td><code>p000/C2363p8.java</code>, <code>C2210l4.java</code></td>
+<td>скорость воспроизведения</td>
+</tr>
+<tr>
+<td><code>p000/ca1.java</code>, <code>yh1.java</code></td>
+<td>загрузка кадра-превью</td>
+</tr>
+<tr>
+<td><code>p000/vd1.java</code>, <code>wd1.java</code>, <code>et5.java</code>, <code>dt5.java</code>, <code>k06.java</code>, <code>r66.java</code>, <code>mg7.java</code></td>
+<td>WebSocket-превью: запрос, сокет, protobuf</td>
+</tr>
+<tr>
+<td><code>p000/yu8.java</code>, <code>ip3.java</code></td>
+<td>клипы событий через <code>MediaPlayer</code></td>
+</tr>
+<tr>
+<td><code>p000/du3.java</code>, <code>to7.java</code>, <code>lw6.java</code>, <code>zoa.java</code>, <code>yoa.java</code>, <code>bpa.java</code>; <code>com/ivideon/tools/opus/internal/LibOpus.java</code></td>
+<td>голос: режим, захват, Opus, потоковый POST, лимиты; <code>apa</code>, <code>fm8</code> — <strong>не декомпилируются</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Нативные библиотеки — в <code>apk/xapk/config.arm64_v8a.apk</code>, <code>lib/arm64-v8a/</code> (в <code>decompiled-…/resources</code> их нет: это отдельный сплит).</p>
+<h2 id="117-ui-r8">11.7. UI, не переименованный R8</h2>
+<table>
+<thead>
+<tr>
+<th>путь</th>
+<th>содержимое</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>com/ivideon/client/p009ui/wizard/</code></td>
+<td>мастер подключения: <code>methods/p010qr</code>, <code>methods/wired</code>, <code>methods/wifi</code>, <code>methods/desktop</code></td>
+</tr>
+<tr>
+<td><code>com/ivideon/client/p009ui/player/</code></td>
+<td>плеер</td>
+</tr>
+<tr>
+<td><code>com/ivideon/client/p009ui/cameralayout/</code></td>
+<td>сетка камер</td>
+</tr>
+<tr>
+<td><code>com/ivideon/client/p009ui/signin/</code></td>
+<td>вход, 2FA</td>
+</tr>
+<tr>
+<td><code>com/ivideon/client/notifications/push/</code></td>
+<td>приём push, <code>CloudSubscriptionWorker</code></td>
+</tr>
+<tr>
+<td><code>resources/res/navigation/*.xml</code></td>
+<td>графы навигации — удобная «карта сценариев»</td>
+</tr>
+<tr>
+<td><code>resources/res/values/strings.xml</code></td>
+<td>тексты; имена ресурсов часто раскрывают назначение кода</td>
+</tr>
+<tr>
+<td><code>resources/res/xml/network_security_config.xml</code></td>
+<td>политика TLS</td>
+</tr>
+<tr>
+<td><code>resources/AndroidManifest.xml</code></td>
+<td>компоненты, разрешения, deep links</td>
+</tr>
+</tbody>
+</table>
+<h2 id="118-jadx">11.8. Методы, которые jadx не декомпилировал</h2>
+<p>Для них нужен <code>jadx --single-class &lt;имя&gt; -m fallback</code> (вывод ближе к байткоду, но полный) либо jadx-gui / smali:</p>
+<table>
+<thead>
+<tr>
+<th>класс</th>
+<th>что в нём</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>C2199ku.m14118a</code></td>
+<td>составной запрос (по сигнатуре — выборка по набору id за интервал)</td>
+</tr>
+<tr>
+<td><code>C2711yj</code> (case 11)</td>
+<td>запрос QR-кода привязки</td>
+</tr>
+<tr>
+<td><code>C2270mr</code></td>
+<td>адаптер токена / вызова 2FA, адаптер API4</td>
+</tr>
+<tr>
+<td><code>C2340on</code></td>
+<td>цикл опроса пакетного запроса</td>
+</tr>
+<tr>
+<td><code>apa</code>, <code>fm8</code></td>
+<td>цикл кодирования Opus и запись чанков</td>
+</tr>
+<tr>
+<td><code>go1</code></td>
+<td>чтение сетевой информации камеры</td>
+</tr>
+<tr>
+<td><code>ui1</code> (частично)</td>
+<td>цикл переподключения Wi-Fi</td>
+</tr>
+</tbody>
+</table>
+<p>Fallback-дампы, сделанные при подготовке этой документации, <strong>в проект не сохранены</strong> (лежали во временном каталоге сессии). При необходимости повторите команду.</p></main></div><div class="foot"><span class="ru">Форк <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. Протокол Ivideon восстановлен реверс-инжинирингом; работайте только со своим аккаунтом и своей камерой.</span>
+<span class="en">A fork of <a href="https://github.com/j0k/ZigRec-Studio">j0k/ZigRec-Studio</a>. The Ivideon protocol was reconstructed by reverse engineering; use it only with your own account and your own camera.</span></div><script>
+function setLang(l){document.documentElement.className='lang-'+l;
+ try{localStorage.setItem('lang',l)}catch(e){}
+ var r=document.getElementById('b-ru'),e2=document.getElementById('b-en');
+ if(r&&e2){r.classList.toggle('on',l=='ru');e2.classList.toggle('on',l=='en')}}
+(function(){var l='ru';try{l=localStorage.getItem('lang')||'ru'}catch(e){}setLang(l)})();
+try{mermaid.initialize({startOnLoad:true,theme:'dark'})}catch(e){}
+</script></body></html>
