@@ -121,13 +121,29 @@ pub const Tap = struct {
 
     fn foregroundTitle(buf: []u8) []const u8 {
         const h = c.GetForegroundWindow() orelse return "";
-        var wide: [256]u16 = undefined;
-        const n = c.GetWindowTextW(h, &wide, wide.len);
-        if (n <= 0) return "";
-        const len = std.unicode.utf16LeToUtf8(buf, wide[0..@intCast(n)]) catch return "";
-        return buf[0..len];
+        return titleOf(h, buf);
     }
 };
+
+/// Заголовок окна — без участия потока, которому окно принадлежит (#101).
+///
+/// `GetWindowTextW` для окна своего процесса шлёт его потоку `WM_GETTEXT` и
+/// ждёт ответа. Поток записи зовёт это на каждом кадре, а переднее окно в
+/// момент «Стоп» — наше: по нему только что щёлкнули. Поток окна в это время
+/// стоит в `join` и ждёт поток записи. Оба ждали друг друга вечно: выпуск
+/// 1.0.0.0 зависал намертво на «Стоп», стоило чему-нибудь двигаться в кадре.
+///
+/// `InternalGetWindowText` читает заголовок из памяти ядра и сообщений не
+/// шлёт — ни своему окну, ни чужому зависшему. Цена: у окна, которое рисует
+/// заголовок само и не сообщает его системе, выйдет пустая строка; для слоя
+/// событий это «окно без названия», а не зависание.
+pub fn titleOf(h: c.HWND, buf: []u8) []const u8 {
+    var wide: [256]u16 = undefined;
+    const n = c.InternalGetWindowText(h, &wide, wide.len);
+    if (n <= 0) return "";
+    const len = std.unicode.utf16LeToUtf8(buf, wide[0..@intCast(n)]) catch return "";
+    return buf[0..len];
+}
 
 // ---------------------------------------------------------------- тесты
 

@@ -300,10 +300,15 @@ pub fn stillThere(hwnd: c.HWND) bool {
 
 /// Заголовок окна в UTF-8. Только широкая версия: `GetWindowTextA` отдаёт
 /// текст в кодировке системы, и русские заголовки превращаются в мусор.
+///
+/// `InternalGetWindowText`, а не `GetWindowTextW` (#101): тот для окна своего
+/// процесса шлёт `WM_GETTEXT` потоку окна и ждёт. Отсюда спрашивает и поток
+/// записи — а поток окна на «Стоп» ждёт его в `join`. Выходило зависание
+/// намертво; подробности — у `event_tap.titleOf`.
 pub fn windowTitle(hwnd: c.HWND, out: []u8) []const u8 {
     if (builtin.os.tag != .windows) return out[0..0];
     var wide: [512]u16 = undefined;
-    const n = c.GetWindowTextW(hwnd, &wide, wide.len);
+    const n = c.InternalGetWindowText(hwnd, &wide, wide.len);
     if (n <= 0) return out[0..0];
     const len = std.unicode.utf16LeToUtf8(out, wide[0..@intCast(n)]) catch return out[0..0];
     return out[0..len];
@@ -318,7 +323,9 @@ fn findProc(h: c.HWND, l: c.LPARAM) callconv(.winapi) c.BOOL {
     if (find_result != null) return 0;
     if (c.IsWindowVisible(h) == 0) return 1;
     var title: [512]u16 = undefined;
-    const n = c.GetWindowTextW(h, &title, title.len);
+    // Перебор идёт и по нашему собственному окну, а зовут его из потока
+    // записи на каждом кадре: `GetWindowTextW` тут — тупик на «Стоп» (#101).
+    const n = c.InternalGetWindowText(h, &title, title.len);
     if (n <= 0) return 1;
     // Регистр приводит сама Windows: она знает про русские буквы, а
     // std.ascii — только про латиницу.

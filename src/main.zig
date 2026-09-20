@@ -96,6 +96,8 @@ const usage =
     \\  zigrec pause-smoke ФАЙЛ.mp4
     \\        самопроверка паузы записи: на паузе кадры не идут, после неё идут,
     \\        время кадров не уходит назад, пауза не попадает в звук
+    \\  zigrec title-smoke
+    \\        самопроверка: поток записи читает заголовок окна, не дожидаясь потока окна
     \\  zigrec still-smoke ФАЙЛ.mp4
     \\        самопроверка звука поверх неподвижного экрана: звук не теряется
     \\  zigrec remote-smoke
@@ -301,6 +303,8 @@ pub fn main(init: std.process.Init) !void {
         code = try windowSmoke(init.io, w);
     } else if (benches and eq(cmd, "pause-smoke")) {
         code = try pauseSmoke(arena, w, if (args.len > 2) args[2] else ".check\\pause.mp4");
+    } else if (benches and eq(cmd, "title-smoke")) {
+        code = try titleSmoke(w);
     } else if (benches and eq(cmd, "still-smoke")) {
         code = try stillSmoke(arena, w, if (args.len > 2) args[2] else ".check\\still.mp4");
     } else if (benches and eq(cmd, "remote-smoke")) {
@@ -3994,6 +3998,83 @@ fn pauseSmoke(allocator: std.mem.Allocator, w: anytype, out_path: []const u8) !u
     }
     if (failed) return 1;
     try w.writeAll("[pause] ПАУЗА ЧИСТАЯ\n");
+    return 0;
+}
+
+/// Самопроверка: заголовок окна читается, пока поток окна занят (#101).
+///
+/// Выпуск 1.0.0.0 зависал намертво на «Стоп». Поток окна вставал в `join` и
+/// ждал поток записи, а тот на каждом кадре спрашивал заголовок переднего
+/// окна через `GetWindowTextW`. Для окна своего процесса этот вызов шлёт
+/// `WM_GETTEXT` потоку окна и ждёт ответа — от потока, который сам ждёт.
+/// Нужны были три условия разом: наше окно на переднем плане, движение в
+/// кадре и «Стоп» из окна; самопроверки держат окно в трее и не ловили.
+///
+/// Здесь то же самое без рекордера и без переднего плана: окно заводит
+/// главный поток и сообщений не разбирает, заголовок читает второй поток.
+/// Вернулся за отведённое время — значит, читает без участия владельца.
+fn titleSmoke(w: anytype) !u8 {
+    // Сколько ждём чтения: оно занимает микросекунды, секунда — с огромным запасом.
+    const wait_ms: u32 = 1000;
+    const c = zigrec.win32.c;
+    const title = "zigrec title-smoke";
+    const hwnd = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral(title),
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        200,
+        100,
+        null,
+        null,
+        @ptrCast(c.GetModuleHandleW(null)),
+        null,
+    ) orelse {
+        try w.writeAll("[title] ПРОВАЛ: окно не создалось\n");
+        return 1;
+    };
+    defer _ = c.DestroyWindow(hwnd);
+
+    const Reader = struct {
+        hwnd: c.HWND,
+        done: std.atomic.Value(bool) = .init(false),
+        buf: [256]u8 = undefined,
+        len: usize = 0,
+
+        fn run(self: *@This()) void {
+            const got = zigrec.event_tap.titleOf(self.hwnd, &self.buf);
+            self.len = got.len;
+            self.done.store(true, .release);
+        }
+    };
+    // Читатель живёт в куче и не освобождается при провале: зависший поток
+    // держит на него ссылку, а процесс всё равно выходит.
+    const reader = try std.heap.page_allocator.create(Reader);
+    reader.* = .{ .hwnd = hwnd };
+    const thread = try std.Thread.spawn(.{}, Reader.run, .{reader});
+
+    // Главный поток владеет окном и нарочно не разбирает сообщения — как
+    // поток окна, вставший в `join`.
+    var waited: u32 = 0;
+    while (!reader.done.load(.acquire) and waited < wait_ms) : (waited += 5) c.Sleep(5);
+    if (!reader.done.load(.acquire)) {
+        try w.print("[title] ПРОВАЛ: заголовок не прочитан за {d} мс — чтение ждёт поток окна; со «Стоп» это зависание намертво\n", .{wait_ms});
+        try w.flush();
+        // Поток висит в вызове Windows, дождаться его нельзя: выходим процессом.
+        thread.detach();
+        std.process.exit(1);
+    }
+    thread.join();
+    defer std.heap.page_allocator.destroy(reader);
+    const got = reader.buf[0..reader.len];
+    try w.print("[title] заголовок «{s}» прочитан за {d} мс, поток окна не понадобился\n", .{ got, waited });
+    if (!std.mem.eql(u8, got, title)) {
+        try w.print("[title] ПРОВАЛ: ждали «{s}»\n", .{title});
+        return 1;
+    }
+    try w.writeAll("[title] ЗАГОЛОВОК ЧИТАЕТСЯ БЕЗ ВЛАДЕЛЬЦА ОКНА\n");
     return 0;
 }
 
