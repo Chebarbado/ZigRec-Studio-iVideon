@@ -2,6 +2,11 @@
 const std = @import("std");
 const Io = std.Io;
 const zigrec = @import("zigrec");
+/// Есть ли в этой сборке самопроверки и стенды. Выключаются ключом
+/// `-Dbenches=false` — для exe, который отдаётся людям: стенды нужны
+/// `check.cmd`, а не тому, кто пишет экран. Условие времени компиляции:
+/// при `false` ветка не разбирается, и код стендов в exe не попадает.
+const benches = @import("build_options").benches;
 
 const usage =
     \\zigrec — рекордер экрана и редактор
@@ -142,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
         try w.writeAll(usage);
     } else if (eq(cmd, "--version") or eq(cmd, "-v")) {
         try w.print("zigrec {s} ({s})\n", .{ zigrec.version.VERSION, zigrec.version.VERSION_DATE });
-    } else if (eq(cmd, "capture-smoke")) {
+    } else if (benches and eq(cmd, "capture-smoke")) {
         const frames = argInt(args, 2, 240);
         const backend: zigrec.capture.Backend = if (args.len > 3) blk: {
             if (eq(args[3], "dxgi")) break :blk .dxgi;
@@ -150,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
             break :blk .auto;
         } else .auto;
         code = try captureSmoke(arena, w, frames, backend);
-    } else if (eq(cmd, "encode-smoke")) {
+    } else if (benches and eq(cmd, "encode-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");
             code = 2;
@@ -174,14 +179,14 @@ pub fn main(init: std.process.Init) !void {
         } else {
             code = try fileInfo(init.io, arena, w, args[2]);
         }
-    } else if (eq(cmd, "verify-mp4")) {
+    } else if (benches and eq(cmd, "verify-mp4")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");
             code = 2;
         } else {
             code = try verifyMp4(init.io, arena, w, args[2]);
         }
-    } else if (eq(cmd, "verify-raw")) {
+    } else if (benches and eq(cmd, "verify-raw")) {
         if (args.len < 5) {
             try w.writeAll("нужны файл, ширина и высота\n");
             code = 2;
@@ -210,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
             try w.print("окно не открылось: {s}\n", .{@errorName(err)});
             code = 1;
         };
-    } else if (eq(cmd, "animate")) {
+    } else if (benches and eq(cmd, "animate")) {
         const secs = argInt(args, 2, 10);
         const width = argInt(args, 3, 640);
         const height = argInt(args, 4, 360);
@@ -224,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
             painted,
             @as(f64, @floatFromInt(painted)) / @as(f64, @floatFromInt(@max(secs, 1))),
         });
-    } else if (eq(cmd, "audio-check")) {
+    } else if (benches and eq(cmd, "audio-check")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к WAV\n");
             code = 2;
@@ -234,34 +239,34 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mcp")) {
         code = try mcpBridge(init.io, arena, argInt(args, 2, zigrec.control.default_port));
-    } else if (eq(cmd, "listen-smoke")) {
+    } else if (benches and eq(cmd, "listen-smoke")) {
         code = try listenSmoke(init.io, w, @intCast(argInt(args, 2, 15690)));
-    } else if (eq(cmd, "nav-smoke")) {
+    } else if (benches and eq(cmd, "nav-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");
             code = 2;
         } else {
             code = try navSmoke(init.io, arena, w, args[2], argInt(args, 3, 40));
         }
-    } else if (eq(cmd, "open-smoke")) {
+    } else if (benches and eq(cmd, "open-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");
             code = 2;
         } else {
             code = try openSmoke(init.io, arena, w, args[2]);
         }
-    } else if (eq(cmd, "ui-smoke")) {
+    } else if (benches and eq(cmd, "ui-smoke")) {
         code = try uiSmoke(arena, w);
-    } else if (eq(cmd, "mix-smoke")) {
+    } else if (benches and eq(cmd, "mix-smoke")) {
         if (args.len < 4) {
             try w.writeAll("нужны исходник и куда писать смесь\n");
             code = 2;
         } else {
             code = try mixSmoke(init.io, arena, w, args[2], args[3]);
         }
-    } else if (eq(cmd, "loopback-smoke")) {
+    } else if (benches and eq(cmd, "loopback-smoke")) {
         code = try loopbackSmoke(arena, w);
-    } else if (eq(cmd, "loopback-record")) {
+    } else if (benches and eq(cmd, "loopback-record")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к mp4\n");
             code = 2;
@@ -269,91 +274,91 @@ pub fn main(init: std.process.Init) !void {
             const separate = args.len > 3 and eq(args[3], "--separate");
             code = try loopbackRecord(init.io, arena, w, args[2], separate);
         }
-    } else if (eq(cmd, "tracks-check")) {
+    } else if (benches and eq(cmd, "tracks-check")) {
         if (args.len < 4) {
             try w.writeAll("нужны путь к файлу и сколько ждём звуковых дорожек\n");
             code = 2;
         } else {
             code = try tracksCheck(init.io, arena, w, args[2], argInt(args, 3, 1));
         }
-    } else if (eq(cmd, "onset-spacing")) {
+    } else if (benches and eq(cmd, "onset-spacing")) {
         if (args.len < 4) {
             try w.writeAll("нужны путь к WAV и ожидаемый интервал в мс\n");
             code = 2;
         } else {
             code = try onsetSpacing(init.io, arena, w, args[2], argInt(args, 3, 1000));
         }
-    } else if (eq(cmd, "icons-smoke")) {
+    } else if (benches and eq(cmd, "icons-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к PNG\n");
             code = 2;
         } else {
             code = try iconsSmoke(init.io, arena, w, args[2]);
         }
-    } else if (eq(cmd, "window-smoke")) {
+    } else if (benches and eq(cmd, "window-smoke")) {
         code = try windowSmoke(init.io, w);
-    } else if (eq(cmd, "pause-smoke")) {
+    } else if (benches and eq(cmd, "pause-smoke")) {
         code = try pauseSmoke(arena, w, if (args.len > 2) args[2] else ".check\\pause.mp4");
-    } else if (eq(cmd, "still-smoke")) {
+    } else if (benches and eq(cmd, "still-smoke")) {
         code = try stillSmoke(arena, w, if (args.len > 2) args[2] else ".check\\still.mp4");
-    } else if (eq(cmd, "remote-smoke")) {
+    } else if (benches and eq(cmd, "remote-smoke")) {
         code = try remoteSmoke(w);
-    } else if (eq(cmd, "hotkey-smoke")) {
+    } else if (benches and eq(cmd, "hotkey-smoke")) {
         code = try hotkeySmoke(w, if (args.len > 2) args[2] else zigrec.hotkey.default_text);
-    } else if (eq(cmd, "gif-write-smoke")) {
+    } else if (benches and eq(cmd, "gif-write-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к GIF\n");
             code = 2;
         } else {
             code = try gifWriteSmoke(init.io, arena, w, args[2], argInt(args, 3, 12));
         }
-    } else if (eq(cmd, "gif-smoke")) {
+    } else if (benches and eq(cmd, "gif-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к GIF\n");
             code = 2;
         } else {
             code = try gifSmoke(init.io, arena, w, args[2], if (args.len > 3) args[3] else null);
         }
-    } else if (eq(cmd, "recent-smoke")) {
+    } else if (benches and eq(cmd, "recent-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужна папка\n");
             code = 2;
         } else {
             code = try recentSmoke(init.io, arena, w, args[2]);
         }
-    } else if (eq(cmd, "home-smoke")) {
+    } else if (benches and eq(cmd, "home-smoke")) {
         code = try homeSmoke(w);
-    } else if (eq(cmd, "shot-smoke")) {
+    } else if (benches and eq(cmd, "shot-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к картинке\n");
             code = 2;
         } else {
             code = try shotSmoke(init.io, arena, w, args[2], argInt(args, 3, 7));
         }
-    } else if (eq(cmd, "frame-smoke")) {
+    } else if (benches and eq(cmd, "frame-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу\n");
             code = 2;
         } else {
             code = try frameSmoke(arena, w, args[2], argInt(args, 3, 1), argInt(args, 4, 0));
         }
-    } else if (eq(cmd, "pack-smoke")) {
+    } else if (benches and eq(cmd, "pack-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к архиву\n");
             code = 2;
         } else {
             code = try packSmoke(init.io, arena, w, args[2]);
         }
-    } else if (eq(cmd, "project-smoke")) {
+    } else if (benches and eq(cmd, "project-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу проекта\n");
             code = 2;
         } else {
             code = try projectSmoke(init.io, arena, w, args[2]);
         }
-    } else if (eq(cmd, "mcp-smoke")) {
+    } else if (benches and eq(cmd, "mcp-smoke")) {
         code = try mcpSmoke(arena, w, argInt(args, 2, zigrec.control.default_port));
-    } else if (eq(cmd, "audio-sync")) {
+    } else if (benches and eq(cmd, "audio-sync")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к WAV\n");
             code = 2;
@@ -362,7 +367,7 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (eq(cmd, "mic")) {
         code = try micCheck(w, argInt(args, 2, 5));
-    } else if (eq(cmd, "stimulus")) {
+    } else if (benches and eq(cmd, "stimulus")) {
         // Раздражитель сам по себе — под ним меряют чужие программы записи.
         const seconds = argInt(args, 2, 30);
         var stim = zigrec.stimulus.Stimulus{};
@@ -376,52 +381,52 @@ pub fn main(init: std.process.Init) !void {
             try w.print("[stimulus] не поднялся: {s}\n", .{@errorName(err)});
             code = 1;
         }
-    } else if (eq(cmd, "capture-rate")) {
+    } else if (benches and eq(cmd, "capture-rate")) {
         code = try captureRate(w, argInt(args, 2, 3), if (args.len > 3 and eq(args[3], "gdi")) .gdi else .dxgi);
-    } else if (eq(cmd, "bench-run")) {
+    } else if (benches and eq(cmd, "bench-run")) {
         code = try benchRun(init.io, arena, w, argInt(args, 2, 10), argInt(args, 3, 60), if (args.len > 4) args[4] else ".check\\bench.mp4", argInt(args, 5, 1920), argInt(args, 6, 1080));
-    } else if (eq(cmd, "pixel-color")) {
+    } else if (benches and eq(cmd, "pixel-color")) {
         if (args.len < 10) {
             try w.writeAll("нужны: файл BGRA, ширина, высота, x, y, R, G, B\n");
             code = 2;
         } else {
             code = try pixelColor(init.io, arena, w, args[2], argInt(args, 3, 0), argInt(args, 4, 0), argInt(args, 5, 0), argInt(args, 6, 0), argInt(args, 7, 0), argInt(args, 8, 0), argInt(args, 9, 0));
         }
-    } else if (eq(cmd, "pixel-check")) {
+    } else if (benches and eq(cmd, "pixel-check")) {
         if (args.len < 7) {
             try w.writeAll("нужны: файл BGRA, ширина, высота, x, y\n");
             code = 2;
         } else {
             code = try pixelCheck(init.io, arena, w, args[2], argInt(args, 3, 0), argInt(args, 4, 0), argInt(args, 5, 0), argInt(args, 6, 0));
         }
-    } else if (eq(cmd, "events-smoke")) {
+    } else if (benches and eq(cmd, "events-smoke")) {
         if (args.len < 3) {
             try w.writeAll("нужен путь к файлу .events\n");
             code = 2;
         } else {
             code = try eventsSmoke(init.io, arena, w, args[2]);
         }
-    } else if (eq(cmd, "pan-smoke")) {
+    } else if (benches and eq(cmd, "pan-smoke")) {
         code = try panSmoke(w);
-    } else if (eq(cmd, "export-smoke")) {
+    } else if (benches and eq(cmd, "export-smoke")) {
         if (args.len < 4) {
             try w.writeAll("нужны исходник mp4 и выходной файл\n");
             code = 2;
         } else {
             code = try exportSmoke(arena, w, args[2], args[3], args.len > 4 and eq(args[4], "--offkey"), args.len > 4 and eq(args[4], "--burn"), args.len > 4 and eq(args[4], "--annot"));
         }
-    } else if (eq(cmd, "keyframes-smoke")) {
+    } else if (benches and eq(cmd, "keyframes-smoke")) {
         if (args.len < 4) {
             try w.writeAll("нужны путь к mp4 и файл со списком I-кадров от ffmpeg\n");
             code = 2;
         } else {
             code = try keyframesSmoke(arena, w, args[2], args[3]);
         }
-    } else if (eq(cmd, "clock-smoke")) {
+    } else if (benches and eq(cmd, "clock-smoke")) {
         code = try clockSmoke(w);
-    } else if (eq(cmd, "devices-smoke")) {
+    } else if (benches and eq(cmd, "devices-smoke")) {
         code = try devicesSmoke(w);
-    } else if (eq(cmd, "probe-smoke")) {
+    } else if (benches and eq(cmd, "probe-smoke")) {
         code = try probeSmoke(arena, w, argInt(args, 2, 1));
     } else if (eq(cmd, "monitors")) {
         code = try listMonitors(arena, w);
@@ -430,6 +435,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         try w.print("неизвестная команда: {s}\n\n", .{cmd});
         try w.writeAll(usage);
+        if (!benches) try w.writeAll("В этой сборке самопроверок и стендов нет (-Dbenches=false): команды *-smoke,\nbench-run и проверочные не работают. Полная сборка: zig build.\n");
         code = 2;
     }
 

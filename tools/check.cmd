@@ -59,6 +59,29 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem Сборка для людей: без самопроверок и стендов (-Dbenches=false). Она идёт
+rem в релиз, а check.cmd гоняет полную — значит, её надо хотя бы собрать,
+rem запустить и убедиться, что стендов в ней действительно нет.
+echo [check] сборка для людей, без самопроверок
+"%ZIG%" build -Doptimize=ReleaseFast -Dbenches=false --prefix ".check\user-exe"
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: сборка без самопроверок не собирается
+  exit /b 1
+)
+for %%f in (".check\user-exe\bin\zigrec.exe") do set "USERSIZE=%%~zf"
+set /a USERKB=%USERSIZE%/1024
+echo [check] zigrec.exe для людей: %USERKB% КБ
+".check\user-exe\bin\zigrec.exe" --version
+if errorlevel 1 (
+  echo [check] ПРОВАЛ: exe для людей не запускается
+  exit /b 1
+)
+".check\user-exe\bin\zigrec.exe" ui-smoke > nul
+if not errorlevel 2 (
+  echo [check] ПРОВАЛ: в exe для людей остались самопроверки
+  exit /b 1
+)
+
 echo [check] самопроверка захвата
 "zig-out\bin\zigrec.exe" capture-smoke 60
 if errorlevel 1 (

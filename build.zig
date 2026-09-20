@@ -4,6 +4,7 @@
 //!   zig build run       собрать и запустить
 //!   zig build test      прогнать все тесты
 //!   zig build -Doptimize=ReleaseFast   релизная сборка
+//!   zig build -Doptimize=ReleaseFast -Dbenches=false   exe для людей: без самопроверок
 //!
 //! Всё то же одной командой: tools\check.cmd (сборка + тесты).
 const std = @import("std");
@@ -49,6 +50,12 @@ pub fn build(b: *std.Build) void {
     // iphlpapi: адреса сетевых интерфейсов для выбора адреса MCP.
     core.linkSystemLibrary("iphlpapi", .{});
 
+    // Самопроверки и стенды в exe. По умолчанию есть — на них стоит
+    // tools\check.cmd; -Dbenches=false даёт exe для людей, без них.
+    const benches = b.option(bool, "benches", "Самопроверки и стенды в exe (по умолчанию да)") orelse true;
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "benches", benches);
+
     const exe = b.addExecutable(.{
         .name = "zigrec",
         .root_module = b.createModule(.{
@@ -61,6 +68,7 @@ pub fn build(b: *std.Build) void {
     });
     // Значок вшивается ресурсом: тогда он есть и у файла в проводнике,
     // и у окна, и в трее — из одного места, а не тремя разными путями.
+    exe.root_module.addOptions("build_options", build_options);
     exe.root_module.addWin32ResourceFile(.{ .file = b.path("assets/zigrec.rc") });
     b.installArtifact(exe);
 
